@@ -19,6 +19,7 @@ ARK_API_KEY=你的方舟APIKey
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_MODEL=doubao-seed-2-0-lite-260428
 ARK_VIDEO_FPS=0.5
+ARK_FILE_POLL_SECONDS=1
 ARK_FALLBACK_ON_ERROR=1
 ```
 

@@ -55,7 +55,7 @@ ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-0-lite-260428").strip()
 ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
-ARK_FILE_POLL_SECONDS = max(1.0, float(os.getenv("ARK_FILE_POLL_SECONDS", "2")))
+ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -864,6 +864,11 @@ def repair_action_subjects(blocks: list[dict[str, Any]], characters: list[str]) 
 
     active_subject: str | None = None
     for index, block in enumerate(blocks):
+        if block.get("type") in {"dialogue", "vo"}:
+            speaker = str(block.get("speaker") or "").strip()
+            if speaker in known:
+                active_subject = speaker
+            continue
         if block.get("type") != "action":
             continue
         text = str(block.get("text") or "").strip()
@@ -1121,13 +1126,27 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     continue
             blocks.append(block)
         block_priority = {"sound": 0, "emotion": 1, "action": 2, "dialogue": 3, "vo": 4}
-        blocks.sort(key=lambda item: (
-            item.get("startSec") is None,
-            item.get("startSec", 0),
-            block_priority.get(item.get("type"), 9),
-        ))
+        indexed_blocks = list(enumerate(blocks))
+        indexed_blocks.sort(key=lambda pair: (
+            0,
+            pair[1].get("startSec", 0),
+            block_priority.get(pair[1].get("type"), 9),
+            pair[0],
+        ) if pair[1].get("startSec") is not None else (1, pair[0]))
+        blocks = [block for _, block in indexed_blocks]
         blocks = compact_action_blocks(blocks)
-        repair_action_subjects(blocks, names(raw_scene.get("characters")) or names(script.get("characters")))
+        scene_characters = names(raw_scene.get("characters"))
+        fallback_characters = scene_characters + names(script.get("characters")) + [
+            str(profile.get("name") or "").strip()
+            for profile in character_profiles
+            if str(profile.get("name") or "").strip()
+        ]
+        repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
+        for block in blocks:
+            speaker = str(block.get("speaker") or "").strip()
+            if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"旁白", "未知说话人"}:
+                if speaker not in scene_characters:
+                    scene_characters.append(speaker)
         summary = normalize_text(
             raw_scene.get("summary")
             or raw_scene.get("transition")
@@ -1142,7 +1161,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             "location": scene_location,
             "timeOfDay": str(raw_scene.get("timeOfDay") or "不明"),
             "interiorExterior": str(raw_scene.get("interiorExterior") or "不明"),
-            "characters": names(raw_scene.get("characters")),
+            "characters": scene_characters,
             "environment": clean_environment(raw_scene.get("environment")),
             "summary": summary,
             "blocks": blocks,
@@ -1166,6 +1185,16 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"未知说话人", "未知男声", "未知女声", "旁白"} and speaker not in used_characters:
                 used_characters.append(speaker)
     used_profiles = [profile for profile in character_profiles if profile["name"] in used_characters]
+    profile_names = {str(profile.get("name") or "") for profile in used_profiles}
+    for name in used_characters:
+        if name not in profile_names:
+            used_profiles.append({
+                "id": f"character_{len(used_profiles) + 1:03d}",
+                "name": name,
+                "aliases": [],
+                "appearance": "",
+                "clothing": "",
+            })
     return {
         "version": str(script.get("version") or "1.0"),
         "title": str(script.get("title") or title),
@@ -1375,13 +1404,39 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     punctuation_ok = [bool(_SENTENCE_END_RE.search(str(block.get("text") or ""))) for block in dialogue]
     uncertain = sum(1 for block in dialogue if block.get("uncertain"))
     missing_summary = sum(1 for scene in scenes if not str(scene.get("summary") or "").strip())
+    action_blocks = [
+        block
+        for scene in scenes
+        for block in scene.get("blocks", [])
+        if block.get("type") == "action"
+    ]
+    known_characters = {
+        str(name).strip()
+        for name in (script.get("characters") or [])
+        if str(name).strip()
+    }
+    known_characters.update(
+        str(profile.get("name") or "").strip()
+        for profile in (script.get("characterProfiles") or [])
+        if isinstance(profile, dict) and str(profile.get("name") or "").strip()
+    )
+    action_subject_warnings = sum(
+        1
+        for block in action_blocks
+        if known_characters
+        and not any(str(block.get("text") or "").startswith(name) for name in known_characters)
+    )
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
-    warnings = sum(1 for ok in punctuation_ok if not ok) + uncertain + missing_summary
+    warnings = sum(1 for ok in punctuation_ok if not ok) + uncertain + missing_summary + action_subject_warnings
     return {
         "dialogueCoverage": coverage,
         "speakerConfidence": max(0, confidence),
         "warnings": warnings,
+        "sceneCount": len(scenes),
+        "dialogueCount": len(dialogue),
+        "actionCount": len(action_blocks),
+        "actionSubjectWarnings": action_subject_warnings,
         "provider": provider,
     }
 
@@ -1400,7 +1455,6 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
     if probed:
         duration = probed
         update_task(row["id"], duration_sec=duration)
-    await asyncio.sleep(0.25)
     ark_error: ArkError | None = None
     if ARK_API_KEY:
         try:
@@ -1455,16 +1509,11 @@ async def process_task(task_id: str) -> None:
     logger.info("task_start task_id=%s title=%s file=%s", task_id, row["title"], row["file_name"])
     try:
         mark_task_stage(task_id, status="running", stage="probing", progress_percent=12, message="正在读取视频信息")
-        await asyncio.sleep(0.15)
         mark_task_stage(task_id, status="running", stage="transcribing", progress_percent=34, message="正在整理语音和对白")
-        await asyncio.sleep(0.15)
         mark_task_stage(task_id, status="running", stage="vision", progress_percent=62, message="正在识别画面与动作")
         script, quality, usage = await run_recognizer(task_row(task_id))
-        await asyncio.sleep(0.15)
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在合并场景和人物")
-        await asyncio.sleep(0.15)
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
-        await asyncio.sleep(0.15)
         elapsed_ms = (time.perf_counter() - started) * 1000
         update_task(
             task_id,
