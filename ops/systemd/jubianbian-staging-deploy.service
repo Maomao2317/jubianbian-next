@@ -6,6 +6,6 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/jubianbian-staging/ops/deploy-staging.sh
+ExecStart=/usr/bin/env bash /opt/jubianbian-staging/ops/deploy-staging.sh
 StandardOutput=journal
 StandardError=journal
