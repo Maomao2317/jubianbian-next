@@ -1,0 +1,33 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "18000:8000"
+    expose:
+      - "8000"
+    environment:
+      JBB_ENVIRONMENT: staging
+      JBB_DATA_DIR: /app/data
+      JBB_MAX_UPLOAD_MB: ${JBB_MAX_UPLOAD_MB:-500}
+      JBB_MAX_DURATION_MINUTES: ${JBB_MAX_DURATION_MINUTES:-6}
+      JBB_RATE_LIMIT_API_PER_MINUTE: ${JBB_RATE_LIMIT_API_PER_MINUTE:-120}
+      JBB_RATE_LIMIT_CREATE_PER_WINDOW: ${JBB_RATE_LIMIT_CREATE_PER_WINDOW:-10}
+      JBB_RATE_LIMIT_CREATE_WINDOW_SECONDS: ${JBB_RATE_LIMIT_CREATE_WINDOW_SECONDS:-600}
+      JBB_TRUST_PROXY_HEADERS: ${JBB_TRUST_PROXY_HEADERS:-0}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_TRANSCRIPTION_MODEL: ${OPENAI_TRANSCRIPTION_MODEL:-whisper-1}
+      OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL:-gpt-4o-mini}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_MODEL: ${ARK_MODEL:-doubao-seed-2-0-lite-260428}
+      ARK_VIDEO_FPS: ${ARK_VIDEO_FPS:-0.5}
+      ARK_FALLBACK_ON_ERROR: ${ARK_FALLBACK_ON_ERROR:-1}
+    volumes:
+      - jbb-staging-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  jbb-staging-data:

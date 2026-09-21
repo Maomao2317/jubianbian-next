@@ -1,0 +1,11 @@
+.env
+*.env
+!.env.example
+node_modules/
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tar.gz
+outputs/
+ops/*.log

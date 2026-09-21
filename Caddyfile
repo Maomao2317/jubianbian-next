@@ -1,0 +1,9 @@
+# Interim HTTP reverse proxy. Replace :80 with the purchased domain after DNS
+# points to this server; Caddy will then issue and renew the HTTPS certificate.
+:80 {
+    encode gzip
+    request_body {
+        max_size 500MB
+    }
+    reverse_proxy app:8000
+}

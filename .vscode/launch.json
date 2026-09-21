@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "剧编编后端（FastAPI）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "app.main:app",
+        "--app-dir",
+        "${workspaceFolder}/backend",
+        "--reload",
+        "--port",
+        "8000"
+      ],
+      "envFile": "${workspaceFolder}/fangzhou.env",
+      "jinja": true
+    }
+  ]
+}

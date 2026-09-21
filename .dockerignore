@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+*.env
+.venv
+__pycache__
+*.py[cod]
+data
+backend/data
+backend/test-*
+*.mp4
+*.mov
+*.mkv
+node_modules
+.DS_Store
