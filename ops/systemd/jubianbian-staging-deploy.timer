@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll GitHub and deploy jubianbian staging
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

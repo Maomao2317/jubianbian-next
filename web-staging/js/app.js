@@ -275,6 +275,19 @@
     </div>`;
   }
 
+  function renderTaskTimeline(task) {
+    const events = Array.isArray(task.events) ? task.events : [];
+    if (!events.length) return "";
+    return `<section class="task-timeline">
+      <div class="timeline-head"><span class="aside-label">任务状态记录</span><span>${events.length} 条事件</span></div>
+      <div class="timeline-list">${events.map((event) => {
+        const label = event.stage ? (cfg.stageText[event.stage] || event.stage) : (cfg.statusText[event.status] || event.type);
+        const duration = Number.isFinite(Number(event.durationMs)) ? ` · ${Math.round(Number(event.durationMs))} ms` : "";
+        return `<div class="timeline-item"><i></i><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(event.message || "状态更新")}${duration}</span><small>${formatDate(event.createdAt)}</small></div></div>`;
+      }).join("")}</div>
+    </section>`;
+  }
+
   function renderDetail() {
     const task = state.current;
     if (!task) {
@@ -306,6 +319,7 @@
           ${downloadActions}
         </div>
         ${content}
+        ${renderTaskTimeline(task)}
       </section>`;
   }
 

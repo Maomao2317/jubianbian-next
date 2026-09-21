@@ -1,0 +1,11 @@
+[Unit]
+Description=Check jubianbian staging health and metrics
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/jubianbian-staging/ops/monitor-staging.sh
+StandardOutput=journal
+StandardError=journal

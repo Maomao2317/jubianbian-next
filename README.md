@@ -51,6 +51,16 @@ docker compose --env-file fangzhou.env -p jubianbian-staging \
 
 `jbb-data` volume 持久化 SQLite 数据和上传文件。生产环境建议在服务前配置 HTTPS 反向代理，并按实际域名、鉴权和额度策略补齐访问控制。
 
+## 自动部署、任务状态与监控
+
+测试环境可由服务器端定时器自动跟随 GitHub `main` 分支：每 2 分钟检查一次新提交，自动同步代码、重建测试容器并执行健康检查；正式环境不会被该流程触碰。首次在服务器执行：
+
+```bash
+sudo /opt/jubianbian-staging/ops/install-staging-automation.sh
+```
+
+应用会把请求耗时、请求 ID、任务阶段、方舟/备用服务耗时、失败原因写入 `data/logs/app.log`，并通过容器标准输出保留。`/api/health` 返回环境、运行时长和活动任务数；`/api/metrics` 返回任务计数、提供商配置状态和日志大小；`/api/tasks/{id}` 会附带任务事件时间线，另有 `/api/tasks/{id}/events` 可单独查询。
+
 `ops/backup_data.sh` 和 `ops/cleanup_data.sh` 用于定时备份与清理数据，
 详见 `ops/README.md`。备份应复制到服务器之外的对象存储或另一台机器。
 

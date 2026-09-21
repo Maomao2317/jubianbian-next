@@ -1,0 +1,11 @@
+[Unit]
+Description=Deploy GitHub main to jubianbian staging
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/jubianbian-staging/ops/deploy-staging.sh
+StandardOutput=journal
+StandardError=journal

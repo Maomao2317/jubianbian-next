@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from contextvars import ContextVar
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import mimetypes
 import os
 import re
@@ -40,6 +43,10 @@ RATE_LIMIT_API_PER_MINUTE = max(1, int(os.getenv("JBB_RATE_LIMIT_API_PER_MINUTE"
 RATE_LIMIT_CREATE_PER_WINDOW = max(1, int(os.getenv("JBB_RATE_LIMIT_CREATE_PER_WINDOW", "10")))
 RATE_LIMIT_CREATE_WINDOW_SECONDS = max(60, int(os.getenv("JBB_RATE_LIMIT_CREATE_WINDOW_SECONDS", "600")))
 TRUST_PROXY_HEADERS = os.getenv("JBB_TRUST_PROXY_HEADERS", "0").strip().lower() in {"1", "true", "yes"}
+JBB_ENVIRONMENT = os.getenv("JBB_ENVIRONMENT", "production").strip() or "production"
+JBB_LOG_LEVEL = os.getenv("JBB_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+JBB_LOG_MAX_BYTES = max(64 * 1024, int(os.getenv("JBB_LOG_MAX_BYTES", str(5 * 1024 * 1024))))
+JBB_LOG_BACKUP_COUNT = max(1, int(os.getenv("JBB_LOG_BACKUP_COUNT", "5")))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "whisper-1")
@@ -54,6 +61,42 @@ ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() 
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+APP_STARTED_MONOTONIC = time.monotonic()
+REQUEST_ID = ContextVar("request_id", default="-")
+
+
+def _configure_logging() -> logging.Logger:
+    logger = logging.getLogger("jubianbian")
+    logger.setLevel(getattr(logging, JBB_LOG_LEVEL, logging.INFO))
+    logger.propagate = False
+    if logger.handlers:
+        return logger
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    file_handler = RotatingFileHandler(
+        LOG_DIR / "app.log",
+        maxBytes=JBB_LOG_MAX_BYTES,
+        backupCount=JBB_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(stream)
+    logger.addHandler(file_handler)
+    return logger
+
+
+logger = _configure_logging()
+
+
+def safe_error_text(error: BaseException, limit: int = 1000) -> str:
+    message = str(error) or error.__class__.__name__
+    for secret in (ARK_API_KEY, OPENAI_API_KEY):
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+    return message[:limit]
 
 app = FastAPI(title="剧编编 API", version="0.1.0")
 app.add_middleware(
@@ -63,6 +106,38 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class RequestLogMiddleware(BaseHTTPMiddleware):
+    """Emit one request record with a correlation id and elapsed time."""
+
+    async def dispatch(self, request: Request, call_next: Any) -> Response:
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+        token = REQUEST_ID.set(request_id)
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception as exc:  # pragma: no cover - defensive middleware boundary
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.exception(
+                "request_failed request_id=%s method=%s path=%s duration_ms=%.1f error=%s",
+                request_id,
+                request.method,
+                request.url.path,
+                elapsed_ms,
+                safe_error_text(exc),
+            )
+            raise
+        finally:
+            REQUEST_ID.reset(token)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        response.headers["X-Request-ID"] = request_id
+        message = "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%.1f"
+        if request.url.path == "/api/health":
+            logger.debug(message, request_id, request.method, request.url.path, response.status_code, elapsed_ms)
+        else:
+            logger.info(message, request_id, request.method, request.url.path, response.status_code, elapsed_ms)
+        return response
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -144,6 +219,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RequestLogMiddleware)
 
 
 def now_iso() -> str:
@@ -199,6 +275,22 @@ def init_db() -> None:
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                status TEXT,
+                stage TEXT,
+                progress_percent INTEGER,
+                message TEXT NOT NULL DEFAULT '',
+                duration_ms REAL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
 
 
 init_db()
@@ -262,6 +354,105 @@ def update_task(task_id: str, **values: Any) -> None:
             f"UPDATE tasks SET {assignments} WHERE id = ?",
             (*values.values(), task_id),
         )
+
+
+def record_task_event(
+    task_id: str,
+    event_type: str,
+    message: str = "",
+    *,
+    status: str | None = None,
+    stage: str | None = None,
+    progress_percent: int | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    """Persist a small task timeline while keeping log messages searchable."""
+    try:
+        with db() as connection:
+            connection.execute(
+                """
+                INSERT INTO task_events
+                  (task_id, event_type, status, stage, progress_percent, message, duration_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    event_type,
+                    status,
+                    stage,
+                    progress_percent,
+                    message[:1000],
+                    duration_ms,
+                    now_iso(),
+                ),
+            )
+    except sqlite3.Error:
+        logger.exception("task_event_persist_failed task_id=%s event_type=%s", task_id, event_type)
+
+
+def mark_task_stage(
+    task_id: str,
+    *,
+    status: str,
+    stage: str,
+    progress_percent: int,
+    message: str,
+    event_type: str = "stage",
+) -> None:
+    update_task(task_id, status=status, stage=stage, progress_percent=progress_percent, error=None)
+    record_task_event(
+        task_id,
+        event_type,
+        message,
+        status=status,
+        stage=stage,
+        progress_percent=progress_percent,
+    )
+    logger.info(
+        "task_stage task_id=%s status=%s stage=%s progress=%s message=%s request_id=%s",
+        task_id,
+        status,
+        stage,
+        progress_percent,
+        message,
+        REQUEST_ID.get(),
+    )
+
+
+def task_events(task_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    with db() as connection:
+        rows = connection.execute(
+            """
+            SELECT event_type, status, stage, progress_percent, message, duration_ms, created_at
+            FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT ?
+            """,
+            (task_id, max(1, min(limit, 200))),
+        ).fetchall()
+    return [
+        {
+            "type": row["event_type"],
+            "status": row["status"],
+            "stage": row["stage"],
+            "progressPercent": row["progress_percent"],
+            "message": row["message"],
+            "durationMs": row["duration_ms"],
+            "createdAt": row["created_at"],
+        }
+        for row in reversed(rows)
+    ]
+
+
+def task_counts() -> dict[str, int]:
+    with db() as connection:
+        rows = connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
+    counts = {str(row["status"]): int(row["count"]) for row in rows}
+    return {
+        "queued": counts.get("queued", 0),
+        "running": counts.get("running", 0),
+        "done": counts.get("done", 0),
+        "failed": counts.get("failed", 0),
+        "total": sum(counts.values()),
+    }
 
 
 def task_row(task_id: str) -> sqlite3.Row | None:
@@ -1004,8 +1195,15 @@ def ark_usage(payload: Any) -> dict[str, int | None]:
 
 
 def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str, Any], dict[str, int | None]]:
+    started = time.perf_counter()
+    logger.info("provider_start provider=ark operation=video_recognize file=%s duration_sec=%.1f", path.name, duration_sec)
+    upload_started = time.perf_counter()
     file_id = ark_upload_video(path)
+    logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name, (time.perf_counter() - upload_started) * 1000)
+    wait_started = time.perf_counter()
     ark_wait_for_file(file_id)
+    logger.info("provider_step provider=ark operation=file_ready file=%s duration_ms=%.1f", path.name, (time.perf_counter() - wait_started) * 1000)
+    response_started = time.perf_counter()
     payload = ark_http(
         "POST",
         "/responses",
@@ -1020,6 +1218,7 @@ def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str
             }],
         }, ensure_ascii=False).encode("utf-8"),
     )
+    logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
     text = ark_response_text(payload)
     if not text:
         raise ArkError("方舟没有返回剧本文本")
@@ -1033,7 +1232,14 @@ def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str
         raw_script = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ArkError("方舟返回的剧本不是合法 JSON") from exc
-    return normalize_script(raw_script, title), ark_usage(payload)
+    script = normalize_script(raw_script, title)
+    logger.info(
+        "provider_done provider=ark operation=video_recognize file=%s duration_ms=%.1f scenes=%s",
+        path.name,
+        (time.perf_counter() - started) * 1000,
+        len(script.get("scenes") or []),
+    )
+    return script, ark_usage(payload)
 
 
 def openai_transcribe(path: Path) -> str:
@@ -1203,6 +1409,12 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             return script, quality, usage
         except ArkError as exc:
             ark_error = exc
+            logger.warning(
+                "provider_failed provider=ark task_id=%s status_code=%s error=%s",
+                row["id"],
+                exc.status_code,
+                safe_error_text(exc),
+            )
             if not ARK_FALLBACK_ON_ERROR:
                 raise
 
@@ -1215,6 +1427,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             script = await asyncio.to_thread(openai_script, row["title"], duration, transcript)
         except Exception as exc:
             openai_error = exc
+            logger.warning("provider_failed provider=openai task_id=%s error=%s", row["id"], safe_error_text(exc))
             # A provider outage should not break the local task/export loop.
             transcript = ""
             script = None
@@ -1238,18 +1451,21 @@ async def process_task(task_id: str) -> None:
     row = task_row(task_id)
     if not row:
         return
+    started = time.perf_counter()
+    logger.info("task_start task_id=%s title=%s file=%s", task_id, row["title"], row["file_name"])
     try:
-        update_task(task_id, status="running", stage="probing", progress_percent=12, error=None)
+        mark_task_stage(task_id, status="running", stage="probing", progress_percent=12, message="正在读取视频信息")
         await asyncio.sleep(0.15)
-        update_task(task_id, stage="transcribing", progress_percent=34)
+        mark_task_stage(task_id, status="running", stage="transcribing", progress_percent=34, message="正在整理语音和对白")
         await asyncio.sleep(0.15)
-        update_task(task_id, stage="vision", progress_percent=62)
+        mark_task_stage(task_id, status="running", stage="vision", progress_percent=62, message="正在识别画面与动作")
         script, quality, usage = await run_recognizer(task_row(task_id))
         await asyncio.sleep(0.15)
-        update_task(task_id, stage="merging", progress_percent=82)
+        mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在合并场景和人物")
         await asyncio.sleep(0.15)
-        update_task(task_id, stage="exporting", progress_percent=94)
+        mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         await asyncio.sleep(0.15)
+        elapsed_ms = (time.perf_counter() - started) * 1000
         update_task(
             task_id,
             status="done",
@@ -1265,19 +1481,81 @@ async def process_task(task_id: str) -> None:
             credits_used=0,
             completed_at=now_iso(),
         )
+        record_task_event(
+            task_id,
+            "completed",
+            "识别完成",
+            status="done",
+            stage="done",
+            progress_percent=100,
+            duration_ms=elapsed_ms,
+        )
+        logger.info(
+            "task_done task_id=%s provider=%s duration_ms=%.1f scenes=%s",
+            task_id,
+            usage.get("provider", "unknown"),
+            elapsed_ms,
+            len(script.get("scenes") or []),
+        )
     except Exception as exc:  # pragma: no cover - defensive boundary for background work
+        message = f"处理失败：{safe_error_text(exc)}"
         update_task(
             task_id,
             status="failed",
             stage="failed",
             progress_percent=100,
-            error=f"处理失败：{exc}",
+            error=message,
         )
+        record_task_event(
+            task_id,
+            "failed",
+            message,
+            status="failed",
+            stage="failed",
+            progress_percent=100,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+        logger.error("task_failed task_id=%s duration_ms=%.1f error=%s", task_id, (time.perf_counter() - started) * 1000, message)
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> Any:
+    try:
+        with db() as connection:
+            connection.execute("SELECT 1").fetchone()
+        counts = task_counts()
+        return {
+            "status": "ok",
+            "environment": JBB_ENVIRONMENT,
+            "uptimeSec": round(time.monotonic() - APP_STARTED_MONOTONIC, 1),
+            "activeTasks": counts["queued"] + counts["running"],
+            "timestamp": now_iso(),
+        }
+    except sqlite3.Error as exc:
+        logger.exception("health_degraded error=%s", safe_error_text(exc))
+        return JSONResponse(status_code=503, content={"status": "degraded", "environment": JBB_ENVIRONMENT})
+
+
+@app.get("/api/metrics")
+def metrics() -> dict[str, Any]:
+    counts = task_counts()
+    log_size = (LOG_DIR / "app.log").stat().st_size if (LOG_DIR / "app.log").exists() else 0
+    return {
+        "status": "ok",
+        "environment": JBB_ENVIRONMENT,
+        "uptimeSec": round(time.monotonic() - APP_STARTED_MONOTONIC, 1),
+        "tasks": counts,
+        "provider": {
+            "arkConfigured": bool(ARK_API_KEY),
+            "openaiConfigured": bool(OPENAI_API_KEY),
+            "arkModel": ARK_MODEL if ARK_API_KEY else None,
+        },
+        "logging": {
+            "level": JBB_LOG_LEVEL,
+            "fileBytes": log_size,
+        },
+        "timestamp": now_iso(),
+    }
 
 
 @app.get("/api/me")
@@ -1307,7 +1585,15 @@ def task_detail(task_id: str) -> dict[str, Any]:
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
+    task["events"] = task_events(task_id)
     return task
+
+
+@app.get("/api/tasks/{task_id}/events")
+def task_event_list(task_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    if not task_row(task_id):
+        raise HTTPException(status_code=404, detail="任务不存在或已被删除")
+    return task_events(task_id, limit)
 
 
 @app.post("/api/tasks")
@@ -1361,6 +1647,15 @@ async def create_task(
                 created,
             ),
         )
+    record_task_event(task_id, "created", "任务已创建", status="queued", stage="queued", progress_percent=4)
+    logger.info(
+        "task_created task_id=%s title=%s file=%s size_bytes=%s request_id=%s",
+        task_id,
+        task_title,
+        file_name,
+        size,
+        REQUEST_ID.get(),
+    )
     background.add_task(process_task, task_id)
     return get_task(task_id)  # type: ignore[return-value]
 
@@ -1373,6 +1668,8 @@ async def retry_task(task_id: str, background: BackgroundTasks) -> dict[str, Any
     if not Path(row["stored_path"]).exists():
         raise HTTPException(status_code=409, detail="原始视频已不存在，无法重试")
     update_task(task_id, status="queued", stage="queued", progress_percent=4, error=None, completed_at=None)
+    record_task_event(task_id, "retry", "任务已重新排队", status="queued", stage="queued", progress_percent=4)
+    logger.info("task_retry task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     background.add_task(process_task, task_id)
     return get_task(task_id)  # type: ignore[return-value]
 
@@ -1385,6 +1682,8 @@ def delete_task(task_id: str) -> Response:
     Path(row["stored_path"]).unlink(missing_ok=True)
     with db() as connection:
         connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+    logger.info("task_deleted task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     return Response(status_code=204)
 
 
