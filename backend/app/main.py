@@ -646,30 +646,30 @@ def ark_prompt(title: str, duration_sec: float) -> str:
         "这不是分镜表，也不是剪辑单：不要按一个镜头一个 block 输出，不要写正反打、特写、近景、推拉摇移或镜头切换。"
         "只返回一个合法 JSON 对象，不要 Markdown、不要代码围栏、不要解释。"
         "JSON 结构必须是："
-        "{version:string,title:string,characters:string[],characterProfiles:[{id:string,name:string,aliases:string[],appearance:string,clothing:string}],"
+        "{version:string,title:string,characters:string[],characterProfiles:[{id:string,name:string,aliases:string[],appearance:string,clothing:string,firstAppearance:string}],"
         "scenes:[{id:string,heading:string,location:string,timeOfDay:string,interiorExterior:string,segmentType:'main'|'recap'|'trailer'|'title_card'|'credits',summary:string,characters:string[],environment:string,"
         "blocks:[{type:'action',text:string,emotion:string,startSec:number,endSec:number}|"
         "{type:'dialogue',speaker:string,emotion:string,emotionImportant:boolean,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,startSec:number,endSec:number}|"
-        "{type:'vo',speaker:string,emotion:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,inferred:boolean,startSec:number,endSec:number}|"
+        "{type:'vo',speaker:string,voKind:'os'|'narration'|'memory'|'phone'|'unknown',emotion:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,inferred:boolean,startSec:number,endSec:number}|"
         "{type:'sound',category:'effect'|'ambience',source:'heard',importance:'plot'|'atmosphere',text:string,startSec:number,endSec:number}|"
         "{type:'emotion',text:string,startSec:number,endSec:number}]}]}。"
         "必须遵守以下规则："
         "1. heading 必须严格使用‘编号 时段 内外 地点’，例如‘1-1 夜 外 酒店门口’、‘1-2 日 内 酒店房间’；时段只用日、夜、清晨、黄昏或不明，内外只用内、外或不明。"
         "2. 每个 main 场景必须填写 summary：用一到两句说明本场景的起因、冲突/行动、结果，以及结果如何推动下一场；这是剧情衔接，不要写镜头调度。"
         "3. 只有地点、时间、内外景或叙事目的真正变化才新建场景。同一地点的连续对白和动作必须放在同一场景，按‘剧情段落/事件’组织，不要按剪辑镜头切碎。"
-        "4. 连续动作要完整覆盖因果和数量：每一次明确的拳击、推搡、开门、拿取、进出、转身离开都不能漏写；如果是第一拳、第二拳，要按实际顺序明确写出，不能只写‘打了几拳’或只写最后结果，也不能凭空增加动作。每个 action 句都必须写规范人物名、动作和对象，不要让句子以‘狠狠拽住’、‘随后离开’、‘故意看向’这类无主语短语开头；看不清时写‘未知人物’，不要猜。"
+        "4. 连续动作要完整覆盖因果和数量：每一次明确的拳击、推搡、开门、拿取、进出、转身离开都不能漏写；如果是第一拳、第二拳，要按实际顺序明确写出，不能只写‘打了几拳’或只写最后结果，也不能凭空增加动作。动作必须保留视频里实际听见/看见的动词和对象，不要把‘推’改写成‘撞’、把‘拿’概括成‘处理’。每个 action 句都必须写规范人物名、动作和对象，不要让句子以‘狠狠拽住’、‘随后离开’、‘故意看向’这类无主语短语开头；看不清时写‘未知人物’，不要猜。"
         "5. 指尖发白、眼里有血丝、眼神一闪、呼吸变化等只作为动作段中的补充，不得单独成为一个镜头/block；只有它直接改变人物决定或剧情结果时才保留。"
         "6. 严禁写‘特写、近景、正反打、镜头切到、推近、拉远、俯拍、仰拍、画面给到’等拍摄或剪辑指令。后期剪辑处理不进入剧本正文。"
         "7. environment 只写理解剧情必需的地点、人物空间关系和关键道具，最多一到两句；不写‘画面一开始/视频时长/镜头中可以看到’等泛泛开场句，不堆砌灯光、颜色、树叶等无关布景。"
-        "8. 人物第一次出现时写能帮助识别和表演的外观或服装；与剧情无关的颜色、饰品和装饰不要堆砌。"
-        "9. dialogue 必须一人一句、完整保留原话，不能改写成剧情概括，不能省略、合并或补写听不清的内容。先根据语气和语法恢复准确中文标点：逗号分隔分句，句末使用‘。’、‘？’、‘！’或‘……’，不要输出无标点的长句，也不要连续重复标点。听不清的人名、称谓和代词保留‘[听不清]’，confidence 写 low、uncertain 写 true。"
+        "8. 人物第一次出现时，必须在 characterProfiles 的 firstAppearance、appearance 或 clothing 中补齐视频实际可见的识别信息；只写能帮助表演的外观/服装，不要猜年龄、身份或剧情之外的颜色饰品。看不清就留空并标记需要核对。"
+        "9. dialogue 必须一人一句、完整保留原话，不能改写成剧情概括，不能省略、合并、调换顺序或补写听不清的内容。台词文字是不可改写字段：只允许恢复中文标点和清理空白，不能替换同义词。每个 dialogue block 只能对应一个 speaker；发现说话人切换就拆成多个 block，仍逐字保留。先根据语气和语法恢复准确中文标点：逗号分隔分句，句末使用‘。’、‘？’、‘！’或‘……’，不要输出无标点的长句，也不要连续重复标点。听不清的人名、称谓和代词保留‘[听不清]’，confidence 写 low、uncertain 写 true。"
         "10. 对白默认不填写 emotion，也不要每句对白后重复括号情绪；只有情绪本身是剧情信息且不靠台词已经显而易见时，才把 emotionImportant 写 true。关键转折可单独使用 emotion block。"
-        "11. 人物或旁白的画外音、内心声、回忆声、电话另一端声音必须使用 type=vo，并在 speaker 写对应人物名或‘旁白’，不能混成普通 dialogue，也不能漏标。若声音来源无法确认，speaker 写‘未知说话人’并标 uncertain。没有声音依据时不能臆造 VO。"
+        "11. 人物或旁白的画外音、内心声、回忆声、电话另一端声音必须使用 type=vo，并在 speaker 写对应人物名或‘旁白’，不能混成普通 dialogue，也不能漏标。voKind 必须分别写 os（明确是人物内心独白）、narration（旁白/画外音）、memory（回忆声）或 phone（电话另一端）；没有明确证据时写 unknown，不得把普通旁白猜成 OS。若声音来源无法确认，speaker 写‘未知说话人’并标 uncertain。没有声音依据时不能臆造 VO。"
         "12. 正式扒剧本不输出背景音乐；sound 只保留原片确实听到且对剧情有作用的动作音效或环境声，例如电话铃、关门声、撞击声、车辆鸣笛，不要罗列无关的电流声、风声和布景声。"
         "13. characterProfiles 中为每个人建立唯一 id、规范 name 和 aliases；正文所有 speaker 和 characters 必须使用同一个规范 name，不能混用‘男主’、‘江川’等称呼。"
         "14. segmentType 为 recap、trailer、title_card 或 credits 的内容默认不要写入正文；片头片尾包装、封面、标题卡、上集回顾和高光预告不能当成新剧情。"
         "15. startSec 和 endSec 填写画面或声音的大致秒数并保持顺序；时间只用于回看定位，不要据此拆成镜头。无法判断时才填 0。"
-        "没有把握的内容使用‘不明’、‘未知说话人’或‘[听不清]’，不要编造视频之外的事实；优先保证剧情因果、台词准确和人物一致。"
+        "没有把握的内容使用‘不明’、‘未知说话人’或‘[听不清]’，不要编造视频之外的事实；优先保证剧情因果、台词准确、动作动词保真和人物一致。"
         f"视频标题：{title}；视频时长：{duration_sec:.1f} 秒。"
     )
 
@@ -730,6 +730,26 @@ _MICRO_DETAIL_RE = re.compile(
 _MAJOR_ACTION_RE = re.compile(
     r"(?:打|拳|踢|推|拽|抓|抱|吻|亲|拿|递|抢|夺|摔|砸|撞|开门|关门|进门|出门|上车|下车|离开|转身|倒地|站起|冲|追|挡|拦|撕|拔|掏|递给|扔|躲|扑)"
 )
+_VO_KINDS = {"os", "narration", "memory", "phone", "unknown"}
+_VO_KIND_ALIASES = {
+    "inner_monologue": "os",
+    "inner-monologue": "os",
+    "monologue": "os",
+    "thought": "os",
+    "os": "os",
+    "旁白": "narration",
+    "画外音": "narration",
+    "narration": "narration",
+    "voiceover": "narration",
+    "voice_over": "narration",
+    "回忆": "memory",
+    "回忆声": "memory",
+    "memory": "memory",
+    "电话": "phone",
+    "电话声": "phone",
+    "phone": "phone",
+}
+_DIALOGUE_LABEL_RE = re.compile(r"(?:^|[。！？…\n])\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9· ]{0,14})\s*[：:]")
 
 
 def normalize_text(text: Any, *, sentence: bool = False) -> str:
@@ -747,6 +767,94 @@ def normalize_text(text: Any, *, sentence: bool = False) -> str:
     if sentence and value and not _SENTENCE_END_RE.search(value):
         value += "？" if _QUESTION_END_RE.search(value) else "。"
     return value
+
+
+def normalize_dialogue_text(text: Any) -> str:
+    """Normalize only typography around a recovered line.
+
+    Dialogue is treated as immutable content. This helper deliberately does not
+    join, summarize, or remove speaker words; it only applies the same Unicode
+    punctuation cleanup used by exports and restores a terminal mark.
+    """
+    return normalize_text(text, sentence=True)
+
+
+def dialogue_integrity_issues(text: str, speaker: str) -> list[str]:
+    """Return deterministic warnings for likely mixed-speaker dialogue.
+
+    We do not guess how to rewrite a suspect line. Keeping the original text and
+    surfacing a warning is safer than silently dropping or paraphrasing words.
+    """
+    labels = [match.group(1).strip() for match in _DIALOGUE_LABEL_RE.finditer(text)]
+    unique_labels = list(dict.fromkeys(label for label in labels if label))
+    issues: list[str] = []
+    if len(unique_labels) > 1:
+        issues.append("mixed_speakers")
+    if unique_labels and speaker not in {"", "未知说话人"} and unique_labels[0] != speaker:
+        issues.append("speaker_label_mismatch")
+    if "\n" in text and len([line for line in text.splitlines() if line.strip()]) > 1:
+        issues.append("multiple_lines")
+    return issues
+
+
+def split_explicitly_mixed_dialogue(block: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split only unambiguous ``甲：...乙：...`` lines.
+
+    The spoken words are copied verbatim into separate blocks. If the pattern is
+    not unambiguous, the original block is returned untouched and its warning is
+    left for QA instead of risking a destructive guess.
+    """
+    if block.get("type") != "dialogue":
+        return [block]
+    text = str(block.get("_dialogueSource") or block.get("text") or "")
+    matches = list(_DIALOGUE_LABEL_RE.finditer(text))
+    labels = list(dict.fromkeys(match.group(1).strip() for match in matches if match.group(1).strip()))
+    if len(labels) < 2 or not matches or matches[0].start() > len(text) - len(text.lstrip()):
+        return [block]
+    pieces: list[dict[str, Any]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        spoken = normalize_dialogue_text(text[match.end():end])
+        if not spoken:
+            continue
+        piece = dict(block)
+        piece["speaker"] = match.group(1).strip()
+        piece["text"] = spoken
+        if block.get("sourceText") is not None:
+            piece["sourceText"] = text[match.end():end].strip()
+        piece["dialogueIssues"] = ["split_mixed_speakers"]
+        piece["uncertain"] = True
+        pieces.append(piece)
+    return pieces or [block]
+
+
+def normalize_vo_kind(raw_kind: Any, raw_type: str, speaker: str) -> str:
+    value = str(raw_kind or "").strip().casefold()
+    if raw_type in {"inner_monologue", "os"} or value in {"inner_monologue", "inner-monologue", "monologue", "thought", "os"}:
+        return "os"
+    if value in _VO_KIND_ALIASES:
+        return _VO_KIND_ALIASES[value]
+    if speaker.strip().casefold() in {"os", "内心独白", "内心声"}:
+        return "os"
+    return "unknown" if value and value not in _VO_KINDS else (value or "narration")
+
+
+def order_blocks_without_crossing_sentences(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order timestamped blocks only when every block has a timestamp.
+
+    A partial timestamp set is not reliable enough to move an untimed dialogue
+    line across a later action. In that case the model's original event order is
+    the least destructive representation. Equal timestamps remain stable.
+    """
+    if not blocks or any(block.get("startSec") is None for block in blocks):
+        return blocks
+    return [
+        block
+        for _, block in sorted(
+            enumerate(blocks),
+            key=lambda pair: (pair[1].get("startSec", 0), pair[0]),
+        )
+    ]
 
 
 def clean_action_text(text: Any) -> str:
@@ -1007,12 +1115,23 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if not name:
                 continue
             aliases = names(value.get("aliases"))
+            appearance = str(value.get("appearance") or "").strip()
+            clothing = str(value.get("clothing") or "").strip()
+            first_appearance = str(
+                value.get("firstAppearance")
+                or value.get("introduction")
+                or value.get("intro")
+                or ""
+            ).strip()
+            if not first_appearance and (appearance or clothing):
+                first_appearance = "；".join(item for item in (appearance, clothing) if item)
             row = {
                 "id": str(value.get("id") or f"character_{index:03d}"),
                 "name": name,
                 "aliases": aliases,
-                "appearance": str(value.get("appearance") or "").strip(),
-                "clothing": str(value.get("clothing") or "").strip(),
+                "appearance": appearance,
+                "clothing": clothing,
+                "firstAppearance": first_appearance,
             }
             result.append(row)
         return result
@@ -1083,8 +1202,15 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block_type = "action"
             if block_type == "action":
                 text = clean_action_text(text)
-            elif block_type in {"dialogue", "vo"}:
-                text = normalize_text(text, sentence=True)
+            elif block_type == "dialogue":
+                # Never merge or paraphrase dialogue while normalizing it.
+                # `sourceText`/`verbatimText` is accepted for providers that
+                # return both the raw transcript and display text.
+                source_text = raw_block.get("sourceText") or raw_block.get("verbatimText")
+                dialogue_source = source_text if source_text else text
+                text = normalize_dialogue_text(dialogue_source)
+            elif block_type == "vo":
+                text = normalize_dialogue_text(text)
             else:
                 text = normalize_text(text)
             if not text:
@@ -1092,6 +1218,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             block: dict[str, Any] = {"type": block_type, "text": text}
             start = number(raw_block.get("startSec"))
             end = number(raw_block.get("endSec"))
+            if start is not None and end is not None and end < start:
+                start, end = end, start
             if start is not None:
                 block["startSec"] = start
             if end is not None:
@@ -1101,8 +1229,15 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block_type == "dialogue":
                 speaker = str(raw_block.get("speaker") or "未知说话人").strip()
                 block["speaker"] = alias_map.get(speaker.casefold(), speaker)
+                if source_text:
+                    block["sourceText"] = str(dialogue_source).strip()
                 block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
                 block["uncertain"] = truthy(raw_block.get("uncertain")) or block["confidence"] == "low"
+                issues = dialogue_integrity_issues(str(dialogue_source), block["speaker"])
+                if issues:
+                    block["dialogueIssues"] = issues
+                    block["uncertain"] = True
+                    block["_dialogueSource"] = str(dialogue_source)
                 # Dialogue emotion is intentionally omitted from the screenplay
                 # body. Repeated parentheticals make every line feel like a
                 # shot list; a genuinely plot-changing turn can be represented
@@ -1110,9 +1245,11 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block["emotion"] = ""
                 block["emotionImportant"] = False
             elif block_type == "vo":
-                speaker = str(raw_block.get("speaker") or "旁白").strip()
+                speaker = str(raw_block.get("speaker") or ("未知说话人" if raw_type in {"os", "inner_monologue"} else "旁白")).strip()
                 speaker = alias_map.get(speaker.casefold(), speaker)
                 block["speaker"] = speaker
+                block["voKind"] = normalize_vo_kind(raw_block.get("voKind") or raw_block.get("voiceType"), raw_type, speaker)
+                block["isInnerMonologue"] = block["voKind"] == "os"
                 block["inferred"] = truthy(raw_block.get("inferred"))
                 block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
                 block["uncertain"] = truthy(raw_block.get("uncertain")) or block["confidence"] == "low"
@@ -1124,16 +1261,15 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 # in a later adaptation pass, not in the recovered transcript.
                 if block["source"] != "heard" or block["category"] == "music":
                     continue
-            blocks.append(block)
-        block_priority = {"sound": 0, "emotion": 1, "action": 2, "dialogue": 3, "vo": 4}
-        indexed_blocks = list(enumerate(blocks))
-        indexed_blocks.sort(key=lambda pair: (
-            0,
-            pair[1].get("startSec", 0),
-            block_priority.get(pair[1].get("type"), 9),
-            pair[0],
-        ) if pair[1].get("startSec") is not None else (1, pair[0]))
-        blocks = [block for _, block in indexed_blocks]
+            if block_type == "dialogue" and "mixed_speakers" in block.get("dialogueIssues", []):
+                blocks.extend(split_explicitly_mixed_dialogue(block))
+            else:
+                blocks.append(block)
+        for block in blocks:
+            if block.get("type") == "dialogue":
+                block["speaker"] = alias_map.get(str(block.get("speaker") or "").casefold(), block.get("speaker"))
+                block.pop("_dialogueSource", None)
+        blocks = order_blocks_without_crossing_sentences(blocks)
         blocks = compact_action_blocks(blocks)
         scene_characters = names(raw_scene.get("characters"))
         fallback_characters = scene_characters + names(script.get("characters")) + [
@@ -1144,7 +1280,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
         for block in blocks:
             speaker = str(block.get("speaker") or "").strip()
-            if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"旁白", "未知说话人"}:
+            if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"旁白", "未知说话人", "OS", "内心独白"}:
                 if speaker not in scene_characters:
                     scene_characters.append(speaker)
         summary = normalize_text(
@@ -1182,7 +1318,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 used_characters.append(character)
         for block in scene.get("blocks", []):
             speaker = block.get("speaker")
-            if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"未知说话人", "未知男声", "未知女声", "旁白"} and speaker not in used_characters:
+            if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"未知说话人", "未知男声", "未知女声", "旁白", "OS", "内心独白"} and speaker not in used_characters:
                 used_characters.append(speaker)
     used_profiles = [profile for profile in character_profiles if profile["name"] in used_characters]
     profile_names = {str(profile.get("name") or "") for profile in used_profiles}
@@ -1194,6 +1330,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 "aliases": [],
                 "appearance": "",
                 "clothing": "",
+                "firstAppearance": "首登外观/服装待核对",
             })
     return {
         "version": str(script.get("version") or "1.0"),
@@ -1312,10 +1449,10 @@ def openai_script(title: str, duration_sec: float, transcript: str) -> dict[str,
     prompt = (
         "请把下面这段短视频转写整理为可编辑的中文短剧场景剧本。只返回 JSON，不要 Markdown。"
         "不要做逐镜头分镜，不要写特写、正反打、推拉摇移或剪辑指令；同一场景连续动作合并成剧情段落。"
-        "JSON 必须包含 version、title、characters、characterProfiles、scenes；scenes 内包含 id、heading、location、timeOfDay、interiorExterior、segmentType、summary、characters、environment、blocks。"
+        "JSON 必须包含 version、title、characters、characterProfiles、scenes；characterProfiles 内包含 id、name、aliases、appearance、clothing、firstAppearance；scenes 内包含 id、heading、location、timeOfDay、interiorExterior、segmentType、summary、characters、environment、blocks。"
         "summary 必须说明本场景的起因、行动、结果和下一步动机，作为剧情衔接。environment 只保留必要空间关系和道具，不要写‘画面一开始’或视频时长。"
-        "blocks 可使用 action、dialogue、vo、sound、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名和动作对象，不能省略动作主语。"
-        "dialogue 必须完整保留转写原话，一人一句，不省略不改写，并恢复准确中文标点；对白默认不写 emotion。人物/旁白画外音、内心声、电话声必须使用 vo，speaker 写对应人物或旁白，不能漏标。"
+        "blocks 可使用 action、dialogue、vo、sound、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名、视频中实际动词和动作对象，不能省略动作主语或把动作概括成泛化词。"
+        "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；每个 block 只能有一个 speaker。人物/旁白画外音、内心声、电话声必须使用 vo，speaker 写对应人物或旁白，voKind 区分 os、narration、memory、phone、unknown，不能漏标或把旁白猜成 OS。"
         "sound 只描述原片中确实听到且有用的动作音效或环境声，不输出背景音乐。"
         f"视频标题：{title}\n视频时长：{duration_sec:.1f} 秒\n转写：{transcript}"
     )
@@ -1356,7 +1493,8 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             name = profile.get("name") or "人物"
             appearance = profile.get("appearance") or ""
             clothing = profile.get("clothing") or ""
-            details = "；".join(item for item in (appearance, clothing) if item)
+            first_appearance = profile.get("firstAppearance") or ""
+            details = "；".join(dict.fromkeys(item for item in (first_appearance, appearance, clothing) if item))
             lines.append(f"- {name}：{details}" if details else f"- {name}")
         lines.append("")
     for scene in script.get("scenes", []):
@@ -1378,7 +1516,11 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             elif block_type in {"vo", "os"}:
                 inferred = "（推断）" if block.get("inferred") else ""
                 speaker = block.get("speaker") or "旁白"
-                label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker} VO"
+                vo_kind = block.get("voKind")
+                if vo_kind == "os" or block.get("isInnerMonologue") or block_type == "os":
+                    label = "OS" if speaker in {"旁白", "未知说话人", "OS", "内心独白"} else f"{speaker} OS"
+                else:
+                    label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker} VO"
                 lines.append(f"{label}{inferred}：{block.get('text', '')}")
             elif block_type == "sound":
                 category = block.get("category") or "音效"
@@ -1426,9 +1568,46 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         if known_characters
         and not any(str(block.get("text") or "").startswith(name) for name in known_characters)
     )
+    dialogue_integrity_warnings = sum(
+        1
+        for block in dialogue
+        if block.get("type") == "dialogue" and block.get("dialogueIssues")
+    )
+    dialogue_mixed_speaker_warnings = sum(
+        1
+        for block in dialogue
+        if any(issue in {"mixed_speakers", "split_mixed_speakers"} for issue in (block.get("dialogueIssues") or []))
+    )
+    vo_classification_warnings = sum(
+        1
+        for block in dialogue
+        if block.get("type") == "vo" and block.get("voKind") in {"unknown", ""}
+    )
+    profile_by_name = {
+        str(profile.get("name") or "").strip(): profile
+        for profile in (script.get("characterProfiles") or [])
+        if isinstance(profile, dict) and str(profile.get("name") or "").strip()
+    }
+    character_introduction_warnings = sum(
+        1
+        for name in known_characters
+        if not any(
+            (value := str(profile_by_name.get(name, {}).get(field) or "").strip())
+            and "待核对" not in value
+            for field in ("firstAppearance", "appearance", "clothing")
+        )
+    )
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
-    warnings = sum(1 for ok in punctuation_ok if not ok) + uncertain + missing_summary + action_subject_warnings
+    warnings = (
+        sum(1 for ok in punctuation_ok if not ok)
+        + uncertain
+        + missing_summary
+        + action_subject_warnings
+        + dialogue_integrity_warnings
+        + vo_classification_warnings
+        + character_introduction_warnings
+    )
     return {
         "dialogueCoverage": coverage,
         "speakerConfidence": max(0, confidence),
@@ -1437,6 +1616,10 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         "dialogueCount": len(dialogue),
         "actionCount": len(action_blocks),
         "actionSubjectWarnings": action_subject_warnings,
+        "dialogueIntegrityWarnings": dialogue_integrity_warnings,
+        "dialogueMixedSpeakerWarnings": dialogue_mixed_speaker_warnings,
+        "voClassificationWarnings": vo_classification_warnings,
+        "characterIntroductionWarnings": character_introduction_warnings,
         "provider": provider,
     }
 

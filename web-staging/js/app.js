@@ -217,7 +217,10 @@
         return `<p class="dialogue">${time}<strong>${escapeHtml(block.speaker || "未知说话人")}</strong>${warning}<span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "vo" || block.type === "os") {
-        const speaker = block.speaker && !["旁白", "未知说话人", "OS"].includes(block.speaker) ? `${escapeHtml(block.speaker)} VO` : "VO";
+        const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
+        const speaker = block.speaker && !["旁白", "未知说话人", "OS", "内心独白"].includes(block.speaker)
+          ? `${escapeHtml(block.speaker)} ${isOs ? "OS" : "VO"}`
+          : (isOs ? "OS" : "VO");
         return `<p class="os-line">${time}<strong>${speaker}${block.inferred ? "（推断）" : ""}</strong><span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "sound") {
@@ -237,7 +240,7 @@
       </div>
       ${Array.isArray(script.characterProfiles) && script.characterProfiles.length ? `<section class="character-profiles">
         <h3>人物表</h3>
-        ${script.characterProfiles.map((profile) => `<p><strong>${escapeHtml(profile.name || "人物")}</strong><span>${escapeHtml([profile.appearance, profile.clothing].filter(Boolean).join("；"))}</span></p>`).join("")}
+        ${script.characterProfiles.map((profile) => `<p><strong>${escapeHtml(profile.name || "人物")}</strong><span>${escapeHtml([profile.firstAppearance, profile.appearance, profile.clothing].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join("；"))}</span></p>`).join("")}
       </section>` : ""}
       ${script.scenes.map((scene) => `<section class="scene">
         <h3>${escapeHtml(scene.heading)}</h3>

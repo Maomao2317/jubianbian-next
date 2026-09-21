@@ -138,7 +138,10 @@
     if (Array.isArray(script.characterProfiles) && script.characterProfiles.length) {
       lines.push("## 人物表", "");
       script.characterProfiles.forEach((profile) => {
-        const details = [profile.appearance, profile.clothing].filter(Boolean).join("；");
+        const details = [profile.firstAppearance, profile.appearance, profile.clothing]
+          .filter(Boolean)
+          .filter((value, index, values) => values.indexOf(value) === index)
+          .join("；");
         lines.push(`- ${profile.name}${details ? `：${details}` : ""}`);
       });
       lines.push("");
@@ -152,9 +155,10 @@
         if (block.type === "dialogue") {
           lines.push(`${block.speaker}${block.uncertain ? "【需核对】" : ""}：${block.text}`);
         } else if (block.type === "vo" || block.type === "os") {
-          const label = block.speaker && !["旁白", "未知说话人", "OS"].includes(block.speaker)
-            ? `${block.speaker} VO`
-            : "VO";
+          const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
+          const label = block.speaker && !["旁白", "未知说话人", "OS", "内心独白"].includes(block.speaker)
+            ? `${block.speaker} ${isOs ? "OS" : "VO"}`
+            : (isOs ? "OS" : "VO");
           lines.push(`${label}${block.inferred ? "（推断）" : ""}：${block.text}`);
         } else if (block.type === "sound") {
           lines.push(`【${block.category || "音效"}】${block.text}`);
