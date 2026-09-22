@@ -65,4 +65,9 @@ sudo /opt/jubianbian-staging/ops/install-staging-automation.sh
 `ops/backup_data.sh` 和 `ops/cleanup_data.sh` 用于定时备份与清理数据，
 详见 `ops/README.md`。备份应复制到服务器之外的对象存储或另一台机器。
 
+账号注册使用腾讯云 SES 事务邮件发送 6 位邮箱验证码。部署时在 `.env` 配置
+`TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY`、`TENCENTCLOUD_REGION` 和
+已在腾讯云 SES 校验通过的 `TENCENTCLOUD_SES_FROM_EMAIL`；本地没有腾讯云密钥时可
+保留 `JBB_AUTH_ALLOW_DEV_CODE=1`，接口会返回开发验证码用于联调，正式环境请设为 `0`。
+
 配置 `ARK_API_KEY` 后，任务会优先走“上传视频 → 方舟 Responses API → 结构化剧本 → Markdown/TXT 导出”的真实链路。方舟返回限流、额度耗尽或暂时不可用时，默认（`ARK_FALLBACK_ON_ERROR=1`）自动尝试 OpenAI，仍不可用则使用本地兜底剧本完成上传、任务状态和导出闭环，并在识别概况中显示降级提示；需要严格暴露服务故障时可将该开关设为 `0`。

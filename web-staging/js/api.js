@@ -178,6 +178,28 @@
       await delay(90);
       return clone(mockStore.profile);
     },
+    async requestCode(email) {
+      await delay(120);
+      if (!email || !email.includes("@")) throw new Error("请输入正确的邮箱地址");
+      return { message: "开发验证码已生成", devCode: "123456", expiresIn: 600 };
+    },
+    async login(email, password) {
+      await delay(120);
+      if (!email || !password) throw new Error("请输入邮箱和密码");
+      mockStore.profile.email = email;
+      mockStore.profile.name = email.split("@")[0];
+      persist();
+      return clone(mockStore.profile);
+    },
+    async register(payload) {
+      await delay(160);
+      if (payload.code !== "123456") throw new Error("验证码错误或已过期");
+      mockStore.profile.email = payload.email;
+      mockStore.profile.name = payload.name || payload.email.split("@")[0];
+      persist();
+      return clone(mockStore.profile);
+    },
+    async logout() { await delay(60); },
 
     async listTasks({ keyword = "", status = "all" } = {}) {
       await delay(120);
@@ -283,6 +305,7 @@
         const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
         const response = await fetch(path, {
           headers: isFormData ? { ...(options.headers || {}) } : { "Content-Type": "application/json", ...(options.headers || {}) },
+          credentials: "include",
           signal: controller.signal,
           ...options,
         });
@@ -301,6 +324,18 @@
 
     getProfile() {
       return this.request(this.url(cfg().api.endpoints.me));
+    },
+    requestCode(email, purpose = "register") {
+      return this.request(this.url(cfg().api.endpoints.authCode), { method: "POST", body: JSON.stringify({ email, purpose }) });
+    },
+    login(email, password) {
+      return this.request(this.url(cfg().api.endpoints.login), { method: "POST", body: JSON.stringify({ email, password }) });
+    },
+    register(payload) {
+      return this.request(this.url(cfg().api.endpoints.register), { method: "POST", body: JSON.stringify(payload) });
+    },
+    logout() {
+      return this.request(this.url(cfg().api.endpoints.logout), { method: "POST" });
     },
     listTasks(query) {
       const search = new URLSearchParams(query || {}).toString();

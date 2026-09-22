@@ -95,6 +95,10 @@ window.APP_CONFIG = {
     timeoutMs: 30000,
     endpoints: {
       me: "/me",
+      authCode: "/auth/request-code",
+      login: "/auth/login",
+      register: "/auth/register",
+      logout: "/auth/logout",
       tasks: "/tasks",
       task: "/tasks/:id",
       createTask: "/tasks",

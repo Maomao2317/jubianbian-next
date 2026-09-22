@@ -15,13 +15,17 @@
     tasks: [],
     current: null,
     profile: null,
+    authMode: "login",
+    authBusy: false,
+    authCooldown: 0,
+    authEmail: "",
     menuTaskId: "",
     upload: { file: null, durationSec: 0, reading: false, error: "" },
     pollTimer: null,
   };
 
   function escapeHtml(value) {
-    return String(value || "")
+    return String(value ?? "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
@@ -101,9 +105,46 @@
             <strong>${credits}</strong><span>分钟</span>
           </div>
           <button class="text-btn" type="button" data-action="recharge">充值</button>
-          <button class="avatar" type="button" data-action="account" title="账号中心">${escapeHtml(initial)}</button>
+          <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
       </div>`;
+  }
+
+  function renderAuth() {
+    const register = state.authMode === "register";
+    const cooldown = state.authCooldown > 0 ? `${state.authCooldown}s 后重发` : "获取验证码";
+    $("#header").innerHTML = `
+      <div class="auth-brand"><a class="brand" href="#"><img class="brand-logo" src="${cfg.brand.logo}" alt="" /><span>${cfg.brand.name}</span></a><span>AI 视频剧本工作台</span></div>`;
+    $("#main").innerHTML = `
+      <section class="auth-page">
+        <div class="auth-card">
+          <div class="auth-kicker">欢迎使用剧编编</div>
+          <h1>${register ? "创建账号" : "登录"}</h1>
+          <p class="auth-subtitle">${register ? "注册后即可开始整理你的短视频剧本" : "登录后继续你的剧本创作"}</p>
+          <form id="authForm" novalidate>
+            ${register ? `<div class="auth-field"><label for="authName">昵称</label><input id="authName" autocomplete="name" placeholder="怎么称呼你？" maxlength="40" /></div>` : ""}
+            <div class="auth-field"><label for="authEmail">邮箱</label><input id="authEmail" type="email" autocomplete="email" placeholder="name@example.com" value="${escapeHtml(state.authEmail)}" required /></div>
+            ${register ? `<div class="auth-field"><label for="authCode">邮箱验证码</label><div class="code-row"><input id="authCode" inputmode="numeric" maxlength="6" placeholder="6 位验证码" required /><button class="code-btn" type="button" data-action="request-code" ${state.authCooldown ? "disabled" : ""}>${cooldown}</button></div><small class="auth-hint">验证码有效期 10 分钟</small></div>` : ""}
+            <div class="auth-field"><label for="authPassword">密码</label><input id="authPassword" type="password" autocomplete="${register ? "new-password" : "current-password"}" placeholder="至少 8 位" required /></div>
+            ${register ? `<div class="auth-field"><label for="authPassword2">确认密码</label><input id="authPassword2" type="password" autocomplete="new-password" placeholder="再次输入密码" required /></div>` : ""}
+            <button class="auth-submit" type="submit" data-action="auth-submit" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "处理中…" : register ? "注册并进入工作台" : "登录"}</button>
+          </form>
+          <div class="auth-switch">${register ? "已有账号？" : "没有账号？"}<button type="button" data-action="auth-switch">${register ? "立即登录" : "注册"}</button></div>
+        </div>
+      </section>`;
+    const email = $("#authEmail");
+    if (email) email.focus();
+  }
+
+  function openAccountModal() {
+    const profile = state.profile || {};
+    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask">
+      <div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
+        <div class="modal-head"><div><span class="modal-kicker">账号中心</span><h2 id="accountTitle">个人信息</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>
+        <div class="account-profile"><div class="account-avatar">${escapeHtml((profile.name || "用").charAt(0))}</div><div><strong>${escapeHtml(profile.name || "剧编编用户")}</strong><span>${escapeHtml(profile.email || "")}</span></div></div>
+        <dl class="account-details"><div><dt>注册邮箱</dt><dd>${escapeHtml(profile.email || "")}</dd></div><div><dt>当前方案</dt><dd>${escapeHtml(profile.plan || "体验版")}</dd></div><div><dt>可用额度</dt><dd>${escapeHtml(profile.credits ?? "0")} 分钟</dd></div><div><dt>注册时间</dt><dd>${profile.createdAt ? escapeHtml(formatDate(profile.createdAt)) : "-"}</dd></div></dl>
+        <div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">返回</button><button class="danger-btn" type="button" data-action="logout">退出登录</button></div>
+      </div></div>`;
   }
 
   function taskMenu(task) {
@@ -478,6 +519,10 @@
 
   async function render() {
     parseHash();
+    if (!state.profile) {
+      renderAuth();
+      return;
+    }
     state.menuTaskId = "";
     renderHeader();
     if (state.view === "detail") await refreshDetail();
@@ -500,6 +545,51 @@
     } catch (error) {
       toast(error.message || "下载失败", "error");
     }
+  }
+
+  async function requestCode() {
+    const email = $("#authEmail") ? $("#authEmail").value.trim() : "";
+    if (!email || !email.includes("@")) { toast("请先输入正确的邮箱地址", "error"); return; }
+    state.authEmail = email;
+    try {
+      const result = await api.requestCode(email, "register");
+      toast(result.devCode ? `${result.message}：${result.devCode}` : result.message);
+      state.authCooldown = 60;
+      renderAuth();
+      const timer = setInterval(() => {
+        state.authCooldown -= 1;
+        if (state.authCooldown <= 0) clearInterval(timer);
+        if (!state.profile && state.authMode === "register") renderAuth();
+      }, 1000);
+    } catch (error) { toast(error.message || "验证码发送失败", "error"); }
+  }
+
+  async function submitAuth() {
+    const email = $("#authEmail") ? $("#authEmail").value.trim() : "";
+    const password = $("#authPassword") ? $("#authPassword").value : "";
+    state.authEmail = email;
+    if (!email || !password) { toast("请填写邮箱和密码", "error"); return; }
+    if (state.authMode === "register") {
+      const name = $("#authName") ? $("#authName").value.trim() : "";
+      const code = $("#authCode") ? $("#authCode").value.trim() : "";
+      const password2 = $("#authPassword2") ? $("#authPassword2").value : "";
+      if (!/^\d{6}$/.test(code)) { toast("请输入 6 位邮箱验证码", "error"); return; }
+      if (password.length < 8) { toast("密码至少需要 8 位", "error"); return; }
+      if (password !== password2) { toast("两次输入的密码不一致", "error"); return; }
+      state.authBusy = true; renderAuth();
+      try { state.profile = await api.register({ email, password, name, code }); toast("注册成功，欢迎来到剧编编"); await render(); }
+      catch (error) { state.authBusy = false; renderAuth(); toast(error.message || "注册失败", "error"); }
+      return;
+    }
+    state.authBusy = true; renderAuth();
+    try { state.profile = await api.login(email, password); toast("登录成功"); await render(); }
+    catch (error) { state.authBusy = false; renderAuth(); toast(error.message || "登录失败", "error"); }
+  }
+
+  async function logout() {
+    try { await api.logout(); } catch (_) {}
+    state.profile = null; state.authBusy = false; state.authMode = "login"; state.authEmail = "";
+    $("#modalRoot").innerHTML = ""; renderAuth(); toast("已退出登录");
   }
 
   document.addEventListener("click", async (event) => {
@@ -526,10 +616,14 @@
 
     const action = actionElement.dataset.action;
     const id = actionElement.dataset.id;
+    if (action === "auth-switch") { state.authMode = state.authMode === "login" ? "register" : "login"; state.authBusy = false; renderAuth(); return; }
+    if (action === "request-code") { await requestCode(); return; }
+    if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
+    if (action === "logout") { await logout(); return; }
     if (action === "create") openCreateModal();
     if (action === "close-modal") $("#modalRoot").innerHTML = "";
     if (action === "back") go("tasks");
-    if (action === "account") toast("账号中心将在登录模块接入后开放");
+    if (action === "account") openAccountModal();
     if (action === "recharge") toast("测试阶段由管理员手动增加额度");
     if (action === "open-task") go("task/" + id);
     if (action === "toggle-menu") {
@@ -580,6 +674,13 @@
         actionElement.textContent = "开始识别";
         toast(error.message || "创建失败", "error");
       }
+    }
+  });
+
+  document.addEventListener("submit", async (event) => {
+    if (event.target && event.target.id === "authForm") {
+      event.preventDefault();
+      await submitAuth();
     }
   });
 

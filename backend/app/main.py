@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 from collections import deque
 from contextvars import ContextVar
 import json
@@ -10,6 +12,7 @@ import mimetypes
 import os
 import re
 import shutil
+import secrets
 import sqlite3
 import subprocess
 import tempfile
@@ -58,6 +61,16 @@ ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
+TENCENTCLOUD_SECRET_ID = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
+TENCENTCLOUD_SECRET_KEY = os.getenv("TENCENTCLOUD_SECRET_KEY", "").strip()
+TENCENTCLOUD_REGION = os.getenv("TENCENTCLOUD_REGION", "ap-guangzhou").strip() or "ap-guangzhou"
+TENCENTCLOUD_SES_ENDPOINT = os.getenv("TENCENTCLOUD_SES_ENDPOINT", "ses.tencentcloudapi.com").strip() or "ses.tencentcloudapi.com"
+TENCENTCLOUD_SES_FROM_EMAIL = os.getenv("TENCENTCLOUD_SES_FROM_EMAIL", "").strip()
+TENCENTCLOUD_SES_FROM_NAME = os.getenv("TENCENTCLOUD_SES_FROM_NAME", "剧编编").strip() or "剧编编"
+AUTH_ALLOW_DEV_CODE = os.getenv("JBB_AUTH_ALLOW_DEV_CODE", "1").strip().lower() in {"1", "true", "yes", "on"}
+SESSION_COOKIE = "jbb_session"
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+AUTH_CODE_TTL_SECONDS = 10 * 60
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,7 +115,8 @@ app = FastAPI(title="剧编编 API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_origin_regex=r".*",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -226,6 +240,168 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 180_000)
+    return f"pbkdf2_sha256$180000${salt.hex()}${digest.hex()}"
+
+
+def _password_matches(password: str, encoded: str) -> bool:
+    try:
+        algorithm, rounds, salt_hex, digest_hex = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _user_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "credits": row["credits"],
+        "plan": row["plan"],
+        "createdAt": row["created_at"],
+    }
+
+
+def _get_user_by_id(user_id: str) -> sqlite3.Row | None:
+    with db() as connection:
+        return connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+def current_user(request: Request) -> sqlite3.Row:
+    token = request.cookies.get(SESSION_COOKIE, "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="请先登录")
+    with db() as connection:
+        row = connection.execute(
+            """
+            SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+            """,
+            (_token_hash(token), time.time()),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    return row
+
+
+def _set_session(response: Response, user_id: str) -> None:
+    token = secrets.token_urlsafe(32)
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO sessions(token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (_token_hash(token), user_id, time.time() + SESSION_TTL_SECONDS, now_iso()),
+        )
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=os.getenv("JBB_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes"},
+    )
+
+
+def _send_tencentcloud_code(email: str, code: str) -> bool:
+    """Send a transactional email through Tencent Cloud SES (TC3 signature)."""
+    if not TENCENTCLOUD_SECRET_ID or not TENCENTCLOUD_SECRET_KEY or not TENCENTCLOUD_SES_FROM_EMAIL:
+        return False
+    service = "ses"
+    host = TENCENTCLOUD_SES_ENDPOINT
+    version = "2020-10-02"
+    action = "SendEmail"
+    timestamp = int(time.time())
+    date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
+    subject = "剧编编注册验证码"
+    body = {
+        "FromEmailAddress": TENCENTCLOUD_SES_FROM_EMAIL,
+        "Destination": [email],
+        "Subject": subject,
+        "Simple": {
+            "Html": f"<p>你的剧编编验证码是：<strong style='font-size:22px'>{code}</strong></p><p>验证码 10 分钟内有效，请勿将验证码告知他人。</p>",
+            "Text": f"你的剧编编验证码是：{code}\n验证码 10 分钟内有效，请勿将验证码告知他人。",
+        },
+    }
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    content_type = "application/json; charset=utf-8"
+    canonical_headers = f"content-type:{content_type}\nhost:{host}\n"
+    signed_headers = "content-type;host"
+    hashed_payload = hashlib.sha256(payload).hexdigest()
+    canonical_request = "\n".join(["POST", "/", "", canonical_headers, signed_headers, hashed_payload])
+    credential_scope = f"{date}/{service}/tc3_request"
+    string_to_sign = "\n".join([
+        "TC3-HMAC-SHA256",
+        str(timestamp),
+        credential_scope,
+        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+    ])
+    secret_date = hmac.new(("TC3" + TENCENTCLOUD_SECRET_KEY).encode("utf-8"), date.encode("utf-8"), hashlib.sha256).digest()
+    secret_service = hmac.new(secret_date, service.encode("utf-8"), hashlib.sha256).digest()
+    secret_signing = hmac.new(secret_service, b"tc3_request", hashlib.sha256).digest()
+    signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    authorization = (
+        f"TC3-HMAC-SHA256 Credential={TENCENTCLOUD_SECRET_ID}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    request = UrlRequest(
+        f"https://{host}/",
+        data=payload,
+        headers={
+            "Content-Type": content_type,
+            "Host": host,
+            "X-TC-Action": action,
+            "X-TC-Version": version,
+            "X-TC-Region": TENCENTCLOUD_REGION,
+            "X-TC-Timestamp": str(timestamp),
+            "Authorization": authorization,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            response_payload = json.loads(response.read().decode("utf-8") or "{}")
+            error = response_payload.get("Response", {}).get("Error")
+            if error:
+                logger.warning("tencentcloud_ses_rejected email=%s code=%s message=%s", email, error.get("Code"), error.get("Message"))
+                return False
+            return 200 <= response.status < 300
+    except (HTTPError, URLError, OSError) as exc:
+        logger.warning("tencentcloud_ses_failed email=%s error=%s", email, safe_error_text(exc))
+        return False
+
+
+def _issue_auth_code(email: str, purpose: str) -> tuple[str, bool]:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    with db() as connection:
+        connection.execute("UPDATE auth_codes SET used_at = ? WHERE email = ? AND purpose = ? AND used_at IS NULL", (now_iso(), email, purpose))
+        connection.execute(
+            "INSERT INTO auth_codes(email, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (email, purpose, _token_hash(code), time.time() + AUTH_CODE_TTL_SECONDS, now_iso()),
+        )
+    return code, _send_tencentcloud_code(email, code)
+
+
+def _verify_auth_code(email: str, purpose: str, code: str) -> bool:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT id, code_hash FROM auth_codes WHERE email = ? AND purpose = ? AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
+            (email, purpose, time.time()),
+        ).fetchone()
+        if not row or not hmac.compare_digest(row["code_hash"], _token_hash(code)):
+            return False
+        connection.execute("UPDATE auth_codes SET used_at = ? WHERE id = ?", (now_iso(), row["id"]))
+    return True
+
+
 def db() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
@@ -234,6 +410,44 @@ def db() -> sqlite3.Connection:
 
 def init_db() -> None:
     with db() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                name TEXT NOT NULL,
+                credits INTEGER NOT NULL DEFAULT 5,
+                plan TEXT NOT NULL DEFAULT '体验版',
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email, purpose, id)")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -267,6 +481,7 @@ def init_db() -> None:
         # added for real Ark calls. SQLite has no IF NOT EXISTS for columns.
         columns = {item[1] for item in connection.execute("PRAGMA table_info(tasks)").fetchall()}
         for name, definition in (
+            ("user_id", "TEXT"),
             ("provider", "TEXT"),
             ("model", "TEXT"),
             ("input_tokens", "INTEGER"),
@@ -291,6 +506,7 @@ def init_db() -> None:
             """
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id, created_at)")
 
 
 init_db()
@@ -338,9 +554,12 @@ def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
     return task
 
 
-def get_task(task_id: str) -> dict[str, Any] | None:
+def get_task(task_id: str, user_id: str | None = None) -> dict[str, Any] | None:
     with db() as connection:
-        row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if user_id:
+            row = connection.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id)).fetchone()
+        else:
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return row_to_task(row) if row else None
 
 
@@ -455,8 +674,10 @@ def task_counts() -> dict[str, int]:
     }
 
 
-def task_row(task_id: str) -> sqlite3.Row | None:
+def task_row(task_id: str, user_id: str | None = None) -> sqlite3.Row | None:
     with db() as connection:
+        if user_id:
+            return connection.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id)).fetchone()
         return connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
 
@@ -1710,7 +1931,6 @@ async def process_task(task_id: str) -> None:
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             total_tokens=usage.get("total_tokens"),
-            credits_used=0,
             completed_at=now_iso(),
         )
         record_task_event(
@@ -1731,6 +1951,12 @@ async def process_task(task_id: str) -> None:
         )
     except Exception as exc:  # pragma: no cover - defensive boundary for background work
         message = f"处理失败：{safe_error_text(exc)}"
+        # Return the pre-charged minutes exactly once when a recognition fails.
+        charged = int(row["credits_used"] or 0)
+        if row["user_id"] and charged > 0:
+            with db() as connection:
+                connection.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (charged, row["user_id"]))
+            update_task(task_id, credits_used=0)
         update_task(
             task_id,
             status="failed",
@@ -1781,6 +2007,7 @@ def metrics() -> dict[str, Any]:
             "arkConfigured": bool(ARK_API_KEY),
             "openaiConfigured": bool(OPENAI_API_KEY),
             "arkModel": ARK_MODEL if ARK_API_KEY else None,
+            "tencentSesConfigured": bool(TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY and TENCENTCLOUD_SES_FROM_EMAIL),
         },
         "logging": {
             "level": JBB_LOG_LEVEL,
@@ -1790,15 +2017,104 @@ def metrics() -> dict[str, Any]:
     }
 
 
+@app.post("/api/auth/request-code")
+async def request_auth_code(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    email = str(payload.get("email") or "").strip().lower()
+    purpose = str(payload.get("purpose") or "register").strip().lower()
+    if purpose not in {"register", "reset"}:
+        raise HTTPException(status_code=400, detail="验证码用途不正确")
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="请输入正确的邮箱地址")
+    with db() as connection:
+        exists = connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
+    if purpose == "register" and exists:
+        raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
+    if purpose == "reset" and not exists:
+        raise HTTPException(status_code=404, detail="该邮箱尚未注册")
+    code, delivered = _issue_auth_code(email, purpose)
+    result: dict[str, Any] = {"message": "验证码已发送，请查收邮箱", "expiresIn": AUTH_CODE_TTL_SECONDS}
+    # With no Tencent Cloud credentials, expose a one-time code for local smoke tests.
+    # Production deployments should always configure Tencent Cloud SES and sender.
+    if not delivered and not AUTH_ALLOW_DEV_CODE:
+        raise HTTPException(status_code=503, detail="邮件服务暂未配置，请联系管理员")
+    if not delivered:
+        result["message"] = "腾讯云邮件服务尚未配置，已生成开发验证码"
+        result["devCode"] = code
+        logger.warning("tencentcloud_ses_not_configured email=%s purpose=%s dev_code=%s", email, purpose, code)
+    return result
+
+
+@app.post("/api/auth/register")
+async def register(request: Request) -> JSONResponse:
+    payload = await request.json()
+    email = str(payload.get("email") or "").strip().lower()
+    password = str(payload.get("password") or "")
+    name = str(payload.get("name") or "").strip()[:40]
+    code = str(payload.get("code") or "").strip()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="请输入正确的邮箱地址")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="密码至少需要 8 位")
+    if not name:
+        name = email.split("@", 1)[0][:40] or "剧编编用户"
+    if not re.fullmatch(r"\d{6}", code) or not _verify_auth_code(email, "register", code):
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    user_id = f"user-{uuid.uuid4().hex}"
+    created = now_iso()
+    try:
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO users(id, email, password_hash, name, credits, plan, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, email, _password_hash(password), name, 5, "体验版", created),
+            )
+            user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
+    response = JSONResponse(_user_payload(user))
+    _set_session(response, user_id)
+    return response
+
+
+@app.post("/api/auth/login")
+async def login(request: Request) -> JSONResponse:
+    payload = await request.json()
+    email = str(payload.get("email") or "").strip().lower()
+    password = str(payload.get("password") or "")
+    with db() as connection:
+        user = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    if not user or not _password_matches(password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    with db() as connection:
+        connection.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now_iso(), user["id"]))
+        user = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    response = JSONResponse(_user_payload(user))
+    _set_session(response, user["id"])
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request) -> Response:
+    token = request.cookies.get(SESSION_COOKIE, "").strip()
+    if token:
+        with db() as connection:
+            connection.execute("DELETE FROM sessions WHERE token_hash = ?", (_token_hash(token),))
+    response = Response(status_code=204)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
 @app.get("/api/me")
-def profile() -> dict[str, Any]:
-    return {"id": "local-user", "name": "本地用户", "credits": 9999, "plan": "本地测试"}
+def profile(request: Request) -> dict[str, Any]:
+    return _user_payload(current_user(request))
 
 
 @app.get("/api/tasks")
-def list_tasks(keyword: str = "", status: str = "all") -> list[dict[str, Any]]:
+def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list[dict[str, Any]]:
+    user = current_user(request)
     clauses: list[str] = []
-    params: list[Any] = []
+    params: list[Any] = [user["id"]]
+    clauses.append("user_id = ?")
     if keyword.strip():
         clauses.append("(title LIKE ? OR file_name LIKE ?)")
         value = f"%{keyword.strip()}%"
@@ -1813,8 +2129,8 @@ def list_tasks(keyword: str = "", status: str = "all") -> list[dict[str, Any]]:
 
 
 @app.get("/api/tasks/{task_id}")
-def task_detail(task_id: str) -> dict[str, Any]:
-    task = get_task(task_id)
+def task_detail(request: Request, task_id: str) -> dict[str, Any]:
+    task = get_task(task_id, current_user(request)["id"])
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
     task["events"] = task_events(task_id)
@@ -1822,19 +2138,21 @@ def task_detail(task_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/tasks/{task_id}/events")
-def task_event_list(task_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
-    if not task_row(task_id):
+def task_event_list(request: Request, task_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    if not task_row(task_id, current_user(request)["id"]):
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
     return task_events(task_id, limit)
 
 
 @app.post("/api/tasks")
 async def create_task(
+    request: Request,
     background: BackgroundTasks,
     file: UploadFile = File(...),
     title: str = Form(""),
     durationSec: float = Form(0),
 ) -> dict[str, Any]:
+    user = current_user(request)
     file_name = safe_filename(file.filename or "video.mp4")
     if not file_name.lower().endswith(".mp4"):
         raise HTTPException(status_code=400, detail="目前只支持 MP4 视频")
@@ -1857,28 +2175,35 @@ async def create_task(
         raise HTTPException(status_code=400, detail=f"视频超过 {MAX_DURATION_MINUTES} 分钟")
     created = now_iso()
     task_title = title.strip() or title_from_filename(file_name)
+    estimated = max(1, int((duration + 59) // 60)) if duration else 1
     with db() as connection:
         connection.execute(
             """
             INSERT INTO tasks
-              (id, title, file_name, stored_path, file_size, mime_type, duration_sec,
+              (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec,
                estimated_minutes, credits_used, status, stage, progress_percent,
                created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'queued', 'queued', 4, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)
             """,
             (
                 task_id,
+                user["id"],
                 task_title,
                 file_name,
                 str(target),
                 size,
                 file.content_type or mimetypes.guess_type(file_name)[0] or "video/mp4",
                 duration,
-                max(1, int((duration + 59) // 60)) if duration else 1,
+                estimated,
+                estimated,
                 created,
                 created,
             ),
         )
+        if estimated > int(user["credits"]):
+            target.unlink(missing_ok=True)
+            raise HTTPException(status_code=402, detail=f"额度不足，当前剩余 {user['credits']} 分钟")
+        connection.execute("UPDATE users SET credits = credits - ? WHERE id = ?", (estimated, user["id"]))
     record_task_event(task_id, "created", "任务已创建", status="queued", stage="queued", progress_percent=4)
     logger.info(
         "task_created task_id=%s title=%s file=%s size_bytes=%s request_id=%s",
@@ -1889,12 +2214,13 @@ async def create_task(
         REQUEST_ID.get(),
     )
     background.add_task(process_task, task_id)
-    return get_task(task_id)  # type: ignore[return-value]
+    return get_task(task_id, user["id"])  # type: ignore[return-value]
 
 
 @app.post("/api/tasks/{task_id}/retry")
-async def retry_task(task_id: str, background: BackgroundTasks) -> dict[str, Any]:
-    row = task_row(task_id)
+async def retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
+    user_id = current_user(request)["id"]
+    row = task_row(task_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在")
     if not Path(row["stored_path"]).exists():
@@ -1903,12 +2229,12 @@ async def retry_task(task_id: str, background: BackgroundTasks) -> dict[str, Any
     record_task_event(task_id, "retry", "任务已重新排队", status="queued", stage="queued", progress_percent=4)
     logger.info("task_retry task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     background.add_task(process_task, task_id)
-    return get_task(task_id)  # type: ignore[return-value]
+    return get_task(task_id, user_id)  # type: ignore[return-value]
 
 
 @app.delete("/api/tasks/{task_id}", status_code=204)
-def delete_task(task_id: str) -> Response:
-    row = task_row(task_id)
+def delete_task(request: Request, task_id: str) -> Response:
+    row = task_row(task_id, current_user(request)["id"])
     if not row:
         return Response(status_code=204)
     Path(row["stored_path"]).unlink(missing_ok=True)
@@ -1920,8 +2246,8 @@ def delete_task(task_id: str) -> Response:
 
 
 @app.get("/api/tasks/{task_id}/download")
-def download_task(task_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
-    task = get_task(task_id)
+def download_task(request: Request, task_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
+    task = get_task(task_id, current_user(request)["id"])
     if not task or task["status"] != "done" or not task.get("result"):
         raise HTTPException(status_code=409, detail="剧本还不能下载")
     markdown = script_to_markdown(task)
