@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
@@ -67,10 +67,15 @@ TENCENTCLOUD_REGION = os.getenv("TENCENTCLOUD_REGION", "ap-guangzhou").strip() o
 TENCENTCLOUD_SES_ENDPOINT = os.getenv("TENCENTCLOUD_SES_ENDPOINT", "ses.tencentcloudapi.com").strip() or "ses.tencentcloudapi.com"
 TENCENTCLOUD_SES_FROM_EMAIL = os.getenv("TENCENTCLOUD_SES_FROM_EMAIL", "").strip()
 TENCENTCLOUD_SES_FROM_NAME = os.getenv("TENCENTCLOUD_SES_FROM_NAME", "剧编编").strip() or "剧编编"
-AUTH_ALLOW_DEV_CODE = os.getenv("JBB_AUTH_ALLOW_DEV_CODE", "1").strip().lower() in {"1", "true", "yes", "on"}
+AUTH_ALLOW_DEV_CODE = os.getenv(
+    "JBB_AUTH_ALLOW_DEV_CODE",
+    "1" if JBB_ENVIRONMENT != "production" else "0",
+).strip().lower() in {"1", "true", "yes", "on"}
 SESSION_COOKIE = "jbb_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 AUTH_CODE_TTL_SECONDS = 10 * 60
+AUTH_CODE_RESEND_SECONDS = max(30, int(os.getenv("JBB_AUTH_CODE_RESEND_SECONDS", "60")))
+AUTH_CODE_MAX_ATTEMPTS = max(3, int(os.getenv("JBB_AUTH_CODE_MAX_ATTEMPTS", "5")))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -106,10 +111,25 @@ logger = _configure_logging()
 
 def safe_error_text(error: BaseException, limit: int = 1000) -> str:
     message = str(error) or error.__class__.__name__
-    for secret in (ARK_API_KEY, OPENAI_API_KEY):
+    for secret in (
+        ARK_API_KEY,
+        OPENAI_API_KEY,
+        TENCENTCLOUD_SECRET_ID,
+        TENCENTCLOUD_SECRET_KEY,
+    ):
         if secret:
             message = message.replace(secret, "[REDACTED]")
     return message[:limit]
+
+
+def _email_log_id(email: str) -> str:
+    """Return a stable, non-reversible identifier for auth logs."""
+    normalized = email.strip().lower()
+    local, _, domain = normalized.partition("@")
+    local_hint = (local[:1] + "***") if local else "***"
+    domain_hint = domain[:40] if domain else "invalid"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:10]
+    return f"{local_hint}@{domain_hint}#{digest}"
 
 app = FastAPI(title="剧编编 API", version="0.1.0")
 app.add_middleware(
@@ -313,22 +333,35 @@ def _set_session(response: Response, user_id: str) -> None:
 
 def _send_tencentcloud_code(email: str, code: str) -> bool:
     """Send a transactional email through Tencent Cloud SES (TC3 signature)."""
-    if not TENCENTCLOUD_SECRET_ID or not TENCENTCLOUD_SECRET_KEY or not TENCENTCLOUD_SES_FROM_EMAIL:
+    email_id = _email_log_id(email)
+    sender_ok = bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", TENCENTCLOUD_SES_FROM_EMAIL))
+    if not TENCENTCLOUD_SECRET_ID or not TENCENTCLOUD_SECRET_KEY or not sender_ok:
+        logger.warning(
+            "tencentcloud_ses_not_configured email_id=%s sender_configured=%s credentials_configured=%s",
+            email_id,
+            sender_ok,
+            bool(TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY),
+        )
         return False
     service = "ses"
-    host = TENCENTCLOUD_SES_ENDPOINT
+    endpoint = TENCENTCLOUD_SES_ENDPOINT.strip()
+    parsed_endpoint = urlsplit(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = parsed_endpoint.netloc or parsed_endpoint.path
+    if not host:
+        logger.warning("tencentcloud_ses_invalid_endpoint email_id=%s", email_id)
+        return False
     version = "2020-10-02"
     action = "SendEmail"
     timestamp = int(time.time())
     date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
-    subject = "剧编编注册验证码"
+    subject = "剧编编邮箱验证码"
     body = {
         "FromEmailAddress": TENCENTCLOUD_SES_FROM_EMAIL,
         "Destination": [email],
         "Subject": subject,
         "Simple": {
-            "Html": f"<p>你的剧编编验证码是：<strong style='font-size:22px'>{code}</strong></p><p>验证码 10 分钟内有效，请勿将验证码告知他人。</p>",
-            "Text": f"你的剧编编验证码是：{code}\n验证码 10 分钟内有效，请勿将验证码告知他人。",
+            "Html": f"<p>你的剧编编邮箱验证码是：<strong style='font-size:22px;letter-spacing:4px'>{code}</strong></p><p>验证码 10 分钟内有效，请勿将验证码告知他人。</p>",
+            "Text": f"你的剧编编邮箱验证码是：{code}\n验证码 10 分钟内有效，请勿将验证码告知他人。",
         },
     }
     payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -353,7 +386,7 @@ def _send_tencentcloud_code(email: str, code: str) -> bool:
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
     request = UrlRequest(
-        f"https://{host}/",
+        f"{parsed_endpoint.scheme or 'https'}://{host}/",
         data=payload,
         headers={
             "Content-Type": content_type,
@@ -371,32 +404,88 @@ def _send_tencentcloud_code(email: str, code: str) -> bool:
             response_payload = json.loads(response.read().decode("utf-8") or "{}")
             error = response_payload.get("Response", {}).get("Error")
             if error:
-                logger.warning("tencentcloud_ses_rejected email=%s code=%s message=%s", email, error.get("Code"), error.get("Message"))
+                logger.warning(
+                    "tencentcloud_ses_rejected email_id=%s code=%s message=%s",
+                    email_id,
+                    error.get("Code"),
+                    safe_error_text(RuntimeError(str(error.get("Message") or "unknown")), 300),
+                )
                 return False
             return 200 <= response.status < 300
-    except (HTTPError, URLError, OSError) as exc:
-        logger.warning("tencentcloud_ses_failed email=%s error=%s", email, safe_error_text(exc))
+    except HTTPError as exc:
+        detail = ""
+        try:
+            raw_error = exc.read().decode("utf-8", errors="replace")
+            payload_error = json.loads(raw_error).get("Response", {}).get("Error", {})
+            detail = f"{payload_error.get('Code') or ''} {payload_error.get('Message') or ''}".strip()
+        except (OSError, ValueError, AttributeError):
+            pass
+        logger.warning(
+            "tencentcloud_ses_failed email_id=%s status=%s error=%s",
+            email_id,
+            exc.code,
+            safe_error_text(RuntimeError(detail or str(exc)), 300),
+        )
+        return False
+    except (URLError, OSError) as exc:
+        logger.warning("tencentcloud_ses_failed email_id=%s error=%s", email_id, safe_error_text(exc, 300))
+        return False
+    except Exception as exc:  # pragma: no cover - defensive boundary for provider failures
+        logger.exception("tencentcloud_ses_unexpected_failure email_id=%s error=%s", email_id, safe_error_text(exc, 300))
         return False
 
 
 def _issue_auth_code(email: str, purpose: str) -> tuple[str, bool]:
     code = f"{secrets.randbelow(1_000_000):06d}"
+    issued_at = time.time()
     with db() as connection:
         connection.execute("UPDATE auth_codes SET used_at = ? WHERE email = ? AND purpose = ? AND used_at IS NULL", (now_iso(), email, purpose))
         connection.execute(
-            "INSERT INTO auth_codes(email, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
-            (email, purpose, _token_hash(code), time.time() + AUTH_CODE_TTL_SECONDS, now_iso()),
+            "INSERT INTO auth_codes(email, purpose, code_hash, expires_at, attempts, issued_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (email, purpose, _token_hash(code), issued_at + AUTH_CODE_TTL_SECONDS, 0, issued_at, now_iso()),
         )
     return code, _send_tencentcloud_code(email, code)
+
+
+def _auth_code_retry_after(email: str, purpose: str) -> int:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT issued_at, created_at FROM auth_codes WHERE email = ? AND purpose = ? AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
+            (email, purpose, time.time()),
+        ).fetchone()
+    if not row:
+        return 0
+    issued_at = row["issued_at"]
+    if issued_at is None:
+        try:
+            issued_at = datetime.fromisoformat(str(row["created_at"])).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return max(0, int(AUTH_CODE_RESEND_SECONDS - (time.time() - float(issued_at)) + 0.999))
+
+
+def _invalidate_auth_code(email: str, purpose: str) -> None:
+    with db() as connection:
+        connection.execute(
+            "UPDATE auth_codes SET used_at = ? WHERE email = ? AND purpose = ? AND used_at IS NULL",
+            (now_iso(), email, purpose),
+        )
 
 
 def _verify_auth_code(email: str, purpose: str, code: str) -> bool:
     with db() as connection:
         row = connection.execute(
-            "SELECT id, code_hash FROM auth_codes WHERE email = ? AND purpose = ? AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
+            "SELECT id, code_hash, attempts FROM auth_codes WHERE email = ? AND purpose = ? AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
             (email, purpose, time.time()),
         ).fetchone()
-        if not row or not hmac.compare_digest(row["code_hash"], _token_hash(code)):
+        if not row:
+            return False
+        if not hmac.compare_digest(row["code_hash"], _token_hash(code)):
+            attempts = int(row["attempts"] or 0) + 1
+            if attempts >= AUTH_CODE_MAX_ATTEMPTS:
+                connection.execute("UPDATE auth_codes SET attempts = ?, used_at = ? WHERE id = ?", (attempts, now_iso(), row["id"]))
+            else:
+                connection.execute("UPDATE auth_codes SET attempts = ? WHERE id = ?", (attempts, row["id"]))
             return False
         connection.execute("UPDATE auth_codes SET used_at = ? WHERE id = ?", (now_iso(), row["id"]))
     return True
@@ -432,11 +521,17 @@ def init_db() -> None:
                 purpose TEXT NOT NULL,
                 code_hash TEXT NOT NULL,
                 expires_at REAL NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                issued_at REAL,
                 used_at TEXT,
                 created_at TEXT NOT NULL
             )
             """
         )
+        auth_code_columns = {item[1] for item in connection.execute("PRAGMA table_info(auth_codes)").fetchall()}
+        for name, definition in (("attempts", "INTEGER NOT NULL DEFAULT 0"), ("issued_at", "REAL")):
+            if name not in auth_code_columns:
+                connection.execute(f"ALTER TABLE auth_codes ADD COLUMN {name} {definition}")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email, purpose, id)")
         connection.execute(
             """
@@ -2261,6 +2356,9 @@ def metrics() -> dict[str, Any]:
             "openaiConfigured": bool(OPENAI_API_KEY),
             "arkModel": ARK_MODEL if ARK_API_KEY else None,
             "tencentSesConfigured": bool(TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY and TENCENTCLOUD_SES_FROM_EMAIL),
+            "tencentSesSenderConfigured": bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", TENCENTCLOUD_SES_FROM_EMAIL)),
+            "authDevCodeEnabled": AUTH_ALLOW_DEV_CODE,
+            "authCodeResendSeconds": AUTH_CODE_RESEND_SECONDS,
         },
         "logging": {
             "level": JBB_LOG_LEVEL,
@@ -2285,16 +2383,29 @@ async def request_auth_code(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
     if purpose == "reset" and not exists:
         raise HTTPException(status_code=404, detail="该邮箱尚未注册")
-    code, delivered = _issue_auth_code(email, purpose)
-    result: dict[str, Any] = {"message": "验证码已发送，请查收邮箱", "expiresIn": AUTH_CODE_TTL_SECONDS}
+    retry_after = _auth_code_retry_after(email, purpose)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"验证码已发送，请 {retry_after} 秒后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
+    code, delivered = await asyncio.to_thread(_issue_auth_code, email, purpose)
+    result: dict[str, Any] = {
+        "message": "验证码已发送，请查收邮箱",
+        "expiresIn": AUTH_CODE_TTL_SECONDS,
+        "resendAfter": AUTH_CODE_RESEND_SECONDS,
+        "delivery": "tencent_ses" if delivered else "development_fallback",
+    }
     # With no Tencent Cloud credentials, expose a one-time code for local smoke tests.
     # Production deployments should always configure Tencent Cloud SES and sender.
     if not delivered and not AUTH_ALLOW_DEV_CODE:
+        await asyncio.to_thread(_invalidate_auth_code, email, purpose)
         raise HTTPException(status_code=503, detail="邮件服务暂未配置，请联系管理员")
     if not delivered:
         result["message"] = "腾讯云邮件服务尚未配置，已生成开发验证码"
         result["devCode"] = code
-        logger.warning("tencentcloud_ses_not_configured email=%s purpose=%s dev_code=%s", email, purpose, code)
+        logger.warning("tencentcloud_ses_dev_fallback email_id=%s purpose=%s", _email_log_id(email), purpose)
     return result
 
 

@@ -18,6 +18,7 @@
     authMode: "login",
     authBusy: false,
     authCooldown: 0,
+    authCooldownTimer: null,
     authEmail: "",
     menuTaskId: "",
     upload: { file: null, durationSec: 0, reading: false, error: "" },
@@ -563,6 +564,22 @@
     }
   }
 
+  function startAuthCooldown(seconds) {
+    clearInterval(state.authCooldownTimer);
+    state.authCooldown = Math.max(0, Math.ceil(Number(seconds) || 0));
+    if (!state.authCooldown) return;
+    renderAuth();
+    state.authCooldownTimer = setInterval(() => {
+      state.authCooldown -= 1;
+      if (state.authCooldown <= 0) {
+        state.authCooldown = 0;
+        clearInterval(state.authCooldownTimer);
+        state.authCooldownTimer = null;
+      }
+      if (!state.profile && state.authMode === "register") renderAuth();
+    }, 1000);
+  }
+
   async function requestCode() {
     const email = $("#authEmail") ? $("#authEmail").value.trim() : "";
     if (!email || !email.includes("@")) { toast("请先输入正确的邮箱地址", "error"); return; }
@@ -570,14 +587,11 @@
     try {
       const result = await api.requestCode(email, "register");
       toast(result.devCode ? `${result.message}：${result.devCode}` : result.message);
-      state.authCooldown = 60;
-      renderAuth();
-      const timer = setInterval(() => {
-        state.authCooldown -= 1;
-        if (state.authCooldown <= 0) clearInterval(timer);
-        if (!state.profile && state.authMode === "register") renderAuth();
-      }, 1000);
-    } catch (error) { toast(error.message || "验证码发送失败", "error"); }
+      startAuthCooldown(result.resendAfter || 60);
+    } catch (error) {
+      if (error.retryAfter) startAuthCooldown(error.retryAfter);
+      toast(error.message || "验证码发送失败", "error");
+    }
   }
 
   async function submitAuth() {
@@ -604,6 +618,9 @@
 
   async function logout() {
     try { await api.logout(); } catch (_) {}
+    clearInterval(state.authCooldownTimer);
+    state.authCooldownTimer = null;
+    state.authCooldown = 0;
     state.profile = null; state.authBusy = false; state.authMode = "login"; state.authEmail = "";
     $("#modalRoot").innerHTML = ""; renderAuth(); toast("已退出登录");
   }
@@ -632,7 +649,15 @@
 
     const action = actionElement.dataset.action;
     const id = actionElement.dataset.id;
-    if (action === "auth-switch") { state.authMode = state.authMode === "login" ? "register" : "login"; state.authBusy = false; renderAuth(); return; }
+    if (action === "auth-switch") {
+      clearInterval(state.authCooldownTimer);
+      state.authCooldownTimer = null;
+      state.authCooldown = 0;
+      state.authMode = state.authMode === "login" ? "register" : "login";
+      state.authBusy = false;
+      renderAuth();
+      return;
+    }
     if (action === "request-code") { await requestCode(); return; }
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "logout") { await logout(); return; }

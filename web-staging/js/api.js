@@ -181,7 +181,7 @@
     async requestCode(email) {
       await delay(120);
       if (!email || !email.includes("@")) throw new Error("请输入正确的邮箱地址");
-      return { message: "开发验证码已生成", devCode: "123456", expiresIn: 600 };
+      return { message: "开发验证码已生成", devCode: "123456", expiresIn: 600, resendAfter: 60 };
     },
     async login(email, password) {
       await delay(120);
@@ -311,7 +311,10 @@
         });
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.message || payload.detail || `请求失败（${response.status}）`);
+          const error = new Error(payload.message || payload.detail || `请求失败（${response.status}）`);
+          error.status = response.status;
+          error.retryAfter = Number(response.headers.get("Retry-After") || payload.retryAfter || 0) || 0;
+          throw error;
         }
         return response.status === 204 ? null : response.json();
       } catch (error) {
