@@ -84,6 +84,11 @@ a { color: inherit; text-decoration: none; }
 .auth-field label { display: block; margin-bottom: 7px; color: #424854; font-size: 12px; font-weight: 700; }
 .auth-field input { width: 100%; height: 44px; padding: 0 13px; border: 1px solid var(--line-strong); border-radius: 8px; outline: 0; color: var(--text); background: #fff; font-size: 13px; }
 .auth-field input:focus { border-color: var(--gold-strong); box-shadow: 0 0 0 3px rgba(242, 191, 50, .2); }
+.password-row { position: relative; }
+.password-row input { padding-right: 46px; }
+.password-toggle { width: 36px; height: 36px; display: grid; place-items: center; position: absolute; top: 4px; right: 4px; border: 0; border-radius: 6px; color: #8b929d; background: transparent; }
+.password-toggle:hover, .password-toggle[aria-pressed="true"] { color: var(--ink); background: #f5f3ee; }
+.password-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .code-row { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 8px; }
 .code-btn { border: 1px solid var(--line-strong); border-radius: 8px; color: #6a5100; background: var(--gold-pale); font-size: 12px; font-weight: 700; }
 .code-btn:hover:not(:disabled) { background: #ffefac; }

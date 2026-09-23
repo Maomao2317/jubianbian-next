@@ -126,8 +126,8 @@
             ${register ? `<div class="auth-field"><label for="authName">昵称</label><input id="authName" autocomplete="name" placeholder="怎么称呼你？" maxlength="40" /></div>` : ""}
             <div class="auth-field"><label for="authEmail">邮箱</label><input id="authEmail" type="email" autocomplete="email" placeholder="name@example.com" value="${escapeHtml(state.authEmail)}" required /></div>
             ${register ? `<div class="auth-field"><label for="authCode">邮箱验证码</label><div class="code-row"><input id="authCode" inputmode="numeric" maxlength="6" placeholder="6 位验证码" required /><button class="code-btn" type="button" data-action="request-code" ${state.authCooldown ? "disabled" : ""}>${cooldown}</button></div><small class="auth-hint">验证码有效期 10 分钟</small></div>` : ""}
-            <div class="auth-field"><label for="authPassword">密码</label><input id="authPassword" type="password" autocomplete="${register ? "new-password" : "current-password"}" placeholder="至少 8 位" required /></div>
-            ${register ? `<div class="auth-field"><label for="authPassword2">确认密码</label><input id="authPassword2" type="password" autocomplete="new-password" placeholder="再次输入密码" required /></div>` : ""}
+            <div class="auth-field"><label for="authPassword">密码</label><div class="password-row"><input id="authPassword" type="password" autocomplete="${register ? "new-password" : "current-password"}" placeholder="至少 8 位，含字母和数字" required /><button class="password-toggle" type="button" data-action="toggle-password" data-target="authPassword" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div>${register ? `<small class="auth-hint">至少 8 位，且必须同时包含字母和数字</small>` : ""}</div>
+            ${register ? `<div class="auth-field"><label for="authPassword2">确认密码</label><div class="password-row"><input id="authPassword2" type="password" autocomplete="new-password" placeholder="再次输入密码" required /><button class="password-toggle" type="button" data-action="toggle-password" data-target="authPassword2" aria-label="显示确认密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div></div>` : ""}
             <button class="auth-submit" type="submit" data-action="auth-submit" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "处理中…" : register ? "注册并进入工作台" : "登录"}</button>
           </form>
           <div class="auth-switch">${register ? "已有账号？" : "没有账号？"}<button type="button" data-action="auth-switch">${register ? "立即登录" : "注册"}</button></div>
@@ -604,7 +604,10 @@
       const code = $("#authCode") ? $("#authCode").value.trim() : "";
       const password2 = $("#authPassword2") ? $("#authPassword2").value : "";
       if (!/^\d{6}$/.test(code)) { toast("请输入 6 位邮箱验证码", "error"); return; }
-      if (password.length < 8) { toast("密码至少需要 8 位", "error"); return; }
+      if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+        toast("密码至少 8 位，且必须同时包含字母和数字", "error");
+        return;
+      }
       if (password !== password2) { toast("两次输入的密码不一致", "error"); return; }
       state.authBusy = true; renderAuth();
       try { state.profile = await api.register({ email, password, name, code }); toast("注册成功，欢迎来到剧编编"); await render(); }
@@ -649,6 +652,15 @@
 
     const action = actionElement.dataset.action;
     const id = actionElement.dataset.id;
+    if (action === "toggle-password") {
+      const input = document.getElementById(actionElement.dataset.target);
+      if (!input) return;
+      const visible = input.type === "password";
+      input.type = visible ? "text" : "password";
+      actionElement.setAttribute("aria-pressed", String(visible));
+      actionElement.setAttribute("aria-label", visible ? "隐藏密码" : "显示密码");
+      return;
+    }
     if (action === "auth-switch") {
       clearInterval(state.authCooldownTimer);
       state.authCooldownTimer = null;

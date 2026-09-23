@@ -76,6 +76,9 @@ SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 AUTH_CODE_TTL_SECONDS = 10 * 60
 AUTH_CODE_RESEND_SECONDS = max(30, int(os.getenv("JBB_AUTH_CODE_RESEND_SECONDS", "60")))
 AUTH_CODE_MAX_ATTEMPTS = max(3, int(os.getenv("JBB_AUTH_CODE_MAX_ATTEMPTS", "5")))
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_LETTER_RE = re.compile(r"[A-Za-z]")
+PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -2418,8 +2421,12 @@ async def register(request: Request) -> JSONResponse:
     code = str(payload.get("code") or "").strip()
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(status_code=400, detail="请输入正确的邮箱地址")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="密码至少需要 8 位")
+    if (
+        len(password) < PASSWORD_MIN_LENGTH
+        or not PASSWORD_LETTER_RE.search(password)
+        or not PASSWORD_DIGIT_RE.search(password)
+    ):
+        raise HTTPException(status_code=400, detail="密码至少 8 位，且必须同时包含字母和数字")
     if not name:
         name = email.split("@", 1)[0][:40] or "剧编编用户"
     if not re.fullmatch(r"\d{6}", code) or not _verify_auth_code(email, "register", code):
