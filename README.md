@@ -30,21 +30,19 @@ Copy-Item .env.example .env
 docker compose --env-file fangzhou.env up -d --build
 ```
 
-正式环境和测试环境使用独立 Compose 项目、容器和数据卷。正式环境默认通过
-`http://服务器IP/` 提供服务；测试环境使用独立端口 18000，不会重启或覆盖正式环境：
+正式环境和测试环境使用独立 Compose 项目、容器和数据卷。正式环境通过
+`https://jubianbian.com/` 提供服务；测试环境通过独立的
+`https://test.jubianbian.com/` 访问，不会重启或覆盖正式环境：
 
 ```powershell
 docker compose --env-file fangzhou.env -p jubianbian-staging \
   -f docker-compose.staging.yml up -d --build
 ```
 
-测试地址为 `http://服务器IP:18000/`。两个环境可以共用方舟 Key，但会共享方舟额度；
-后续购买域名后，再分别配置正式域名和测试子域名即可。
+测试地址也可以继续使用 `http://服务器IP:18000/` 进行底层排查。两个环境可以共用方舟 Key，但会共享方舟额度；
+DNSPod 中将 `@`、`www`、`test` 三条 A 记录指向服务器公网 IP，Caddy 会分别为正式域名和测试子域名申请 HTTPS 证书。
 
-当前 Compose 同时启动应用和 Caddy 反向代理。没有域名时，Caddy 先通过
-`http://服务器IP/` 提供临时访问；购买域名并把 A 记录指向服务器后，将
-`Caddyfile` 第一行的 `:80` 换成域名，Caddy 会自动申请和续期 HTTPS 证书。
-正式切换完成后应移除应用的公网 `8000` 端口，只保留 `80/443`。
+当前 Compose 同时启动正式应用和 Caddy 反向代理。正式域名和测试子域名都由 Caddy 自动申请和续期 HTTPS 证书；正式应用的 `8000` 端口仅绑定本机，公网只保留 `80/443`，测试容器仍使用独立的 `18000` 端口。
 
 应用内置了单进程限流和上传体积校验：普通 API 默认每个来源 IP 每分钟
 120 次，创建任务默认每 10 分钟 10 次，上传上限由 `JBB_MAX_UPLOAD_MB`

@@ -1,9 +1,18 @@
-# Interim HTTP reverse proxy. Replace :80 with the purchased domain after DNS
-# points to this server; Caddy will then issue and renew the HTTPS certificate.
-:80 {
+# Production and staging use separate hostnames and separate application
+# containers. Caddy obtains and renews HTTPS certificates automatically after
+# the DNS A records point at this server.
+jubianbian.com, www.jubianbian.com {
     encode gzip
     request_body {
         max_size 500MB
     }
     reverse_proxy app:8000
+}
+
+test.jubianbian.com {
+    encode gzip
+    request_body {
+        max_size 500MB
+    }
+    reverse_proxy host.docker.internal:18000
 }
