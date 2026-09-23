@@ -1,4 +1,8 @@
 {
+  "python.defaultInterpreterPath": "C:\\Program Files\\Python312\\python.exe",
+  "terminal.integrated.env.windows": {
+    "PATH": "C:\\Program Files\\Git\\cmd;C:\\Program Files\\Python312;C:\\Program Files\\Python312\\Scripts;C:\\Users\\11\\AppData\\Roaming\\Python\\Python312\\Scripts;C:\\Program Files\\nodejs;C:\\Users\\11\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;C:\\Users\\11\\.docker\\cli-plugins;${env:PATH}"
+  },
   "python.analysis.extraPaths": ["${workspaceFolder}/backend"],
   "python.testing.pytestEnabled": false,
   "files.exclude": {

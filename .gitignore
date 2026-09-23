@@ -2,6 +2,8 @@
 *.env
 !.env.example
 node_modules/
+.vscode-user/
+.vscode-extensions/
 data/
 __pycache__/
 *.py[cod]

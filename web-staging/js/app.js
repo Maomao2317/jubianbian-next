@@ -255,7 +255,8 @@
       const time = blockTime(block);
       if (block.type === "dialogue") {
         const warning = block.uncertain ? `<small class="uncertain">需核对</small>` : "";
-        return `<p class="dialogue">${time}<strong>${escapeHtml(block.speaker || "未知说话人")}</strong>${warning}<span>：${escapeHtml(block.text || "")}</span></p>`;
+        const performance = block.performance ? `<em>${escapeHtml(block.performance)}</em>` : "";
+        return `<p class="dialogue">${time}<strong>${escapeHtml(block.speaker || "未知说话人")}</strong>${warning}${performance}<span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "vo" || block.type === "os") {
         const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
@@ -272,7 +273,14 @@
       if (block.type === "emotion") {
         return `<p class="emotion-line">${time}<strong>【情绪】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
-      return `<p class="action-line">${time}<i>▲</i>${block.emotion ? `<em>${escapeHtml(block.emotion)}</em>` : ""}${escapeHtml(block.text || "")}</p>`;
+      if (block.type === "screen_text") {
+        return `<p class="sound-line">${time}<strong>【字幕】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+      }
+      if (block.type === "transition") {
+        return `<p class="sound-line">${time}<strong>【${escapeHtml(block.transitionType || "转场")}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+      }
+      const actionMeta = [block.object && `对象：${block.object}`, block.result && `结果：${block.result}`].filter(Boolean).join("；");
+      return `<p class="action-line">${time}<i>▲</i>${block.emotion ? `<em>${escapeHtml(block.emotion)}</em>` : ""}${escapeHtml(block.text || "")}${actionMeta ? `<small>${escapeHtml(actionMeta)}</small>` : ""}</p>`;
     }
     return `<div class="script-paper">
       <div class="script-title">
@@ -286,8 +294,9 @@
       ${script.scenes.map((scene) => `<section class="scene">
         <h3>${escapeHtml(scene.heading)}</h3>
         ${scene.location ? `<p class="scene-location"><b>地点：</b>${escapeHtml(scene.location)}</p>` : ""}
-        ${scene.summary ? `<p class="scene-summary"><b>剧情衔接：</b>${escapeHtml(scene.summary)}</p>` : ""}
-        <p class="scene-cast"><b>出场人物：</b>${escapeHtml((scene.characters || []).join("、"))}</p>
+        ${scene.characters && scene.characters.length ? `<p class="scene-cast"><b>人物：</b>${escapeHtml(scene.characters.join("、"))}</p>` : ""}
+        ${scene.summary ? `<p class="scene-summary"><b>${scene.summaryGenerated ? "剧情衔接（系统补全）" : "剧情衔接"}：</b>${escapeHtml(scene.summary)}</p>` : ""}
+        ${(scene.goal || scene.obstacle || scene.result) ? `<p class="scene-summary"><b>场次任务：</b>${escapeHtml([scene.goal && `目标：${scene.goal}`, scene.obstacle && `阻力：${scene.obstacle}`, scene.result && `结果：${scene.result}`].filter(Boolean).join("；"))}</p>` : ""}
         ${scene.environment ? `<p class="environment"><b>环境</b>${escapeHtml(scene.environment)}</p>` : ""}
         <div class="scene-blocks">${(scene.blocks || []).map(renderBlock).join("")}</div>
       </section>`).join("")}
@@ -296,6 +305,9 @@
 
   function renderResult(task) {
     const quality = task.quality || {};
+    const severity = quality.severityCounts || {};
+    const issues = Array.isArray(quality.issues) ? quality.issues.slice(0, 5) : [];
+    const metric = (value) => value === null || value === undefined ? "--" : value;
     return `<div class="result-layout">
       <aside class="result-aside">
         <div class="aside-section">
@@ -309,9 +321,13 @@
         </div>
         <div class="aside-section quality-section">
           <span class="aside-label">识别概况</span>
-          <div class="quality-row"><span>台词覆盖</span><strong>${quality.dialogueCoverage || "--"}%</strong></div>
-          <div class="quality-row"><span>人物区分</span><strong>${quality.speakerConfidence || "--"}%</strong></div>
+          <div class="quality-row"><span>台词覆盖</span><strong>${metric(quality.dialogueCoverage)}%</strong></div>
+          <div class="quality-row"><span>人物区分</span><strong>${metric(quality.speakerConfidence)}%</strong></div>
+          <div class="quality-row"><span>待核对问题</span><strong>${metric(quality.warnings)}</strong></div>
+          <p class="quality-severity"><span>P0 ${metric(severity.P0 || 0)}</span><span>P1 ${metric(severity.P1 || 0)}</span><span>P2 ${metric(severity.P2 || 0)}</span></p>
           <p class="quality-note">结果由 AI 生成，建议导出前快速核对人名与专有名词。</p>
+          ${Array.isArray(quality.issueTags) && quality.issueTags.length ? `<p class="quality-note quality-warning">待核对：${escapeHtml(quality.issueTags.join("、"))}</p>` : ""}
+          ${issues.length ? `<ul class="quality-issues">${issues.map((issue) => `<li><b>${escapeHtml(issue.severity || "提示")}</b>${escapeHtml(issue.description || issue.tag || "请核对该项")}</li>`).join("")}</ul>` : ""}
           ${quality.warning ? `<p class="quality-note quality-warning">${escapeHtml(quality.warning)}</p>` : ""}
         </div>
       </aside>

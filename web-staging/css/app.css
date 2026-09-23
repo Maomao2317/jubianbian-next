@@ -570,6 +570,12 @@ a { color: inherit; text-decoration: none; }
 .quality-row strong { color: var(--green); font-size: 15px; }
 .quality-note { margin: 11px 0 0; color: #8a6c16; font-size: 11px; line-height: 1.7; }
 .quality-warning { color: #b45309; }
+.quality-severity { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 0; color: var(--muted); font-size: 11px; }
+.quality-severity span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; }
+.quality-issues { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; color: #8a6c16; font-size: 11px; line-height: 1.55; }
+.quality-issues li { padding-left: 34px; position: relative; }
+.quality-issues li b { position: absolute; left: 0; color: #b45309; }
+.action-line small { display: block; margin: 4px 0 0 22px; color: var(--muted); font-size: 11px; }
 
 .result-main { min-width: 0; }
 .script-paper { padding: 40px 48px 56px; border: 1px solid var(--line); border-radius: 8px; background: #fff; box-shadow: var(--shadow); }
