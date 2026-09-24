@@ -568,7 +568,7 @@
     clearInterval(state.authCooldownTimer);
     state.authCooldown = Math.max(0, Math.ceil(Number(seconds) || 0));
     if (!state.authCooldown) return;
-    renderAuth();
+    updateAuthCooldownUI();
     state.authCooldownTimer = setInterval(() => {
       state.authCooldown -= 1;
       if (state.authCooldown <= 0) {
@@ -576,8 +576,16 @@
         clearInterval(state.authCooldownTimer);
         state.authCooldownTimer = null;
       }
-      if (!state.profile && state.authMode === "register") renderAuth();
+      updateAuthCooldownUI();
     }, 1000);
+  }
+
+  function updateAuthCooldownUI() {
+    const button = document.querySelector('[data-action="request-code"]');
+    if (!button) return;
+    const active = state.authCooldown > 0;
+    button.disabled = active;
+    button.textContent = active ? `${state.authCooldown}s 后重发` : "获取验证码";
   }
 
   async function requestCode() {

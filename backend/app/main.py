@@ -67,15 +67,25 @@ TENCENTCLOUD_REGION = os.getenv("TENCENTCLOUD_REGION", "ap-guangzhou").strip() o
 TENCENTCLOUD_SES_ENDPOINT = os.getenv("TENCENTCLOUD_SES_ENDPOINT", "ses.tencentcloudapi.com").strip() or "ses.tencentcloudapi.com"
 TENCENTCLOUD_SES_FROM_EMAIL = os.getenv("TENCENTCLOUD_SES_FROM_EMAIL", "").strip()
 TENCENTCLOUD_SES_FROM_NAME = os.getenv("TENCENTCLOUD_SES_FROM_NAME", "剧编编").strip() or "剧编编"
+TENCENTCLOUD_SES_TEMPLATE_ID = int(os.getenv("TENCENTCLOUD_SES_TEMPLATE_ID", "0") or "0")
 AUTH_ALLOW_DEV_CODE = os.getenv(
     "JBB_AUTH_ALLOW_DEV_CODE",
-    "1" if JBB_ENVIRONMENT != "production" else "0",
+    # Only an explicitly configured development environment may expose a
+    # fallback verification code.  Staging is reachable from the internet and
+    # must exercise the same real-email path as production by default.
+    "1" if JBB_ENVIRONMENT in {"development", "dev", "local"} else "0",
 ).strip().lower() in {"1", "true", "yes", "on"}
 SESSION_COOKIE = "jbb_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 AUTH_CODE_TTL_SECONDS = 10 * 60
 AUTH_CODE_RESEND_SECONDS = max(30, int(os.getenv("JBB_AUTH_CODE_RESEND_SECONDS", "60")))
 AUTH_CODE_MAX_ATTEMPTS = max(3, int(os.getenv("JBB_AUTH_CODE_MAX_ATTEMPTS", "5")))
+COOKIE_SECURE = os.getenv(
+    "JBB_COOKIE_SECURE",
+    # Compose explicitly enables Secure for the HTTPS deployments. Keep the
+    # application default HTTP-friendly for the local uvicorn launch config.
+    "0",
+).strip().lower() in {"1", "true", "yes", "on"}
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_LETTER_RE = re.compile(r"[A-Za-z]")
 PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
@@ -330,7 +340,7 @@ def _set_session(response: Response, user_id: str) -> None:
         max_age=SESSION_TTL_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=os.getenv("JBB_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes"},
+        secure=COOKIE_SECURE,
     )
 
 
@@ -338,7 +348,7 @@ def _send_tencentcloud_code(email: str, code: str) -> bool:
     """Send a transactional email through Tencent Cloud SES (TC3 signature)."""
     email_id = _email_log_id(email)
     sender_ok = bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", TENCENTCLOUD_SES_FROM_EMAIL))
-    if not TENCENTCLOUD_SECRET_ID or not TENCENTCLOUD_SECRET_KEY or not sender_ok:
+    if not TENCENTCLOUD_SECRET_ID or not TENCENTCLOUD_SECRET_KEY or not sender_ok or not TENCENTCLOUD_SES_TEMPLATE_ID:
         logger.warning(
             "tencentcloud_ses_not_configured email_id=%s sender_configured=%s credentials_configured=%s",
             email_id,
@@ -362,9 +372,9 @@ def _send_tencentcloud_code(email: str, code: str) -> bool:
         "FromEmailAddress": TENCENTCLOUD_SES_FROM_EMAIL,
         "Destination": [email],
         "Subject": subject,
-        "Simple": {
-            "Html": f"<p>你的剧编编邮箱验证码是：<strong style='font-size:22px;letter-spacing:4px'>{code}</strong></p><p>验证码 10 分钟内有效，请勿将验证码告知他人。</p>",
-            "Text": f"你的剧编编邮箱验证码是：{code}\n验证码 10 分钟内有效，请勿将验证码告知他人。",
+        "Template": {
+            "TemplateID": TENCENTCLOUD_SES_TEMPLATE_ID,
+            "TemplateData": json.dumps({"code": code}, ensure_ascii=False, separators=(",", ":")),
         },
     }
     payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -2358,8 +2368,10 @@ def metrics() -> dict[str, Any]:
             "arkConfigured": bool(ARK_API_KEY),
             "openaiConfigured": bool(OPENAI_API_KEY),
             "arkModel": ARK_MODEL if ARK_API_KEY else None,
-            "tencentSesConfigured": bool(TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY and TENCENTCLOUD_SES_FROM_EMAIL),
+            "tencentSesConfigured": bool(TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY and TENCENTCLOUD_SES_FROM_EMAIL and TENCENTCLOUD_SES_TEMPLATE_ID),
             "tencentSesSenderConfigured": bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", TENCENTCLOUD_SES_FROM_EMAIL)),
+            "tencentSesTemplateConfigured": bool(TENCENTCLOUD_SES_TEMPLATE_ID),
+            "tencentSesTemplateId": TENCENTCLOUD_SES_TEMPLATE_ID or None,
             "authDevCodeEnabled": AUTH_ALLOW_DEV_CODE,
             "authCodeResendSeconds": AUTH_CODE_RESEND_SECONDS,
         },
