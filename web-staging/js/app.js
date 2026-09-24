@@ -111,7 +111,40 @@
       </div>`;
   }
 
+  function captureAuthFormState() {
+    const form = $("#authForm");
+    if (!form) return null;
+    const values = {};
+    ["authName", "authEmail", "authCode", "authPassword", "authPassword2"].forEach((id) => {
+      const input = document.getElementById(id);
+      if (input) values[id] = input.value;
+    });
+    const active = document.activeElement;
+    return {
+      values,
+      focusedId: active && active.id ? active.id : "",
+      selectionStart: active && typeof active.selectionStart === "number" ? active.selectionStart : null,
+      selectionEnd: active && typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+    };
+  }
+
+  function restoreAuthFormState(snapshot) {
+    if (!snapshot) return;
+    Object.entries(snapshot.values).forEach(([id, value]) => {
+      const input = document.getElementById(id);
+      if (input) input.value = value;
+    });
+    if (!snapshot.focusedId) return;
+    const focused = document.getElementById(snapshot.focusedId);
+    if (!focused) return;
+    focused.focus();
+    if (snapshot.selectionStart !== null && typeof focused.setSelectionRange === "function") {
+      focused.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd ?? snapshot.selectionStart);
+    }
+  }
+
   function renderAuth() {
+    const previous = captureAuthFormState();
     const register = state.authMode === "register";
     const cooldown = state.authCooldown > 0 ? `${state.authCooldown}s 后重发` : "获取验证码";
     $("#header").innerHTML = `
@@ -133,8 +166,11 @@
           <div class="auth-switch">${register ? "已有账号？" : "没有账号？"}<button type="button" data-action="auth-switch">${register ? "立即登录" : "注册"}</button></div>
         </div>
       </section>`;
-    const email = $("#authEmail");
-    if (email) email.focus();
+    restoreAuthFormState(previous);
+    if (!previous) {
+      const email = $("#authEmail");
+      if (email) email.focus();
+    }
   }
 
   function openAccountModal() {
