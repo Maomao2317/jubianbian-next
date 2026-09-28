@@ -146,6 +146,8 @@
   function renderAuth() {
     const previous = captureAuthFormState();
     const register = state.authMode === "register";
+    const forgot = state.authMode === "forgot";
+    const reset = register || forgot;
     const cooldown = state.authCooldown > 0 ? `${state.authCooldown}s 后重发` : "获取验证码";
     $("#header").innerHTML = `
       <div class="auth-brand"><a class="brand" href="#"><img class="brand-logo" src="${cfg.brand.logo}" alt="" /><span>${cfg.brand.name}</span></a><span>AI 视频剧本工作台</span></div>`;
@@ -153,17 +155,18 @@
       <section class="auth-page">
         <div class="auth-card">
           <div class="auth-kicker">欢迎使用剧编编</div>
-          <h1>${register ? "创建账号" : "登录"}</h1>
-          <p class="auth-subtitle">${register ? "注册后即可开始整理你的短视频剧本" : "登录后继续你的剧本创作"}</p>
+          <h1>${register ? "创建账号" : forgot ? "重置密码" : "登录"}</h1>
+          <p class="auth-subtitle">${register ? "注册后即可开始整理你的短视频剧本" : forgot ? "通过邮箱验证码设置新的登录密码" : "登录后继续你的剧本创作"}</p>
           <form id="authForm" novalidate>
             ${register ? `<div class="auth-field"><label for="authName">昵称</label><input id="authName" autocomplete="name" placeholder="怎么称呼你？" maxlength="40" /></div>` : ""}
             <div class="auth-field"><label for="authEmail">邮箱</label><input id="authEmail" type="email" autocomplete="email" placeholder="name@example.com" value="${escapeHtml(state.authEmail)}" required /></div>
-            ${register ? `<div class="auth-field"><label for="authCode">邮箱验证码</label><div class="code-row"><input id="authCode" inputmode="numeric" maxlength="6" placeholder="6 位验证码" required /><button class="code-btn" type="button" data-action="request-code" ${state.authCooldown ? "disabled" : ""}>${cooldown}</button></div><small class="auth-hint">验证码有效期 10 分钟</small></div>` : ""}
-            <div class="auth-field"><label for="authPassword">密码</label><div class="password-row"><input id="authPassword" type="password" autocomplete="${register ? "new-password" : "current-password"}" placeholder="至少 8 位，含字母和数字" required /><button class="password-toggle" type="button" data-action="toggle-password" data-target="authPassword" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div>${register ? `<small class="auth-hint">至少 8 位，且必须同时包含字母和数字</small>` : ""}</div>
-            ${register ? `<div class="auth-field"><label for="authPassword2">确认密码</label><div class="password-row"><input id="authPassword2" type="password" autocomplete="new-password" placeholder="再次输入密码" required /><button class="password-toggle" type="button" data-action="toggle-password" data-target="authPassword2" aria-label="显示确认密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div></div>` : ""}
-            <button class="auth-submit" type="submit" data-action="auth-submit" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "处理中…" : register ? "注册并进入工作台" : "登录"}</button>
+            ${reset ? `<div class="auth-field"><label for="authCode">邮箱验证码</label><div class="code-row"><input id="authCode" inputmode="numeric" maxlength="6" placeholder="6 位验证码" required /><button class="code-btn" type="button" data-action="request-code" ${state.authCooldown ? "disabled" : ""}>${cooldown}</button></div><small class="auth-hint">验证码有效期 10 分钟</small></div>` : ""}
+            <div class="auth-field"><label for="authPassword">${forgot ? "新密码" : "密码"}</label><div class="password-row"><input id="authPassword" type="password" autocomplete="${reset ? "new-password" : "current-password"}" placeholder="至少 8 位，含字母和数字" required /><button class="password-toggle" type="button" data-action="toggle-password" data-target="authPassword" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div>${reset ? `<small class="auth-hint">至少 8 位，且必须同时包含字母和数字</small>` : ""}</div>
+            ${reset ? `<div class="auth-field"><label for="authPassword2">确认密码</label><div class="password-row"><input id="authPassword2" type="password" autocomplete="new-password" placeholder="再次输入密码" required /><button class="password-toggle" type="button" data-action="toggle-password" data-target="authPassword2" aria-label="显示确认密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div></div>` : ""}
+            <button class="auth-submit" type="submit" data-action="auth-submit" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "处理中…" : register ? "注册并进入工作台" : forgot ? "设置新密码" : "登录"}</button>
           </form>
-          <div class="auth-switch">${register ? "已有账号？" : "没有账号？"}<button type="button" data-action="auth-switch">${register ? "立即登录" : "注册"}</button></div>
+          <div class="auth-switch">${register ? "已有账号？" : forgot ? "想起密码了？" : "没有账号？"}<button type="button" data-action="auth-switch">${register || forgot ? "立即登录" : "注册"}</button></div>
+          ${!register && !forgot ? `<div class="auth-forgot"><button type="button" data-action="auth-forgot">忘记密码？</button></div>` : ""}
         </div>
       </section>`;
     restoreAuthFormState(previous);
@@ -629,7 +632,7 @@
     if (!email || !email.includes("@")) { toast("请先输入正确的邮箱地址", "error"); return; }
     state.authEmail = email;
     try {
-      const result = await api.requestCode(email, "register");
+      const result = await api.requestCode(email, state.authMode === "forgot" ? "reset" : "register");
       toast(result.devCode ? `${result.message}：${result.devCode}` : result.message);
       startAuthCooldown(result.resendAfter || 60);
     } catch (error) {
@@ -643,7 +646,7 @@
     const password = $("#authPassword") ? $("#authPassword").value : "";
     state.authEmail = email;
     if (!email || !password) { toast("请填写邮箱和密码", "error"); return; }
-    if (state.authMode === "register") {
+    if (state.authMode === "register" || state.authMode === "forgot") {
       const name = $("#authName") ? $("#authName").value.trim() : "";
       const code = $("#authCode") ? $("#authCode").value.trim() : "";
       const password2 = $("#authPassword2") ? $("#authPassword2").value : "";
@@ -654,8 +657,28 @@
       }
       if (password !== password2) { toast("两次输入的密码不一致", "error"); return; }
       state.authBusy = true; renderAuth();
-      try { state.profile = await api.register({ email, password, name, code }); toast("注册成功，欢迎来到剧编编"); await render(); }
-      catch (error) { state.authBusy = false; renderAuth(); toast(error.message || "注册失败", "error"); }
+      try {
+        if (state.authMode === "forgot") {
+          await api.resetPassword({ email, password, code });
+          clearInterval(state.authCooldownTimer);
+          state.authCooldownTimer = null;
+          state.authCooldown = 0;
+          ["authCode", "authPassword", "authPassword2"].forEach((id) => {
+            const input = document.getElementById(id);
+            if (input) input.value = "";
+          });
+          state.authBusy = false;
+          state.authMode = "login";
+          state.authEmail = email;
+          renderAuth();
+          toast("密码已重置，请使用新密码登录");
+        } else {
+          state.profile = await api.register({ email, password, name, code });
+          toast("注册成功，欢迎来到剧编编");
+          await render();
+        }
+      }
+      catch (error) { state.authBusy = false; renderAuth(); toast(error.message || (state.authMode === "forgot" ? "密码重置失败" : "注册失败"), "error"); }
       return;
     }
     state.authBusy = true; renderAuth();
@@ -710,6 +733,15 @@
       state.authCooldownTimer = null;
       state.authCooldown = 0;
       state.authMode = state.authMode === "login" ? "register" : "login";
+      state.authBusy = false;
+      renderAuth();
+      return;
+    }
+    if (action === "auth-forgot") {
+      clearInterval(state.authCooldownTimer);
+      state.authCooldownTimer = null;
+      state.authCooldown = 0;
+      state.authMode = "forgot";
       state.authBusy = false;
       renderAuth();
       return;

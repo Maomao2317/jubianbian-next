@@ -98,6 +98,7 @@ window.APP_CONFIG = {
       authCode: "/auth/request-code",
       login: "/auth/login",
       register: "/auth/register",
+      resetPassword: "/auth/reset-password",
       logout: "/auth/logout",
       tasks: "/tasks",
       task: "/tasks/:id",

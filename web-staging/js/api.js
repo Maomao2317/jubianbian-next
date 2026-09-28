@@ -178,9 +178,10 @@
       await delay(90);
       return clone(mockStore.profile);
     },
-    async requestCode(email) {
+    async requestCode(email, purpose = "register") {
       await delay(120);
       if (!email || !email.includes("@")) throw new Error("请输入正确的邮箱地址");
+      if (purpose === "reset" && mockStore.profile.email !== email) throw new Error("该邮箱尚未注册");
       return { message: "开发验证码已生成", devCode: "123456", expiresIn: 600, resendAfter: 60 };
     },
     async login(email, password) {
@@ -198,6 +199,15 @@
       mockStore.profile.name = payload.name || payload.email.split("@")[0];
       persist();
       return clone(mockStore.profile);
+    },
+    async resetPassword(payload) {
+      await delay(160);
+      if (payload.code !== "123456") throw new Error("验证码错误或已过期");
+      if (payload.password.length < 8 || !/[A-Za-z]/.test(payload.password) || !/\d/.test(payload.password)) {
+        throw new Error("密码至少 8 位，且必须同时包含字母和数字");
+      }
+      if (!mockStore.profile.email || mockStore.profile.email !== payload.email) throw new Error("该邮箱尚未注册");
+      return { message: "密码已重置，请使用新密码登录" };
     },
     async logout() { await delay(60); },
 
@@ -336,6 +346,9 @@
     },
     register(payload) {
       return this.request(this.url(cfg().api.endpoints.register), { method: "POST", body: JSON.stringify(payload) });
+    },
+    resetPassword(payload) {
+      return this.request(this.url(cfg().api.endpoints.resetPassword), { method: "POST", body: JSON.stringify(payload) });
     },
     logout() {
       return this.request(this.url(cfg().api.endpoints.logout), { method: "POST" });

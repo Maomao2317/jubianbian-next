@@ -2476,6 +2476,31 @@ async def login(request: Request) -> JSONResponse:
     return response
 
 
+@app.post("/api/auth/reset-password")
+async def reset_password(request: Request) -> JSONResponse:
+    payload = await request.json()
+    email = str(payload.get("email") or "").strip().lower()
+    password = str(payload.get("password") or "")
+    code = str(payload.get("code") or "").strip()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="请输入正确的邮箱地址")
+    if (
+        len(password) < PASSWORD_MIN_LENGTH
+        or not PASSWORD_LETTER_RE.search(password)
+        or not PASSWORD_DIGIT_RE.search(password)
+    ):
+        raise HTTPException(status_code=400, detail="密码至少 8 位，且必须同时包含字母和数字")
+    if not re.fullmatch(r"\d{6}", code) or not _verify_auth_code(email, "reset", code):
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    with db() as connection:
+        user = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="该邮箱尚未注册")
+        connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (_password_hash(password), user["id"]))
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+    return {"message": "密码已重置，请使用新密码登录"}
+
+
 @app.post("/api/auth/logout")
 def logout(request: Request) -> Response:
     token = request.cookies.get(SESSION_COOKIE, "").strip()
