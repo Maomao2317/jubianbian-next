@@ -287,7 +287,7 @@ def init_db() -> None:
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 name TEXT NOT NULL,
-                credits INTEGER NOT NULL DEFAULT 5,
+                credits INTEGER NOT NULL DEFAULT 9999,
                 plan TEXT NOT NULL DEFAULT '体验版',
                 created_at TEXT NOT NULL,
                 last_login_at TEXT

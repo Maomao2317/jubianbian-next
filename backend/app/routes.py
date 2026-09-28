@@ -181,7 +181,9 @@ async def register(request: Request) -> JSONResponse:
         with db() as connection:
             connection.execute(
                 "INSERT INTO users(id, email, password_hash, name, credits, plan, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (user_id, email, _password_hash(password), name, 5, "体验版", created),
+                # Testing mode: keep newly registered accounts unblocked while
+                # screenplay quality is being evaluated in both environments.
+                (user_id, email, _password_hash(password), name, 9999, "体验版", created),
             )
             user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     except sqlite3.IntegrityError:
