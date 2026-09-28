@@ -696,6 +696,11 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             "summarySource": "derived" if summary_generated else "model",
             "blocks": blocks,
         }
+        raw_props = raw_scene.get("props") or raw_scene.get("propsState") or raw_scene.get("items")
+        if isinstance(raw_props, (list, dict)):
+            # Keep only evidence-oriented item state; do not synthesize an
+            # item's location or ownership when the provider did not observe it.
+            scene["props"] = raw_props if isinstance(raw_props, list) else [raw_props]
         for key, value in (
             ("goal", goal),
             ("obstacle", obstacle),
@@ -859,6 +864,15 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     )
     issues: list[dict[str, Any]] = []
 
+    # Conservative evidence/continuity probes. These never invent facts; they
+    # only flag structured output that cannot prove the acceptance standard.
+    continuity_entities = re.compile(r"(?:手机|电话|钥匙|证据|文件|照片|钱|刀|枪|礼物|药|门|车|包|杯子|食物)")
+    temporal_markers = re.compile(r"(?:当天|第二天|次日|昨晚|今晚|早上|上午|中午|下午|晚上|夜里|回忆|闪回|现在|后来|之前|之后)")
+    spatial_markers = re.compile(r"(?:室内|室外|门内|门外|楼上|楼下|车内|车外|厨房|客厅|卧室|医院|学校|街上)")
+
+    def text_of(value: Any) -> str:
+        return str(value or "").strip()
+
     def add_issue(tag: str, severity: str, description: str, scene_index: int | None = None, block_index: int | None = None) -> None:
         issue: dict[str, Any] = {"tag": tag, "severity": severity, "description": description}
         if scene_index is not None:
@@ -878,12 +892,16 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         event_chain_warnings += 1
         add_issue("漏关键剧情", "P0", "未生成可验收的起因—冲突—转折—结果事件链，需人工核对关键剧情是否完整。")
     else:
-        if not event_roles.intersection({"cause", "conflict", "turn"}):
+        if not {"cause", "conflict", "turn"}.issubset(event_roles):
             event_chain_warnings += 1
             add_issue("漏关键剧情", "P0", "事件链没有起因、冲突或转折节点，无法确认剧情因果是否成立。")
         if "result" not in event_roles:
             event_chain_warnings += 1
             add_issue("场次衔接", "P1", "事件链没有结果节点，需核对结尾是否真正推动了下一步。")
+
+        if "hook" not in event_roles:
+            event_chain_warnings += 1
+            add_issue("集尾无钩子", "P1", "事件链没有钩子节点，需核对集尾是否留下新危机、反转或待解决问题。")
 
     action_subject_warnings = 0
     action_detail_warnings = 0
@@ -895,6 +913,11 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     action_structure_warnings = 0
     reaction_warnings = 0
     summary_generated_warnings = 0
+    prop_continuity_warnings = 0
+    temporal_warnings = 0
+    spatial_warnings = 0
+    evidence_warnings = 0
+    sound_transition_warnings = 0
 
     for scene_index, scene in enumerate(scenes, start=1):
         heading = str(scene.get("heading") or "")
@@ -920,6 +943,17 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
             add_issue("场次衔接", "P1", f"第 {scene_index} 场没有说明结果如何推动下一场。", scene_index)
 
         scene_blocks = [block for block in (scene.get("blocks") or []) if isinstance(block, dict)]
+        scene_text = " ".join(text_of(block.get("text")) for block in scene_blocks)
+        scene_time = text_of(scene.get("timeOfDay"))
+        if temporal_markers.search(scene_text) and scene_time in {"", "未知", "不明"}:
+            temporal_warnings += 1
+            add_issue("时间错乱", "P1", f"第 {scene_index} 场出现时间锚点，但场次头未明确时间，需回看视频核对先后顺序。", scene_index)
+        if spatial_markers.search(scene_text) and (not location or location in {"待补充", "未知"}):
+            spatial_warnings += 1
+            add_issue("空间跳跃", "P1", f"第 {scene_index} 场正文包含空间变化，但场次地点未明确，需补齐空间关系。", scene_index)
+        if continuity_entities.search(scene_text) and not scene.get("props") and not scene.get("continuityOut"):
+            prop_continuity_warnings += 1
+            add_issue("道具断裂", "P1", f"第 {scene_index} 场出现关键道具，但没有道具状态或场尾连续性记录。", scene_index)
         for block_index, block in enumerate(scene_blocks, start=1):
             block_type = block.get("type")
             text = str(block.get("text") or "").strip()
@@ -961,6 +995,17 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 if _ABSTRACT_ACTION_RE.search(text) or not _ACTION_VERB_RE.search(text):
                     action_structure_warnings += 1
                     add_issue("动作概括", "P1", f"第 {scene_index} 场第 {block_index} 个动作可能停留在抽象结论，需补主体、动作、对象和结果。", scene_index, block_index)
+
+                if block.get("inferred") or block.get("evidence") is False:
+                    evidence_warnings += 1
+                    add_issue("事实臆造", "P0", f"第 {scene_index} 场第 {block_index} 个动作标记为推断，不能当作视频事实输出。", scene_index, block_index)
+            elif block_type == "sound":
+                if text and block.get("source") not in {None, "", "heard", "听见"}:
+                    sound_transition_warnings += 1
+                    add_issue("音效缺失", "P1", f"第 {scene_index} 场第 {block_index} 个声音来源未标记为可听证据。", scene_index, block_index)
+            elif block_type in {"screen_text", "transition"} and not (block.get("startSec") is not None or block.get("endSec") is not None):
+                sound_transition_warnings += 1
+                add_issue("格式错误", "P2", f"第 {scene_index} 场第 {block_index} 个字幕/转场缺少时间定位。", scene_index, block_index)
 
         # A sharp line normally needs a visible or audible response before the
         # next beat. Flag only high-impact dialogue with no nearby reaction so
@@ -1023,6 +1068,11 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         "eventChainWarnings": event_chain_warnings,
         "reactionWarnings": reaction_warnings,
         "summaryGeneratedWarnings": summary_generated_warnings,
+        "propContinuityWarnings": prop_continuity_warnings,
+        "temporalWarnings": temporal_warnings,
+        "spatialWarnings": spatial_warnings,
+        "evidenceWarnings": evidence_warnings,
+        "soundTransitionWarnings": sound_transition_warnings,
         "severityCounts": severity_counts,
         "issueTags": issue_tags,
         "issues": issues[:100],

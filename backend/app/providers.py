@@ -135,7 +135,7 @@ def ark_prompt(title: str, duration_sec: float) -> str:
         "{version:string,title:string,eventChain:[{id:string,role:'cause'|'conflict'|'turn'|'result'|'hook',summary:string,evidence:string,startSec:number,endSec:number}],settingRules:string[],"
         "characters:string[],characterProfiles:[{id:string,name:string,aliases:string[],appearance:string,clothing:string,firstAppearance:string}],"
         "scenes:[{id:string,heading:string,location:string,timeOfDay:string,interiorExterior:string,segmentType:'main'|'recap'|'trailer'|'title_card'|'credits'|'flashback',"
-        "goal:string,obstacle:string,result:string,continuityIn:string,continuityOut:string,hook:string,summary:string,characters:string[],environment:string,"
+        "goal:string,obstacle:string,result:string,continuityIn:string,continuityOut:string,hook:string,summary:string,characters:string[],environment:string,props:[{name:string,state:string,evidence:string}],"
         "blocks:[{type:'action',text:string,emotion:string,performance:string,object:string,result:string,startSec:number,endSec:number}|"
         "{type:'dialogue',speaker:string,performance:string,tone:string,volume:string,pause:string,emphasis:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,startSec:number,endSec:number}|"
         "{type:'vo',speaker:string,voKind:'os'|'narration'|'memory'|'phone'|'unknown',performance:string,emotion:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,inferred:boolean,startSec:number,endSec:number}|"
@@ -312,6 +312,7 @@ def openai_script(title: str, duration_sec: float, transcript: str) -> dict[str,
         "blocks 可使用 action、dialogue、vo、sound、screen_text、transition、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名、视频中实际动词、动作对象和结果，不能省略动作主语或把动作概括成泛化词。"
         "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；每个 block 只能有一个 speaker。人物/旁白画外音、内心声、电话声必须使用 vo，speaker 写对应人物或旁白，voKind 区分 os、narration、memory、phone、unknown，不能漏标或把旁白猜成 OS。语气、音量、停顿、重音只有能从音频判断时才填写。"
         "sound 只描述原片中确实听到且有用的动作音效或环境声，不输出背景音乐；字幕、系统提示、闪回和回到现实必须用 screen_text 或 transition 单独标记。"
+        "16. props 必须记录视频中实际出现的关键道具及其状态/证据；跨场景的手机、证物、钱、钥匙等必须在 continuityIn/continuityOut 或 props 中保持可追踪。时间锚点、室内外和门内外变化必须写入场次头或衔接字段，不能让正文自行猜测。"
         f"视频标题：{title}\n视频时长：{duration_sec:.1f} 秒\n转写：{transcript}"
     )
     payload = json.dumps({
