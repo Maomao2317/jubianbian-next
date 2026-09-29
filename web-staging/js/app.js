@@ -639,11 +639,12 @@
   }
 
   async function openPointsModal() {
+    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-loading">正在加载积分流水…</div></div></div>`;
     try {
       const ledger = await api.getCreditLedger();
       const rows = (ledger.items || []).map(item => `<div class="points-row"><div><strong>${escapeHtml(item.reason || "积分变动")}</strong><small>${formatDate(item.created_at)}</small></div><div class="points-amount ${item.amount >= 0 ? "plus" : "minus"}">${item.amount >= 0 ? "+" : ""}${Number(item.amount).toFixed(1)}<small>余额 ${Number(item.balance_after).toFixed(1)}</small></div></div>`).join("");
       $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-balance"><span>当前剩余积分</span><strong>${Number(ledger.balance || 0).toFixed(1)}</strong></div><div class="points-list">${rows || `<div class="points-empty">暂无积分流水</div>`}</div><div class="modal-actions"><button class="secondary-btn" type="button" data-action="recharge">联系充值</button><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
-    } catch (error) { toast(error.message || "积分流水加载失败", "error"); }
+    } catch (error) { toast(error.message || "积分流水加载失败", "error"); $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-empty">积分流水暂时无法加载，请稍后重试。</div></div></div>`; }
   }
 
   function startAuthCooldown(seconds) {
