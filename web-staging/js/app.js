@@ -101,7 +101,7 @@
   }
 
   function renderHeader() {
-    const credits = state.profile ? state.profile.credits : "--";
+    const credits = state.profile ? Number(state.profile.credits || 0).toFixed(1) : "--";
     const initial = state.profile && state.profile.name ? state.profile.name.charAt(0) : "用";
     $("#header").innerHTML = `
       <div class="header-inner">
@@ -111,9 +111,9 @@
         </a>
         <span class="edition">核心识别测试版</span>
         <div class="header-right">
-          <div class="credit-pill" title="每识别 1 分钟视频消耗 1 分钟额度">
-            <span class="credit-label">可用额度</span>
-            <strong>${credits}</strong><span>分钟</span>
+          <div class="credit-pill" title="当前可用积分">
+            <span class="credit-label">剩余积分</span>
+            <strong>${credits}</strong><span>积分</span>
           </div>
           ${state.profile && state.profile.role === "admin" ? `<a class="text-btn" href="#/admin">管理后台</a>` : ""}
           <button class="text-btn" type="button" data-action="recharge">充值</button>
@@ -219,7 +219,7 @@
       <div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
         <div class="modal-head"><div><span class="modal-kicker">账号中心</span><h2 id="accountTitle">个人信息</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>
         <div class="account-profile"><div class="account-avatar">${escapeHtml((profile.name || "用").charAt(0))}</div><div><strong>${escapeHtml(profile.name || "剧编编用户")}</strong><span>${escapeHtml(profile.email || "")}</span></div></div>
-        <dl class="account-details"><div><dt>注册邮箱</dt><dd>${escapeHtml(profile.email || "")}</dd></div><div><dt>当前方案</dt><dd>${escapeHtml(profile.plan || "体验版")}</dd></div><div><dt>可用额度</dt><dd>${escapeHtml(profile.credits ?? "0")} 分钟</dd></div><div><dt>注册时间</dt><dd>${profile.createdAt ? escapeHtml(formatDate(profile.createdAt)) : "-"}</dd></div></dl>
+        <dl class="account-details"><div><dt>注册邮箱</dt><dd>${escapeHtml(profile.email || "")}</dd></div><div><dt>当前方案</dt><dd>${escapeHtml(profile.plan || "体验版")}</dd></div><div><dt>剩余积分</dt><dd>${Number(profile.credits || 0).toFixed(1)} 积分</dd></div><div><dt>注册时间</dt><dd>${profile.createdAt ? escapeHtml(formatDate(profile.createdAt)) : "-"}</dd></div></dl>
         <div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">返回</button><button class="danger-btn" type="button" data-action="logout">退出登录</button></div>
       </div></div>`;
   }
@@ -243,7 +243,7 @@
     const meta = [
       task.fileName || "未命名视频",
       formatDuration(task.durationSec),
-      `${task.estimatedMinutes || 0} 分钟额度`,
+      `${Number(task.estimatedMinutes || 0).toFixed(1)} 积分`,
       timeAgo(task.createdAt),
     ];
     const progress = task.status === "running" || task.status === "queued"
@@ -383,7 +383,7 @@
           <strong class="aside-file">${escapeHtml(task.fileName)}</strong>
           <dl class="meta-list">
             <div><dt>视频时长</dt><dd>${formatDuration(task.durationSec)}</dd></div>
-            <div><dt>消耗额度</dt><dd>${task.creditsUsed || task.estimatedMinutes} 分钟</dd></div>
+            <div><dt>消耗积分</dt><dd>${Number(task.creditsUsed || task.estimatedMinutes || 0).toFixed(1)} 积分</dd></div>
             <div><dt>完成时间</dt><dd>${formatDate(task.completedAt || task.createdAt)}</dd></div>
           </dl>
         </div>
@@ -472,10 +472,10 @@
       <strong>拖入视频，或点击选择文件</strong>
       <span>${cfg.upload.hint}</span>
     </div>`;
-    let billing = "选择视频后自动读取时长并计算额度";
+    let billing = "选择视频后自动读取时长并预估积分";
     if (upload.error) billing = upload.error;
     else if (overDuration) billing = `视频超过 ${cfg.upload.maxDurationMinutes} 分钟，请更换文件`;
-    else if (estimate) billing = `预计消耗 ${estimate} 分钟额度，当前可用 ${credits} 分钟`;
+    else if (estimate) billing = `预计消耗 ${Number(estimate).toFixed(1)} 积分，当前可用 ${Number(credits).toFixed(1)} 积分`;
     return `<div class="modal-mask" id="modalMask">
       <div class="modal create-modal" role="dialog" aria-modal="true" aria-labelledby="createTitle">
         <div class="modal-head">

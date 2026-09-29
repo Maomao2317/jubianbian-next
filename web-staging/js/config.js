@@ -83,8 +83,8 @@ window.APP_CONFIG = {
   },
 
   billing: {
-    unitLabel: "分钟",
-    freeMinutes: 5,
+    unitLabel: "积分",
+    freeMinutes: 25,
     rounding: "ceil",
   },
 
