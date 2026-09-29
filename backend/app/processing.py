@@ -85,7 +85,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         quality["warning"] = ark_fallback_message(ark_error)
         if openai_error and provider == "local-fallback":
             quality["warning"] += " OpenAI 备用服务也不可用，已使用本地兜底结果。"
-    usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
+    usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None, "api_cost_rmb": 0}
     return script, quality, {
         **usage,
         "provider": provider,
@@ -123,6 +123,7 @@ async def process_task(task_id: str) -> None:
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             total_tokens=usage.get("total_tokens"),
+            api_cost_rmb=usage.get("api_cost_rmb", 0),
             completed_at=now_iso(),
         )
         record_task_event(

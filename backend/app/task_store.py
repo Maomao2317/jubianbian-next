@@ -51,6 +51,7 @@ def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         if any(value is not None for value in (input_tokens, output_tokens, total_tokens))
         else None
     )
+    task["apiCostRmb"] = round(float(task.pop("api_cost_rmb", 0) or 0), 6)
     task.pop("stored_path", None)
     return task
 

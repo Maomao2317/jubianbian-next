@@ -20,6 +20,8 @@ from .config import (
     ARK_FILE_POLL_SECONDS,
     ARK_FILE_POLL_TIMEOUT_SECONDS,
     ARK_MODEL,
+    ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
+    ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_VIDEO_FPS,
     DATA_DIR,
     OPENAI_API_KEY,
@@ -199,7 +201,7 @@ def ark_response_text(payload: Any) -> str:
     walk(payload)
     return "\n".join(parts).strip()
 
-def ark_usage(payload: Any) -> dict[str, int | None]:
+def ark_usage(payload: Any) -> dict[str, int | float | None]:
     usage = payload.get("usage") if isinstance(payload, dict) else {}
     usage = usage if isinstance(usage, dict) else {}
 
@@ -215,7 +217,23 @@ def ark_usage(payload: Any) -> dict[str, int | None]:
     total_tokens = number("total_tokens")
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+    # Some Ark endpoints expose a billed amount alongside usage. Accept the
+    # common shapes without coupling the app to one response version.
+    cost: float | None = None
+    for source in (usage, payload if isinstance(payload, dict) else {}):
+        for key in ("api_cost_rmb", "cost_rmb", "total_cost", "cost"):
+            value = source.get(key)
+            if isinstance(value, (int, float)):
+                cost = float(value)
+                break
+        if cost is not None:
+            break
+    if cost is None and (input_tokens is not None or output_tokens is not None):
+        cost = (
+            (input_tokens or 0) * ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION
+            + (output_tokens or 0) * ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION
+        ) / 1_000_000
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens, "api_cost_rmb": round(cost or 0, 6)}
 
 
 def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str, Any], dict[str, int | None]]:

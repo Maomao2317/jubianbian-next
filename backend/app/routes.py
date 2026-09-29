@@ -284,13 +284,16 @@ def admin_overview(request: Request) -> dict[str, Any]:
     with db() as connection:
         users = connection.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active, COALESCE(SUM(credits), 0) AS credits FROM users").fetchone()
         task_status = connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
-        usage = connection.execute("SELECT COALESCE(SUM(credits_used), 0) AS used FROM tasks WHERE status = 'done'").fetchone()
+        # API cost belongs to the provider call, not to the user-facing point
+        # charge. Include review completions as well as successful tasks.
+        usage = connection.execute("SELECT COALESCE(SUM(credits_used), 0) AS used, COALESCE(SUM(api_cost_rmb), 0) AS api_cost FROM tasks WHERE status IN ('done', 'review')").fetchone()
         recent = connection.execute("SELECT t.id, t.user_id, t.title, t.status, t.stage, t.credits_used, t.created_at, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id = t.user_id ORDER BY t.created_at DESC LIMIT 10").fetchall()
     statuses = {row["status"]: int(row["count"]) for row in task_status}
     return {
         "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
         "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
         "creditsUsed": int(usage["used"] or 0),
+        "apiCostRmb": round(float(usage["api_cost"] or 0), 2),
         "recentTasks": [dict(row) for row in recent],
         "sections": {"analytics": False, "funnel": False, "retention": False, "codeManagement": False},
         "timestamp": now_iso(),

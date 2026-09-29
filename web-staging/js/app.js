@@ -157,7 +157,7 @@
       const overview = await api.getAdminOverview();
       const tab = state.adminTab;
       const nav = tabs.map(item => `<button class="admin-tab ${tab === item.id ? "active" : ""}" data-action="admin-tab" data-tab="${item.id}" ${["analytics","funnel","retention","codes"].includes(item.id) ? "disabled" : ""}>${item.label}</button>`).join("");
-      let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article><span>剩余额度</span><strong>${overview.users.credits}</strong><small>分钟</small></article><article><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 失败 ${overview.tasks.failed}</small></article><article><span>已消耗额度</span><strong>${overview.creditsUsed}</strong><small>分钟</small></article></div>`;
+      let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article><span>剩余积分</span><strong>${Number(overview.users.credits || 0).toFixed(1)}</strong><small>积分</small></article><article><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 失败 ${overview.tasks.failed}</small></article><article><span>API 使用成本</span><strong>¥ ${Number(overview.apiCostRmb || 0).toFixed(2)}</strong><small>人民币</small></article></div>`;
       if (tab === "users" || tab === "credits") {
         const userPageSize = 20;
         const users = await api.getAdminUsers({ limit: userPageSize, offset: state.adminUserPage * userPageSize, keyword: state.adminUserKeyword, status: state.adminUserStatus });

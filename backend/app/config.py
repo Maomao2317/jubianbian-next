@@ -38,6 +38,12 @@ ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
+# Optional Ark billing fallback.  The Ark response is preferred when it
+# contains a billed amount; these rates let staging calculate a cost from the
+# recorded token usage when the response only exposes token counts.  Values
+# are RMB per one million tokens and should match the configured model.
+ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION = float(os.getenv("ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION", "0") or "0")
+ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION = float(os.getenv("ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION", "0") or "0")
 TENCENTCLOUD_SECRET_ID = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
 TENCENTCLOUD_SECRET_KEY = os.getenv("TENCENTCLOUD_SECRET_KEY", "").strip()
 TENCENTCLOUD_REGION = os.getenv("TENCENTCLOUD_REGION", "ap-guangzhou").strip() or "ap-guangzhou"
