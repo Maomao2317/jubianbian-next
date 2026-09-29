@@ -442,9 +442,9 @@
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
-      </div>` : "";
+      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0 级质量问题，完成复核前不可导出。</div>` : "";
     let content = "";
-    if (task.status === "done") content = renderResult(task);
+    if (task.status === "done" || task.status === "review") content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);
     if (task.status === "failed") content = `<div class="error-panel">
       <div class="error-symbol">!</div>
@@ -802,7 +802,8 @@
       const rmbAmount = Number(rmbText);
       if (!Number.isFinite(rmbAmount) || rmbAmount <= 0) { toast("请输入有效人民币金额", "error"); return; }
       const pointsAmount = (rmbAmount * 13.8).toFixed(1);
-      const rechargeReason = window.prompt(`本次将增加 ${pointsAmount} 积分，填写充值备注`, "管理员人民币充值") || "管理员人民币充值";
+      const rechargeReason = window.prompt(`本次将增加 ${pointsAmount} 积分，填写充值备注`, "管理员人民币充值");
+      if (rechargeReason === null) return;
       try { await api.adjustAdminCredits(id, { rmb_amount: rmbAmount, reason: rechargeReason }); toast(`充值成功，已增加 ${pointsAmount} 积分`); await renderAdmin(); } catch (error) { toast(error.message || "充值失败", "error"); }
       return;
       /* legacy minute adjustment flow retained for compatibility */
