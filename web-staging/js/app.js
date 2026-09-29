@@ -23,6 +23,7 @@
     menuTaskId: "",
     upload: { file: null, durationSec: 0, reading: false, error: "" },
     pollTimer: null,
+    adminTab: "overview",
   };
 
   function escapeHtml(value) {
@@ -132,9 +133,21 @@
   async function renderAdmin() {
     if (!state.profile || state.profile.role !== "admin") { go("tasks"); return; }
     try {
+      const tabs = [{id:"overview",label:"概览"},{id:"users",label:"用户"},{id:"credits",label:"充值"},{id:"tasks",label:"任务"},{id:"usage",label:"用量"},{id:"analytics",label:"分析（后续）"},{id:"funnel",label:"转化漏斗（后续）"},{id:"retention",label:"留存（后续）"},{id:"codes",label:"码管理（后续）"}];
       const overview = await api.getAdminOverview();
-      const tabs = ["概览", "用户", "充值", "任务", "用量", "分析", "转化漏斗", "留存", "码管理"];
-      $("#main").innerHTML = `<section class="workspace-page"><div class="page-head"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p class="page-subtitle">平台运行、用户额度和任务处理</p></div></div><div class="filter-tabs">${tabs.map((tab, i) => `<button class="filter-tab ${i < 5 ? "active" : ""}" type="button" ${i >= 5 ? "disabled title=\"后续版本开放\"" : ""}>${tab}${i >= 5 ? "（后续）" : ""}</button>`).join("")}</div><div class="stats-grid"><article class="stat-card"><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article class="stat-card"><span>剩余额度</span><strong>${overview.users.credits}</strong><small>分钟</small></article><article class="stat-card"><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 失败 ${overview.tasks.failed}</small></article><article class="stat-card"><span>已消耗额度</span><strong>${overview.creditsUsed}</strong><small>分钟</small></article></div><div class="panel"><div class="panel-head"><h2>最近任务</h2><span>实时数据</span></div><div class="table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td>${escapeHtml(item.title || item.id)}</td><td>${escapeHtml(item.email || item.name || "-")}</td><td>${escapeHtml(item.status)}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div><p class="muted-note">当前版本暂不开发码管理、Eval、分析、转化漏斗和留存，仅保留入口。</p></section>`;
+      const tab = state.adminTab;
+      const nav = tabs.map(item => `<button class="admin-tab ${tab === item.id ? "active" : ""}" data-action="admin-tab" data-tab="${item.id}" ${["analytics","funnel","retention","codes"].includes(item.id) ? "disabled" : ""}>${item.label}</button>`).join("");
+      let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article><span>剩余额度</span><strong>${overview.users.credits}</strong><small>分钟</small></article><article><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 失败 ${overview.tasks.failed}</small></article><article><span>已消耗额度</span><strong>${overview.creditsUsed}</strong><small>分钟</small></article></div>`;
+      if (tab === "users" || tab === "credits") {
+        const users = await api.getAdminUsers({ limit: 100 });
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>启用、停用账号并调整分钟额度</p></div><span>${users.total} 个账号</span></div><div class="admin-table-wrap"><table><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>剩余额度</th><th>任务/消耗</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td><strong>${escapeHtml(user.name || "未命名")}</strong><small>${escapeHtml(user.email)}</small></td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${user.credits}</strong> 分钟</td><td>${user.taskCount} / ${user.totalUsed} 分钟</td><td><button class="admin-action" data-action="admin-credit" data-id="${user.id}">调整额度</button><button class="admin-action" data-action="admin-status" data-id="${user.id}" data-active="${user.isActive ? "0" : "1"}">${user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无用户</td></tr>`}</tbody></table></div></div>`;
+      } else if (tab === "tasks" || tab === "usage") {
+        const tasks = await api.getAdminTasks({ limit: 100 });
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>查看全平台任务状态和额度消耗</p></div><span>${tasks.total} 条任务</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => `<tr><td><strong>${escapeHtml(item.title || item.id)}</strong><small>${escapeHtml(item.file_name || "")}</small></td><td>${escapeHtml(item.email || "-")}</td><td><span class="admin-status ${item.status === "done" ? "on" : item.status === "failed" ? "off" : "wait"}">${escapeHtml(item.status)}</span></td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td><td>${item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${item.id}">重试</button>` : "-"}</td></tr>`).join("") || `<tr><td colspan="6">暂无任务</td></tr>`}</tbody></table></div></div>`;
+      } else {
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近任务</h2><p>平台实时处理概况</p></div><span>实时数据</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td>${escapeHtml(item.title || item.id)}</td><td>${escapeHtml(item.email || item.name || "-")}</td><td>${escapeHtml(item.status)}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div>`;
+      }
+      $("#main").innerHTML = `<section class="admin-page"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户额度和任务处理</p></div><a class="secondary-btn" href="#/tasks">返回工作台</a></div><div class="admin-nav">${nav}</div>${body}<p class="admin-note">分析、转化漏斗、留存、Eval、码管理暂保留入口，后续版本开放。</p></section>`;
     } catch (error) { toast(error.message || "后台数据加载失败", "error"); }
   }
 
@@ -721,6 +734,24 @@
 
     const action = actionElement.dataset.action;
     const id = actionElement.dataset.id;
+    if (action === "admin-tab") { state.adminTab = actionElement.dataset.tab; await renderAdmin(); return; }
+    if (action === "admin-credit") {
+      const amountText = window.prompt("输入调整分钟数（充值填正数，扣减填负数）", "100");
+      if (amountText === null) return;
+      const amount = Number(amountText);
+      if (!Number.isInteger(amount) || amount === 0) { toast("请输入非零整数", "error"); return; }
+      const reason = window.prompt("调整原因", "测试额度调整") || "管理员调整";
+      try { await api.adjustAdminCredits(id, { amount, reason }); toast("额度已更新"); await renderAdmin(); } catch (error) { toast(error.message || "额度更新失败", "error"); }
+      return;
+    }
+    if (action === "admin-status") {
+      try { await api.setAdminUserStatus(id, actionElement.dataset.active === "1"); toast("账号状态已更新"); await renderAdmin(); } catch (error) { toast(error.message || "状态更新失败", "error"); }
+      return;
+    }
+    if (action === "admin-retry") {
+      try { await api.retryAdminTask(id); toast("任务已重新排队"); await renderAdmin(); } catch (error) { toast(error.message || "任务重试失败", "error"); }
+      return;
+    }
     if (action === "toggle-password") {
       const input = document.getElementById(actionElement.dataset.target);
       if (!input) return;

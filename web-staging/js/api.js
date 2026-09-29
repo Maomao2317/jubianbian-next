@@ -329,6 +329,7 @@
     getAdminTasks(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/tasks") + (search ? "?" + search : "")); },
     adjustAdminCredits(id, payload) { return this.request(this.url("/admin/users/:id/credits", { id }), { method: "POST", body: JSON.stringify(payload) }); },
     setAdminUserStatus(id, isActive) { return this.request(this.url("/admin/users/:id/status", { id }), { method: "PATCH", body: JSON.stringify({ isActive }) }); },
+    retryAdminTask(id) { return this.request(this.url("/admin/tasks/:id/retry", { id }), { method: "POST" }); },
     requestCode(email, purpose = "register") {
       return this.request(this.url(cfg().api.endpoints.authCode), { method: "POST", body: JSON.stringify({ email, purpose }) });
     },
