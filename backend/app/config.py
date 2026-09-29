@@ -73,3 +73,6 @@ LOG_DIR = DATA_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 APP_STARTED_MONOTONIC = time.monotonic()
 REQUEST_ID = ContextVar("request_id", default="-")
+POINTS_PER_MINUTE = 5
+POINTS_PER_YUAN = 13.8
+REGISTER_POINTS = 25

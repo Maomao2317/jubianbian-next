@@ -42,6 +42,8 @@ from .config import (
     MAX_DURATION_MINUTES,
     MAX_DURATION_SECONDS,
     MAX_UPLOAD_BYTES,
+    POINTS_PER_MINUTE,
+    REGISTER_POINTS,
     OPENAI_API_KEY,
     PASSWORD_DIGIT_RE,
     PASSWORD_LETTER_RE,
@@ -183,7 +185,7 @@ async def register(request: Request) -> JSONResponse:
                 "INSERT INTO users(id, email, password_hash, name, credits, plan, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 # Testing mode: keep newly registered accounts unblocked while
                 # screenplay quality is being evaluated in both environments.
-                (user_id, email, _password_hash(password), name, 9999, "体验版", created),
+                (user_id, email, _password_hash(password), name, REGISTER_POINTS, "体验版", created),
             )
             user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     except sqlite3.IntegrityError:
@@ -487,10 +489,11 @@ async def create_task(
                 created,
             ),
         )
-        if estimated > int(user["credits"]):
+        charge_points = estimated * POINTS_PER_MINUTE
+        if charge_points > int(user["credits"]):
             target.unlink(missing_ok=True)
-            raise HTTPException(status_code=402, detail=f"额度不足，当前剩余 {user['credits']} 分钟")
-        connection.execute("UPDATE users SET credits = credits - ? WHERE id = ?", (estimated, user["id"]))
+            raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {user['credits']} 积分")
+        connection.execute("UPDATE users SET credits = credits - ? WHERE id = ?", (charge_points, user["id"]))
     record_task_event(task_id, "created", "任务已创建", status="queued", stage="queued", progress_percent=4)
     logger.info(
         "task_created task_id=%s title=%s file=%s size_bytes=%s request_id=%s",

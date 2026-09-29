@@ -4,6 +4,7 @@
  */
 (function () {
   const cfg = window.APP_CONFIG;
+  const POINTS_PER_MINUTE = 5;
   const api = window.AppAPI;
   const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -243,7 +244,7 @@
     const meta = [
       task.fileName || "未命名视频",
       formatDuration(task.durationSec),
-      `${Number(task.estimatedMinutes || 0).toFixed(1)} 积分`,
+      `${(Number(task.estimatedMinutes || 0) * POINTS_PER_MINUTE).toFixed(1)} 积分`,
       timeAgo(task.createdAt),
     ];
     const progress = task.status === "running" || task.status === "queued"
@@ -383,7 +384,7 @@
           <strong class="aside-file">${escapeHtml(task.fileName)}</strong>
           <dl class="meta-list">
             <div><dt>视频时长</dt><dd>${formatDuration(task.durationSec)}</dd></div>
-            <div><dt>消耗积分</dt><dd>${Number(task.creditsUsed || task.estimatedMinutes || 0).toFixed(1)} 积分</dd></div>
+            <div><dt>消耗积分</dt><dd>${(Number(task.creditsUsed || task.estimatedMinutes || 0) * POINTS_PER_MINUTE).toFixed(1)} 积分</dd></div>
             <div><dt>完成时间</dt><dd>${formatDate(task.completedAt || task.createdAt)}</dd></div>
           </dl>
         </div>
@@ -461,7 +462,8 @@
     const estimate = uploadEstimate();
     const credits = state.profile ? state.profile.credits : 0;
     const overDuration = upload.durationSec > cfg.upload.maxDurationMinutes * 60;
-    const insufficient = estimate > credits;
+    const estimatedPoints = estimate * POINTS_PER_MINUTE;
+    const insufficient = estimatedPoints > credits;
     const canSubmit = upload.file && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient;
     const fileBlock = upload.file ? `<div class="selected-file">
       <div class="file-thumb"><span></span></div>
@@ -475,7 +477,7 @@
     let billing = "选择视频后自动读取时长并预估积分";
     if (upload.error) billing = upload.error;
     else if (overDuration) billing = `视频超过 ${cfg.upload.maxDurationMinutes} 分钟，请更换文件`;
-    else if (estimate) billing = `预计消耗 ${Number(estimate).toFixed(1)} 积分，当前可用 ${Number(credits).toFixed(1)} 积分`;
+    else if (estimate) billing = `预计消耗 ${estimatedPoints.toFixed(1)} 积分，当前可用 ${Number(credits).toFixed(1)} 积分`;
     return `<div class="modal-mask" id="modalMask">
       <div class="modal create-modal" role="dialog" aria-modal="true" aria-labelledby="createTitle">
         <div class="modal-head">
@@ -630,6 +632,10 @@
     } catch (error) {
       toast(error.message || "下载失败", "error");
     }
+  }
+
+  function openRechargeModal() {
+    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal recharge-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分充值</span><h2>联系管理员充值</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码" /><p>请扫码添加客服人员微信联系充值额度</p></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
   }
 
   function startAuthCooldown(seconds) {
@@ -804,7 +810,7 @@
     if (action === "close-modal") $("#modalRoot").innerHTML = "";
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
-    if (action === "recharge") toast("测试阶段由管理员手动增加额度");
+    if (action === "recharge") openRechargeModal();
     if (action === "open-task") go("task/" + id);
     if (action === "toggle-menu") {
       event.stopPropagation();

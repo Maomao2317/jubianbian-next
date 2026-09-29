@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import (
+    POINTS_PER_MINUTE,
     ARK_API_KEY,
     ARK_FALLBACK_ON_ERROR,
     ARK_MODEL,
@@ -135,7 +136,7 @@ async def process_task(task_id: str) -> None:
         charged = int(row["credits_used"] or 0)
         if row["user_id"] and charged > 0:
             with db() as connection:
-                connection.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (charged, row["user_id"]))
+                connection.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (charged * POINTS_PER_MINUTE, row["user_id"]))
             update_task(task_id, credits_used=0)
         update_task(
             task_id,
