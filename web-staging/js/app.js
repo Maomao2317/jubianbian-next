@@ -172,7 +172,7 @@
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近任务</h2><p>平台实时处理概况</p></div><span>实时数据</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td>${escapeHtml(item.title || item.id)}</td><td>${escapeHtml(item.email || item.user_id || item.name || "-")}</td><td>${escapeHtml(item.status)}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div>`;
       }
-      $("#main").innerHTML = `<section class="admin-page"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户额度和任务处理</p></div><a class="secondary-btn" href="#/tasks">返回工作台</a></div><div class="admin-nav">${nav}</div>${body}<p class="admin-note">分析、转化漏斗、留存、Eval、码管理暂保留入口，后续版本开放。</p></section>`;
+      $("#main").innerHTML = `<section class="admin-page"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户额度和任务处理</p></div><a class="secondary-btn admin-back-btn" href="#/tasks"><span aria-hidden="true">←</span>返回工作台</a></div><div class="admin-nav">${nav}</div>${body}<p class="admin-note">分析、转化漏斗、留存、Eval、码管理暂保留入口，后续版本开放。</p></section>`;
     } catch (error) { toast(error.message || "后台数据加载失败", "error"); }
   }
 
@@ -381,6 +381,7 @@
       </div>
       ${script.scenes.map((scene) => `<section class="scene">
         <h3>${escapeHtml(scene.heading)}</h3>
+        ${(scene.characters || []).length ? `<p class="scene-cast">出场人物：${escapeHtml([...new Set(scene.characters || [])].join("、"))}</p>` : ""}
         <div class="scene-blocks">${(scene.blocks || []).map(renderBlock).join("")}</div>
       </section>`).join("")}
     </div>`;
@@ -442,7 +443,7 @@
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
-      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0 级质量问题，完成复核前不可导出。</div>` : "";
+      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0/P1 级质量问题，完成复核前不可导出。</div>` : "";
     let content = "";
     if (task.status === "done" || task.status === "review") content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);
