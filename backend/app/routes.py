@@ -360,11 +360,24 @@ async def admin_user_credits(request: Request, user_id: str) -> dict[str, Any]:
     return {"userId": user_id, "rmbAmount": rmb_amount, "pointsAmount": points_amount, "balance": balance, "reason": reason}
 
 
-def admin_recharge_ledger(request: Request, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = "", date_to: str = "", limit: int = Query(20, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     _require_admin(request)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if keyword.strip():
+        value = f"%{keyword.strip()}%"
+        clauses.append("(u.email LIKE ? OR u.name LIKE ? OR r.reason LIKE ?)")
+        params.extend([value, value, value])
+    if date_from:
+        clauses.append("r.created_at >= ?")
+        params.append(f"{date_from}T00:00:00")
+    if date_to:
+        clauses.append("r.created_at <= ?")
+        params.append(f"{date_to}T23:59:59")
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
     with db() as connection:
-        total = connection.execute("SELECT COUNT(*) AS total FROM admin_recharge_ledger").fetchone()["total"]
-        rows = connection.execute("SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after, r.reason, r.created_at, u.email, u.name FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id ORDER BY r.id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        total = connection.execute(f"SELECT COUNT(*) AS total FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id {where}", tuple(params)).fetchone()["total"]
+        rows = connection.execute(f"SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after, r.reason, r.created_at, u.email, u.name FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id {where} ORDER BY r.id DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
     return {"total": int(total or 0), "items": [dict(row) for row in rows]}
 
 
