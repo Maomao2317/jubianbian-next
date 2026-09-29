@@ -38,6 +38,7 @@ from .routes import (
     retry_task,
     task_detail,
     task_event_list,
+    user_credit_ledger,
 )
 
 
@@ -70,6 +71,7 @@ app.add_api_route("/api/auth/login", login, methods=["POST"])
 app.add_api_route("/api/auth/reset-password", reset_password, methods=["POST"])
 app.add_api_route("/api/auth/logout", logout, methods=["POST"])
 app.add_api_route("/api/me", profile, methods=["GET"])
+app.add_api_route("/api/me/ledger", user_credit_ledger, methods=["GET"])
 app.add_api_route("/api/admin/overview", admin_overview, methods=["GET"])
 app.add_api_route("/api/admin/users", admin_users, methods=["GET"])
 app.add_api_route("/api/admin/users/{user_id}/status", admin_user_status, methods=["PATCH"])

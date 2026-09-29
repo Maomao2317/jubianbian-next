@@ -136,7 +136,11 @@ async def process_task(task_id: str) -> None:
         charged = int(row["credits_used"] or 0)
         if row["user_id"] and charged > 0:
             with db() as connection:
-                connection.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (charged * POINTS_PER_MINUTE, row["user_id"]))
+                refund_points = charged * POINTS_PER_MINUTE
+                user_row = connection.execute("SELECT credits FROM users WHERE id = ?", (row["user_id"],)).fetchone()
+                balance_after = int(user_row["credits"] or 0) + refund_points if user_row else refund_points
+                connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance_after, row["user_id"]))
+                connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (row["user_id"], refund_points, balance_after, "refund", "识别失败退回", now_iso()))
             update_task(task_id, credits_used=0)
         update_task(
             task_id,

@@ -112,10 +112,10 @@
         </a>
         <span class="edition">核心识别测试版</span>
         <div class="header-right">
-          <div class="credit-pill" title="当前可用积分">
+          <button class="credit-pill" type="button" data-action="points" title="查看积分余额和流水">
             <span class="credit-label">剩余积分</span>
             <strong>${credits}</strong><span>积分</span>
-          </div>
+          </button>
           ${state.profile && state.profile.role === "admin" ? `<a class="text-btn" href="#/admin">管理后台</a>` : ""}
           <button class="text-btn" type="button" data-action="recharge">充值</button>
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
@@ -638,6 +638,14 @@
     $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal recharge-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分充值</span><h2>联系管理员充值</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码" /><p>请扫码添加客服人员微信联系充值额度</p></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
   }
 
+  async function openPointsModal() {
+    try {
+      const ledger = await api.getCreditLedger();
+      const rows = (ledger.items || []).map(item => `<div class="points-row"><div><strong>${escapeHtml(item.reason || "积分变动")}</strong><small>${formatDate(item.created_at)}</small></div><div class="points-amount ${item.amount >= 0 ? "plus" : "minus"}">${item.amount >= 0 ? "+" : ""}${Number(item.amount).toFixed(1)}<small>余额 ${Number(item.balance_after).toFixed(1)}</small></div></div>`).join("");
+      $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-balance"><span>当前剩余积分</span><strong>${Number(ledger.balance || 0).toFixed(1)}</strong></div><div class="points-list">${rows || `<div class="points-empty">暂无积分流水</div>`}</div><div class="modal-actions"><button class="secondary-btn" type="button" data-action="recharge">联系充值</button><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
+    } catch (error) { toast(error.message || "积分流水加载失败", "error"); }
+  }
+
   function startAuthCooldown(seconds) {
     clearInterval(state.authCooldownTimer);
     state.authCooldown = Math.max(0, Math.ceil(Number(seconds) || 0));
@@ -805,6 +813,7 @@
     }
     if (action === "request-code") { await requestCode(); return; }
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
+    if (action === "points") { await openPointsModal(); return; }
     if (action === "logout") { await logout(); return; }
     if (action === "create") openCreateModal();
     if (action === "close-modal") $("#modalRoot").innerHTML = "";

@@ -324,6 +324,7 @@
     getProfile() {
       return this.request(this.url(cfg().api.endpoints.me));
     },
+    getCreditLedger() { return this.request(this.url("/me/ledger")); },
     getAdminOverview() { return this.request(this.url("/admin/overview")); },
     getAdminUsers(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/users") + (search ? "?" + search : "")); },
     getAdminTasks(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/tasks") + (search ? "?" + search : "")); },

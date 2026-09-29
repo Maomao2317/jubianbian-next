@@ -251,6 +251,16 @@ def profile(request: Request) -> dict[str, Any]:
     return _user_payload(current_user(request))
 
 
+def user_credit_ledger(request: Request, limit: int = Query(100, ge=1, le=200)) -> dict[str, Any]:
+    user = current_user(request)
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT id, amount, balance_after, entry_type, reason, created_at FROM credit_ledger WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user["id"], limit),
+        ).fetchall()
+    return {"balance": int(user["credits"]), "items": [dict(row) for row in rows]}
+
+
 # Administrator console APIs.  The console deliberately exposes operational
 # controls only; invitation/code management and product analytics are kept for
 # a later phase.
@@ -493,7 +503,9 @@ async def create_task(
         if charge_points > int(user["credits"]):
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {user['credits']} 积分")
-        connection.execute("UPDATE users SET credits = credits - ? WHERE id = ?", (charge_points, user["id"]))
+        balance_after = int(user["credits"]) - charge_points
+        connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance_after, user["id"]))
+        connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -charge_points, balance_after, "consume", "视频识别消耗", created))
     record_task_event(task_id, "created", "任务已创建", status="queued", stage="queued", progress_percent=4)
     logger.info(
         "task_created task_id=%s title=%s file=%s size_bytes=%s request_id=%s",

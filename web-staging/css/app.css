@@ -168,6 +168,7 @@ a { color: inherit; text-decoration: none; }
 }
 
 .credit-pill strong { color: var(--gold); font-size: 16px; }
+.credit-pill:hover { border-color: rgba(242,191,50,.7); background: #273348; }
 .credit-label { color: #aeb6c3; margin-right: 3px; }
 
 .text-btn {
@@ -236,6 +237,21 @@ a { color: inherit; text-decoration: none; }
 .recharge-content { padding: 8px 0 20px; text-align: center; }
 .recharge-content img { display: block; width: min(280px, 100%); margin: 0 auto 14px; border-radius: 8px; }
 .recharge-content p { margin: 0; color: var(--ink-soft); font-size: 14px; font-weight: 650; }
+.points-modal { width: min(520px, calc(100% - 32px)); }
+.points-balance { margin-bottom: 16px; padding: 18px 20px; border: 1px solid #ead89b; border-radius: 10px; background: var(--gold-pale); }
+.points-balance span { display: block; color: #80610b; font-size: 12px; }
+.points-balance strong { display: block; margin-top: 6px; color: #211800; font-size: 30px; }
+.points-list { max-height: 330px; overflow-y: auto; border: 1px solid var(--line); border-radius: 9px; }
+.points-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.points-row:last-child { border-bottom: 0; }
+.points-row strong, .points-row small { display: block; }
+.points-row strong { color: var(--ink-soft); font-size: 13px; }
+.points-row small { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.points-amount { font-size: 15px; font-weight: 750; text-align: right; }
+.points-amount.plus { color: var(--green); }
+.points-amount.minus { color: var(--red); }
+.points-amount small { color: var(--muted); font-weight: 500; }
+.points-empty { padding: 36px 16px; color: var(--muted); text-align: center; font-size: 13px; }
 @media (max-width: 760px) { .admin-page { width: min(100% - 28px, 1180px); padding-top: 26px; } .admin-heading { align-items: flex-start; flex-direction: column; } .admin-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-toolbar { flex-wrap: wrap; } }
 
 .page {
