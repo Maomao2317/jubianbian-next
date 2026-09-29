@@ -413,6 +413,34 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             return value
         return str(value).strip().lower() in {"1", "true", "yes", "是", "推断"}
 
+    def emotion_fields(value: Any) -> dict[str, Any]:
+        """Normalize evidence-bound emotion metadata without inventing it."""
+        if not isinstance(value, dict):
+            return {}
+        fields: dict[str, Any] = {}
+        aliases = {
+            "emotionType": ("emotionType", "emotion_type", "type"),
+            "emotionTrigger": ("emotionTrigger", "emotion_trigger", "trigger"),
+            "emotionChange": ("emotionChange", "emotion_change", "change"),
+            "emotionTarget": ("emotionTarget", "emotion_target", "target"),
+            "emotionEvidence": ("emotionEvidence", "emotion_evidence", "evidence"),
+            "speechTone": ("speechTone", "speech_tone"),
+        }
+        for output, keys in aliases.items():
+            for key in keys:
+                text = normalize_text(value.get(key))
+                if text:
+                    fields[output] = text
+                    break
+        raw_intensity = value.get("emotionIntensity", value.get("emotion_intensity"))
+        try:
+            intensity = int(raw_intensity)
+        except (TypeError, ValueError):
+            intensity = -1
+        if 0 <= intensity <= 5:
+            fields["emotionIntensity"] = intensity
+        return fields
+
     def profiles(values: Any) -> list[dict[str, Any]]:
         if isinstance(values, dict):
             values = [{"name": key, "appearance": value} for key, value in values.items()]
@@ -579,6 +607,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block["endSec"] = end
             if block_type in {"action", "vo"}:
                 block["emotion"] = normalize_text(raw_block.get("emotion"))
+                block.update(emotion_fields(raw_block))
                 performance = normalize_text(
                     raw_block.get("performance")
                     or raw_block.get("acting")
@@ -589,6 +618,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block_type == "dialogue":
                 speaker = str(raw_block.get("speaker") or "未知说话人").strip()
                 block["speaker"] = alias_map.get(speaker.casefold(), speaker)
+                block["rawText"] = str(raw_block.get("rawText") or dialogue_source).strip()
+                block["finalText"] = text
                 if source_text:
                     block["sourceText"] = str(dialogue_source).strip()
                 block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
@@ -604,8 +635,10 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 # by its own emotion block instead.
                 block["emotion"] = ""
                 block["emotionImportant"] = False
+                block.update(emotion_fields(raw_block))
                 performance_parts = [
                     raw_block.get("performance") or raw_block.get("acting") or raw_block.get("delivery"),
+                    raw_block.get("speechTone"),
                     raw_block.get("tone"),
                     raw_block.get("volume"),
                     raw_block.get("pause"),
@@ -638,6 +671,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block["screenType"] = str(raw_block.get("screenType") or raw_type or "subtitle").strip()
             elif block_type == "transition":
                 block["transitionType"] = str(raw_block.get("transitionType") or raw_type or "other").strip()
+            elif block_type == "emotion":
+                block.update(emotion_fields(raw_block))
             if block_type == "action":
                 action_object = normalize_text(raw_block.get("object") or raw_block.get("target"))
                 action_result = normalize_text(raw_block.get("result") or raw_block.get("impact"))
@@ -770,6 +805,10 @@ def script_to_markdown(task: dict[str, Any]) -> str:
 
     for scene in script.get("scenes", []):
         lines.extend([scene.get("heading", "未标注场景"), ""])
+        cast = [str(name).strip() for name in (scene.get("characters") or []) if str(name).strip()]
+        if cast:
+            lines.append(f"出场人物：{'、'.join(dict.fromkeys(cast))}")
+            lines.append("")
         for block in scene.get("blocks", []):
             block_type = block.get("type")
             if block_type == "dialogue":
@@ -884,6 +923,7 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     spatial_warnings = 0
     evidence_warnings = 0
     sound_transition_warnings = 0
+    emotion_warnings = 0
 
     for scene_index, scene in enumerate(scenes, start=1):
         heading = str(scene.get("heading") or "")
@@ -923,6 +963,17 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         for block_index, block in enumerate(scene_blocks, start=1):
             block_type = block.get("type")
             text = str(block.get("text") or "").strip()
+            emotion_present = any(
+                str(block.get(key) or "").strip()
+                for key in ("emotion", "emotionType", "emotionTrigger", "emotionChange", "emotionTarget", "emotionEvidence", "speechTone")
+            ) or block.get("emotionIntensity") is not None
+            if emotion_present:
+                if not str(block.get("emotionEvidence") or "").strip():
+                    emotion_warnings += 1
+                    add_issue("情绪无证据", "P1", f"第 {scene_index} 场第 {block_index} 个块有情绪判断但缺少画面或声音证据。", scene_index, block_index)
+                if block.get("emotionIntensity") is not None and not str(block.get("emotionTrigger") or "").strip():
+                    emotion_warnings += 1
+                    add_issue("情绪链不完整", "P1", f"第 {scene_index} 场第 {block_index} 个块有情绪强度但缺少触发原因。", scene_index, block_index)
             if block_type in {"dialogue", "vo"} and text and not _SENTENCE_END_RE.search(text):
                 add_issue("格式错误", "P2", f"第 {scene_index} 场第 {block_index} 条台词或声音缺少句末标点。", scene_index, block_index)
             if block_type == "dialogue":
@@ -988,6 +1039,16 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 reaction_warnings += 1
                 add_issue("反应缺失", "P1", f"第 {scene_index} 场第 {block_index + 1} 句高冲突台词后缺少可见反应或情绪转折。", scene_index, block_index + 1)
 
+        previous_intensity: int | None = None
+        for block_index, block in enumerate(scene_blocks):
+            intensity = block.get("emotionIntensity")
+            if not isinstance(intensity, int):
+                continue
+            if previous_intensity is not None and abs(intensity - previous_intensity) >= 2 and not str(block.get("emotionChange") or "").strip():
+                emotion_warnings += 1
+                add_issue("情绪变化丢失", "P1", f"第 {scene_index} 场第 {block_index + 1} 个块情绪强度跨级变化，但没有记录变化节点。", scene_index, block_index + 1)
+            previous_intensity = intensity
+
     profile_by_name = {
         str(profile.get("name") or "").strip(): profile
         for profile in (script.get("characterProfiles") or [])
@@ -1039,8 +1100,25 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         "spatialWarnings": spatial_warnings,
         "evidenceWarnings": evidence_warnings,
         "soundTransitionWarnings": sound_transition_warnings,
+        "emotionWarnings": emotion_warnings,
         "severityCounts": severity_counts,
         "issueTags": issue_tags,
         "issues": issues[:100],
         "provider": provider,
     }
+
+
+def quality_gate(quality: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
+    """Return whether a script is safe to expose as a downloadable result.
+
+    P0/P1 findings are acceptance failures.  P0 findings are fact or structure
+    breaks; P1 findings are continuity, action-chain, or classification gaps.
+    Both can reproduce the old defects in a delivered screenplay, so callers
+    must keep the result in review instead of silently shipping a warning.
+    """
+    issues = [
+        issue
+        for issue in (quality.get("issues") or [])
+        if isinstance(issue, dict) and str(issue.get("severity") or "").upper() in {"P0", "P1"}
+    ]
+    return not issues, issues

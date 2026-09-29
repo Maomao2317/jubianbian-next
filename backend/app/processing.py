@@ -22,7 +22,7 @@ from .errors import ArkError
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration, sample_script
 from .providers import ark_fallback_message, ark_recognize, openai_script, openai_transcribe
-from .script import normalize_script, script_quality
+from .script import normalize_script, quality_gate, script_quality
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
 # Provider selection and fallback policy live here; HTTP routes only enqueue work.
@@ -44,7 +44,11 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
     if ARK_API_KEY:
         try:
             script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration)
+            script = normalize_script(script, row["title"])
             quality = script_quality(script, "ark")
+            approved, blocking = quality_gate(quality)
+            quality["deliveryStatus"] = "approved" if approved else "review_required"
+            quality["blockingIssues"] = blocking
             return script, quality, usage
         except ArkError as exc:
             ark_error = exc
@@ -74,6 +78,9 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
     provider = "openai" if script and OPENAI_API_KEY and transcript else "local-fallback"
     script = normalize_script(script, row["title"])
     quality = script_quality(script, provider)
+    approved, blocking = quality_gate(quality)
+    quality["deliveryStatus"] = "approved" if approved else "review_required"
+    quality["blockingIssues"] = blocking
     if ark_error:
         quality["warning"] = ark_fallback_message(ark_error)
         if openai_error and provider == "local-fallback":
@@ -100,10 +107,14 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在合并场景和人物")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
+        approved = quality.get("deliveryStatus") == "approved"
+        final_status = "done" if approved else "review"
+        final_stage = "done" if approved else "review"
+        final_message = "识别完成" if approved else "已生成，等待人工复核（存在 P0/P1 级质量问题）"
         update_task(
             task_id,
-            status="done",
-            stage="done",
+            status=final_status,
+            stage=final_stage,
             progress_percent=100,
             result_json=json.dumps(script, ensure_ascii=False),
             quality_json=json.dumps(quality, ensure_ascii=False),
@@ -116,10 +127,10 @@ async def process_task(task_id: str) -> None:
         )
         record_task_event(
             task_id,
-            "completed",
-            "识别完成",
-            status="done",
-            stage="done",
+            "completed" if approved else "review_required",
+            final_message,
+            status=final_status,
+            stage=final_stage,
             progress_percent=100,
             duration_ms=elapsed_ms,
         )

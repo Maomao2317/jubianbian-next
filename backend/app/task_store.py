@@ -170,6 +170,7 @@ def task_counts() -> dict[str, int]:
     return {
         "queued": counts.get("queued", 0),
         "running": counts.get("running", 0),
+        "review": counts.get("review", 0),
         "done": counts.get("done", 0),
         "failed": counts.get("failed", 0),
         "total": sum(counts.values()),
