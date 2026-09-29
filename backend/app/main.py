@@ -15,6 +15,14 @@ from .auth_store import init_db
 from .config import FRONTEND_DIR
 from .middleware import RateLimitMiddleware, RequestLogMiddleware
 from .routes import (
+    admin_audit_logs,
+    admin_overview,
+    admin_retry_task,
+    admin_tasks,
+    admin_user_credits,
+    admin_user_ledger,
+    admin_user_status,
+    admin_users,
     create_task,
     delete_task,
     download_task,
@@ -62,6 +70,14 @@ app.add_api_route("/api/auth/login", login, methods=["POST"])
 app.add_api_route("/api/auth/reset-password", reset_password, methods=["POST"])
 app.add_api_route("/api/auth/logout", logout, methods=["POST"])
 app.add_api_route("/api/me", profile, methods=["GET"])
+app.add_api_route("/api/admin/overview", admin_overview, methods=["GET"])
+app.add_api_route("/api/admin/users", admin_users, methods=["GET"])
+app.add_api_route("/api/admin/users/{user_id}/status", admin_user_status, methods=["PATCH"])
+app.add_api_route("/api/admin/users/{user_id}/credits", admin_user_credits, methods=["POST"])
+app.add_api_route("/api/admin/users/{user_id}/ledger", admin_user_ledger, methods=["GET"])
+app.add_api_route("/api/admin/tasks", admin_tasks, methods=["GET"])
+app.add_api_route("/api/admin/tasks/{task_id}/retry", admin_retry_task, methods=["POST"])
+app.add_api_route("/api/admin/audit-logs", admin_audit_logs, methods=["GET"])
 app.add_api_route("/api/tasks", list_tasks, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}", task_detail, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}/events", task_event_list, methods=["GET"])

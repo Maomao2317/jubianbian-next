@@ -201,6 +201,8 @@ async def login(request: Request) -> JSONResponse:
         user = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not user or not _password_matches(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    if "is_active" in user.keys() and not user["is_active"]:
+        raise HTTPException(status_code=403, detail="account disabled")
     with db() as connection:
         connection.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now_iso(), user["id"]))
         user = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
@@ -245,6 +247,152 @@ def logout(request: Request) -> Response:
 
 def profile(request: Request) -> dict[str, Any]:
     return _user_payload(current_user(request))
+
+
+# Administrator console APIs.  The console deliberately exposes operational
+# controls only; invitation/code management and product analytics are kept for
+# a later phase.
+def _require_admin(request: Request) -> sqlite3.Row:
+    user = current_user(request)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="无管理员权限")
+    return user
+
+
+def _admin_audit(admin_id: str, action: str, target_type: str = "", target_id: str = "", detail: str = "") -> None:
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO admin_audit_logs(admin_user_id, action, target_type, target_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (admin_id, action, target_type, target_id, detail[:1000], now_iso()),
+        )
+
+
+def admin_overview(request: Request) -> dict[str, Any]:
+    _require_admin(request)
+    with db() as connection:
+        users = connection.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active, COALESCE(SUM(credits), 0) AS credits FROM users").fetchone()
+        task_status = connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
+        usage = connection.execute("SELECT COALESCE(SUM(credits_used), 0) AS used FROM tasks WHERE status = 'done'").fetchone()
+        recent = connection.execute("SELECT t.id, t.title, t.status, t.stage, t.credits_used, t.created_at, u.email, u.name FROM tasks t LEFT JOIN users u ON u.id = t.user_id ORDER BY t.created_at DESC LIMIT 10").fetchall()
+    statuses = {row["status"]: int(row["count"]) for row in task_status}
+    return {
+        "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
+        "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
+        "creditsUsed": int(usage["used"] or 0),
+        "recentTasks": [dict(row) for row in recent],
+        "sections": {"analytics": False, "funnel": False, "retention": False, "codeManagement": False},
+        "timestamp": now_iso(),
+    }
+
+
+def admin_users(request: Request, keyword: str = "", status: str = "all", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    _require_admin(request)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if keyword.strip():
+        clauses.append("(u.email LIKE ? OR u.name LIKE ?)")
+        value = f"%{keyword.strip()}%"
+        params.extend([value, value])
+    if status == "active":
+        clauses.append("u.is_active = 1")
+    elif status == "disabled":
+        clauses.append("u.is_active = 0")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with db() as connection:
+        total = connection.execute(f"SELECT COUNT(*) AS count FROM users u {where}", params).fetchone()["count"]
+        rows = connection.execute(
+            f"SELECT u.id, u.email, u.name, u.role, u.is_active, u.credits, u.plan, u.created_at, u.last_login_at, COUNT(t.id) AS task_count, COALESCE(SUM(CASE WHEN t.status = 'done' THEN t.credits_used ELSE 0 END), 0) AS total_used FROM users u LEFT JOIN tasks t ON t.user_id = u.id {where} GROUP BY u.id ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    return {"items": [{**dict(row), "isActive": bool(row["is_active"]), "createdAt": row["created_at"], "lastLoginAt": row["last_login_at"], "taskCount": int(row["task_count"]), "totalUsed": int(row["total_used"])} for row in rows], "total": int(total), "limit": limit, "offset": offset}
+
+
+async def admin_user_status(request: Request, user_id: str) -> dict[str, Any]:
+    admin = _require_admin(request)
+    payload = await request.json()
+    active = bool(payload.get("isActive"))
+    if user_id == admin["id"] and not active:
+        raise HTTPException(status_code=400, detail="不能禁用当前管理员账号")
+    with db() as connection:
+        row = connection.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        connection.execute("UPDATE users SET is_active = ? WHERE id = ?", (1 if active else 0, user_id))
+        if not active:
+            connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    _admin_audit(admin["id"], "user_status", "user", user_id, f"isActive={active}")
+    return {"id": user_id, "isActive": active}
+
+
+async def admin_user_credits(request: Request, user_id: str) -> dict[str, Any]:
+    admin = _require_admin(request)
+    payload = await request.json()
+    try:
+        amount = int(payload.get("amount"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="额度必须是整数")
+    if amount == 0 or abs(amount) > 1_000_000:
+        raise HTTPException(status_code=400, detail="额度范围无效")
+    reason = str(payload.get("reason") or "管理员调整")[:200]
+    with db() as connection:
+        row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        balance = int(row["credits"]) + amount
+        if balance < 0:
+            raise HTTPException(status_code=400, detail="调整后额度不能为负数")
+        connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user_id))
+        connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, admin_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (user_id, amount, balance, "recharge" if amount > 0 else "adjustment", reason, admin["id"], now_iso()))
+    _admin_audit(admin["id"], "credit_adjust", "user", user_id, f"amount={amount}; reason={reason}")
+    return {"userId": user_id, "amount": amount, "balance": balance, "reason": reason}
+
+
+def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    _require_admin(request)
+    with db() as connection:
+        rows = connection.execute("SELECT id, amount, balance_after, entry_type, reason, admin_user_id, created_at FROM credit_ledger WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_id: str = "", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    _require_admin(request)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if keyword.strip():
+        clauses.append("(t.title LIKE ? OR t.file_name LIKE ? OR u.email LIKE ?)")
+        value = f"%{keyword.strip()}%"
+        params.extend([value, value, value])
+    if status != "all":
+        clauses.append("t.status = ?"); params.append(status)
+    if user_id:
+        clauses.append("t.user_id = ?"); params.append(user_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with db() as connection:
+        total = connection.execute(f"SELECT COUNT(*) AS count FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where}", params).fetchone()["count"]
+        rows = connection.execute(f"SELECT t.id, t.user_id, t.title, t.file_name, t.status, t.stage, t.progress_percent, t.estimated_minutes, t.credits_used, t.error, t.created_at, t.updated_at, u.email, u.name FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where} ORDER BY t.created_at DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+    return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit, "offset": offset}
+
+
+async def admin_retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
+    admin = _require_admin(request)
+    row = task_row(task_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if not Path(row["stored_path"]).exists():
+        raise HTTPException(status_code=409, detail="原始视频不存在")
+    update_task(task_id, status="queued", stage="queued", progress_percent=4, error=None, completed_at=None)
+    record_task_event(task_id, "admin_retry", "管理员重新排队", status="queued", stage="queued", progress_percent=4)
+    _admin_audit(admin["id"], "task_retry", "task", task_id)
+    background.add_task(process_task, task_id)
+    return {"id": task_id, "status": "queued"}
+
+
+def admin_audit_logs(request: Request, limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    _require_admin(request)
+    with db() as connection:
+        total = connection.execute("SELECT COUNT(*) AS count FROM admin_audit_logs").fetchone()["count"]
+        rows = connection.execute("SELECT a.*, u.email AS admin_email FROM admin_audit_logs a LEFT JOIN users u ON u.id=a.admin_user_id ORDER BY a.id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit, "offset": offset}
 
 
 # Task listing, detail, upload, and lifecycle actions

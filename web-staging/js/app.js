@@ -75,7 +75,7 @@
 
   function parseHash() {
     const parts = (location.hash || "#/tasks").replace(/^#\/?/, "").split("/");
-    state.view = parts[0] === "task" && parts[1] ? "detail" : "list";
+    state.view = parts[0] === "task" && parts[1] ? "detail" : (parts[0] === "admin" ? "admin" : "list");
     state.taskId = state.view === "detail" ? parts[1] : "";
   }
 
@@ -105,6 +105,7 @@
             <span class="credit-label">可用额度</span>
             <strong>${credits}</strong><span>分钟</span>
           </div>
+          ${state.profile && state.profile.role === "admin" ? `<a class="text-btn" href="#/admin">管理后台</a>` : ""}
           <button class="text-btn" type="button" data-action="recharge">充值</button>
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
@@ -126,6 +127,15 @@
       selectionStart: active && typeof active.selectionStart === "number" ? active.selectionStart : null,
       selectionEnd: active && typeof active.selectionEnd === "number" ? active.selectionEnd : null,
     };
+  }
+
+  async function renderAdmin() {
+    if (!state.profile || state.profile.role !== "admin") { go("tasks"); return; }
+    try {
+      const overview = await api.getAdminOverview();
+      const tabs = ["概览", "用户", "充值", "任务", "用量", "分析", "转化漏斗", "留存", "码管理"];
+      $("#main").innerHTML = `<section class="workspace-page"><div class="page-head"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p class="page-subtitle">平台运行、用户额度和任务处理</p></div></div><div class="filter-tabs">${tabs.map((tab, i) => `<button class="filter-tab ${i < 5 ? "active" : ""}" type="button" ${i >= 5 ? "disabled title=\"后续版本开放\"" : ""}>${tab}${i >= 5 ? "（后续）" : ""}</button>`).join("")}</div><div class="stats-grid"><article class="stat-card"><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article class="stat-card"><span>剩余额度</span><strong>${overview.users.credits}</strong><small>分钟</small></article><article class="stat-card"><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 失败 ${overview.tasks.failed}</small></article><article class="stat-card"><span>已消耗额度</span><strong>${overview.creditsUsed}</strong><small>分钟</small></article></div><div class="panel"><div class="panel-head"><h2>最近任务</h2><span>实时数据</span></div><div class="table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td>${escapeHtml(item.title || item.id)}</td><td>${escapeHtml(item.email || item.name || "-")}</td><td>${escapeHtml(item.status)}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div><p class="muted-note">当前版本暂不开发码管理、Eval、分析、转化漏斗和留存，仅保留入口。</p></section>`;
+    } catch (error) { toast(error.message || "后台数据加载失败", "error"); }
   }
 
   function restoreAuthFormState(snapshot) {
@@ -572,7 +582,8 @@
     }
     state.menuTaskId = "";
     renderHeader();
-    if (state.view === "detail") await refreshDetail();
+    if (state.view === "admin") await renderAdmin();
+    else if (state.view === "detail") await refreshDetail();
     else await refreshList();
   }
 

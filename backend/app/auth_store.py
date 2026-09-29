@@ -19,6 +19,7 @@ from urllib.request import Request as UrlRequest, urlopen
 from fastapi import HTTPException, Request, Response
 
 from .config import (
+    ADMIN_EMAILS,
     AUTH_CODE_MAX_ATTEMPTS,
     AUTH_CODE_RESEND_SECONDS,
     AUTH_CODE_TTL_SECONDS,
@@ -70,6 +71,8 @@ def _user_payload(row: sqlite3.Row) -> dict[str, Any]:
         "credits": row["credits"],
         "plan": row["plan"],
         "createdAt": row["created_at"],
+        "role": row["role"] if "role" in row.keys() else "user",
+        "isActive": bool(row["is_active"]) if "is_active" in row.keys() else True,
     }
 
 
@@ -92,6 +95,8 @@ def current_user(request: Request) -> sqlite3.Row:
         ).fetchone()
     if not row:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    if "is_active" in row.keys() and not row["is_active"]:
+        raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员")
     return row
 
 
@@ -294,6 +299,17 @@ def init_db() -> None:
             )
             """
         )
+        columns = {item[1] for item in connection.execute("PRAGMA table_info(users)").fetchall()}
+        for name, definition in (("role", "TEXT NOT NULL DEFAULT 'user'"), ("is_active", "INTEGER NOT NULL DEFAULT 1")):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role, created_at)")
+        if ADMIN_EMAILS:
+            placeholders = ",".join("?" for _ in ADMIN_EMAILS)
+            connection.execute(
+                f"UPDATE users SET role = 'admin' WHERE lower(email) IN ({placeholders})",
+                tuple(sorted(ADMIN_EMAILS)),
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS auth_codes (
@@ -383,3 +399,32 @@ def init_db() -> None:
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id, created_at)")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS credit_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                entry_type TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                admin_user_id TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, id)")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL DEFAULT '',
+                target_id TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(created_at)")
