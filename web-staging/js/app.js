@@ -30,6 +30,9 @@
     adminTaskUser: "",
     adminTaskFrom: "",
     adminTaskTo: "",
+    adminUserPage: 0,
+    adminUserKeyword: "",
+    adminUserStatus: "all",
   };
 
   function escapeHtml(value) {
@@ -145,8 +148,10 @@
       const nav = tabs.map(item => `<button class="admin-tab ${tab === item.id ? "active" : ""}" data-action="admin-tab" data-tab="${item.id}" ${["analytics","funnel","retention","codes"].includes(item.id) ? "disabled" : ""}>${item.label}</button>`).join("");
       let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article><span>剩余额度</span><strong>${overview.users.credits}</strong><small>分钟</small></article><article><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 失败 ${overview.tasks.failed}</small></article><article><span>已消耗额度</span><strong>${overview.creditsUsed}</strong><small>分钟</small></article></div>`;
       if (tab === "users" || tab === "credits") {
-        const users = await api.getAdminUsers({ limit: 100 });
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>启用、停用账号并调整分钟额度</p></div><span>${users.total} 个账号</span></div><div class="admin-table-wrap"><table><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>剩余额度</th><th>任务/消耗</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td><strong>${escapeHtml(user.name || "未命名")}</strong><small>${escapeHtml(user.email)}</small></td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${user.credits}</strong> 分钟</td><td>${user.taskCount} / ${user.totalUsed} 分钟</td><td><button class="admin-action" data-action="admin-credit" data-id="${user.id}">调整额度</button><button class="admin-action" data-action="admin-status" data-id="${user.id}" data-active="${user.isActive ? "0" : "1"}">${user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无用户</td></tr>`}</tbody></table></div></div>`;
+        const userPageSize = 20;
+        const users = await api.getAdminUsers({ limit: userPageSize, offset: state.adminUserPage * userPageSize, keyword: state.adminUserKeyword, status: state.adminUserStatus });
+        const userPageCount = Math.max(1, Math.ceil(users.total / userPageSize));
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>启用、停用账号并调整分钟额度</p></div><span>${users.total} 个账号</span></div><div class="admin-toolbar"><input id="adminUserKeyword" value="${escapeHtml(state.adminUserKeyword)}" placeholder="搜索邮箱或姓名" /><select id="adminUserStatus"><option value="all" ${state.adminUserStatus === "all" ? "selected" : ""}>全部用户</option><option value="active" ${state.adminUserStatus === "active" ? "selected" : ""}>正常</option><option value="disabled" ${state.adminUserStatus === "disabled" ? "selected" : ""}>已停用</option></select><button class="admin-action admin-search-btn" data-action="admin-user-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>剩余额度</th><th>任务/消耗</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td><strong>${escapeHtml(user.name || "未命名")}</strong><small>${escapeHtml(user.email)}</small></td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${user.credits}</strong> 分钟</td><td>${user.taskCount} / ${user.totalUsed} 分钟</td><td><button class="admin-action" data-action="admin-credit" data-id="${user.id}">调整额度</button><button class="admin-action" data-action="admin-status" data-id="${user.id}" data-active="${user.isActive ? "0" : "1"}">${user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无用户</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-user-page" data-page="${Math.max(0, state.adminUserPage - 1)}" ${state.adminUserPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminUserPage + 1} / ${userPageCount} 页</span><button class="admin-action" data-action="admin-user-page" data-page="${Math.min(userPageCount - 1, state.adminUserPage + 1)}" ${state.adminUserPage >= userPageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
       } else if (tab === "tasks" || tab === "usage") {
         const pageSize = 20;
         const users = await api.getAdminUsers({ limit: 200 });
@@ -746,6 +751,8 @@
     if (action === "admin-tab") { state.adminTab = actionElement.dataset.tab; await renderAdmin(); return; }
     if (action === "admin-search") { state.adminTaskKeyword = $("#adminTaskKeyword")?.value.trim() || ""; state.adminTaskStatus = $("#adminTaskStatus")?.value || "all"; state.adminTaskUser = $("#adminTaskUser")?.value || ""; state.adminTaskFrom = $("#adminTaskFrom")?.value || ""; state.adminTaskTo = $("#adminTaskTo")?.value || ""; state.adminTaskPage = 0; await renderAdmin(); return; }
     if (action === "admin-page") { state.adminTaskPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
+    if (action === "admin-user-search") { state.adminUserKeyword = $("#adminUserKeyword")?.value.trim() || ""; state.adminUserStatus = $("#adminUserStatus")?.value || "all"; state.adminUserPage = 0; await renderAdmin(); return; }
+    if (action === "admin-user-page") { state.adminUserPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
     if (action === "admin-credit") {
       const amountText = window.prompt("输入调整分钟数（充值填正数，扣减填负数）", "100");
       if (amountText === null) return;
