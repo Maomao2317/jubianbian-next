@@ -34,6 +34,12 @@
     adminUserPage: 0,
     adminUserKeyword: "",
     adminUserStatus: "all",
+    taskPage: 0,
+    pointsPage: 0,
+    pointsKeyword: "",
+    pointsType: "all",
+    pointsFrom: "",
+    pointsTo: "",
   };
 
   function escapeHtml(value) {
@@ -273,8 +279,11 @@
   function renderList() {
     const filters = cfg.statusFilters.map((item) => `
       <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}">${item.label}</button>`).join("");
+    const pageSize = 10;
+    const pageCount = Math.max(1, Math.ceil(state.tasks.length / pageSize));
+    const pageTasks = state.tasks.slice(state.taskPage * pageSize, (state.taskPage + 1) * pageSize);
     const rows = state.tasks.length
-      ? state.tasks.map(taskRow).join("")
+      ? pageTasks.map(taskRow).join("")
       : `<div class="empty">
           <div class="empty-icon">＋</div>
           <h3>${state.keyword || state.status !== "all" ? "没有匹配的任务" : "还没有识别任务"}</h3>
@@ -301,6 +310,7 @@
             <div class="task-count">${state.tasks.length} 个任务</div>
           </div>
           <div class="task-list">${rows}</div>
+          ${state.tasks.length > pageSize ? `<div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, state.taskPage - 1)}" ${state.taskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.taskPage + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, state.taskPage + 1)}" ${state.taskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>` : ""}
         </div>
       </section>`;
   }
@@ -642,8 +652,22 @@
     $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-loading">正在加载积分流水…</div></div></div>`;
     try {
       const ledger = await api.getCreditLedger();
-      const rows = (ledger.items || []).map(item => `<div class="points-row"><div><strong>${escapeHtml(item.reason || "积分变动")}</strong><small>${formatDate(item.created_at)}</small></div><div class="points-amount ${item.amount >= 0 ? "plus" : "minus"}">${item.amount >= 0 ? "+" : ""}${Number(item.amount).toFixed(1)}<small>余额 ${Number(item.balance_after).toFixed(1)}</small></div></div>`).join("");
-      $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-balance"><span>当前剩余积分</span><strong>${Number(ledger.balance || 0).toFixed(1)}</strong></div><div class="points-list">${rows || `<div class="points-empty">暂无积分流水</div>`}</div><div class="modal-actions"><button class="secondary-btn" type="button" data-action="recharge">联系充值</button><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
+      const ledgerPageSize = 10;
+      const allItems = ledger.items || [];
+      const from = state.pointsFrom ? new Date(`${state.pointsFrom}T00:00:00`) : null;
+      const to = state.pointsTo ? new Date(`${state.pointsTo}T23:59:59`) : null;
+      const filteredItems = allItems.filter((item) => {
+        const amount = Number(item.amount || 0);
+        const date = new Date(item.created_at);
+        const typeMatch = state.pointsType === "all" || (state.pointsType === "income" && amount > 0) || (state.pointsType === "expense" && amount < 0);
+        const keywordMatch = !state.pointsKeyword || String(item.reason || "").toLowerCase().includes(state.pointsKeyword.toLowerCase());
+        return typeMatch && keywordMatch && (!from || date >= from) && (!to || date <= to);
+      });
+      const ledgerPageCount = Math.max(1, Math.ceil(filteredItems.length / ledgerPageSize));
+      state.pointsPage = Math.min(state.pointsPage, ledgerPageCount - 1);
+      const pageItems = filteredItems.slice(state.pointsPage * ledgerPageSize, (state.pointsPage + 1) * ledgerPageSize);
+      const rows = pageItems.map(item => `<div class="points-row"><div><strong>${escapeHtml(item.reason || "积分变动")}</strong><small>${formatDate(item.created_at)}</small></div><div class="points-amount ${item.amount >= 0 ? "plus" : "minus"}">${item.amount >= 0 ? "+" : ""}${Number(item.amount).toFixed(1)}<small>余额 ${Number(item.balance_after).toFixed(1)}</small></div></div>`).join("");
+      $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-balance"><span>当前剩余积分</span><strong>${Number(ledger.balance || 0).toFixed(1)}</strong></div><div class="points-filters"><input id="pointsKeyword" class="points-filter-input" placeholder="搜索流水内容" value="${escapeHtml(state.pointsKeyword)}" /><select id="pointsType" class="points-filter-select"><option value="all" ${state.pointsType === "all" ? "selected" : ""}>全部类型</option><option value="income" ${state.pointsType === "income" ? "selected" : ""}>增加</option><option value="expense" ${state.pointsType === "expense" ? "selected" : ""}>扣减</option></select><input id="pointsFrom" class="points-filter-date" type="date" value="${escapeHtml(state.pointsFrom)}" /><span class="points-filter-sep">至</span><input id="pointsTo" class="points-filter-date" type="date" value="${escapeHtml(state.pointsTo)}" /><button class="secondary-btn" type="button" data-action="points-filter">筛选</button><button class="text-btn" type="button" data-action="points-reset">重置</button></div><div class="points-list">${rows || `<div class="points-empty">暂无匹配的积分流水</div>`}</div>${filteredItems.length > ledgerPageSize ? `<div class="user-pagination"><button class="secondary-btn" data-action="points-page" data-page="${Math.max(0, state.pointsPage - 1)}" ${state.pointsPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.pointsPage + 1} / ${ledgerPageCount} 页</span><button class="secondary-btn" data-action="points-page" data-page="${Math.min(ledgerPageCount - 1, state.pointsPage + 1)}" ${state.pointsPage >= ledgerPageCount - 1 ? "disabled" : ""}>下一页</button></div>` : ""}<div class="modal-actions"><button class="secondary-btn" type="button" data-action="recharge">联系充值</button><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
     } catch (error) { toast(error.message || "积分流水加载失败", "error"); $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal points-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分中心</span><h2>积分余额与流水</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="points-empty">积分流水暂时无法加载，请稍后重试。</div></div></div>`; }
   }
 
@@ -815,6 +839,26 @@
     if (action === "request-code") { await requestCode(); return; }
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "points") { await openPointsModal(); return; }
+    if (action === "task-page") { state.taskPage = Number(actionElement.dataset.page) || 0; renderList(); return; }
+    if (action === "points-page") { state.pointsPage = Number(actionElement.dataset.page) || 0; await openPointsModal(); return; }
+    if (action === "points-filter") {
+      state.pointsKeyword = $("#pointsKeyword")?.value.trim() || "";
+      state.pointsType = $("#pointsType")?.value || "all";
+      state.pointsFrom = $("#pointsFrom")?.value || "";
+      state.pointsTo = $("#pointsTo")?.value || "";
+      state.pointsPage = 0;
+      await openPointsModal();
+      return;
+    }
+    if (action === "points-reset") {
+      state.pointsKeyword = "";
+      state.pointsType = "all";
+      state.pointsFrom = "";
+      state.pointsTo = "";
+      state.pointsPage = 0;
+      await openPointsModal();
+      return;
+    }
     if (action === "logout") { await logout(); return; }
     if (action === "create") openCreateModal();
     if (action === "close-modal") $("#modalRoot").innerHTML = "";
