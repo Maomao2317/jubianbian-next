@@ -327,17 +327,8 @@
         <span>AI 结构化剧本</span>
         <h2>${escapeHtml(script.title)}</h2>
       </div>
-      ${Array.isArray(script.characterProfiles) && script.characterProfiles.length ? `<section class="character-profiles">
-        <h3>人物表</h3>
-        ${script.characterProfiles.map((profile) => `<p><strong>${escapeHtml(profile.name || "人物")}</strong><span>${escapeHtml([profile.firstAppearance, profile.appearance, profile.clothing].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join("；"))}</span></p>`).join("")}
-      </section>` : ""}
       ${script.scenes.map((scene) => `<section class="scene">
         <h3>${escapeHtml(scene.heading)}</h3>
-        ${scene.location ? `<p class="scene-location"><b>地点：</b>${escapeHtml(scene.location)}</p>` : ""}
-        ${scene.characters && scene.characters.length ? `<p class="scene-cast"><b>人物：</b>${escapeHtml(scene.characters.join("、"))}</p>` : ""}
-        ${scene.summary ? `<p class="scene-summary"><b>${scene.summaryGenerated ? "剧情衔接（系统补全）" : "剧情衔接"}：</b>${escapeHtml(scene.summary)}</p>` : ""}
-        ${(scene.goal || scene.obstacle || scene.result) ? `<p class="scene-summary"><b>场次任务：</b>${escapeHtml([scene.goal && `目标：${scene.goal}`, scene.obstacle && `阻力：${scene.obstacle}`, scene.result && `结果：${scene.result}`].filter(Boolean).join("；"))}</p>` : ""}
-        ${scene.environment ? `<p class="environment"><b>环境</b>${escapeHtml(scene.environment)}</p>` : ""}
         <div class="scene-blocks">${(scene.blocks || []).map(renderBlock).join("")}</div>
       </section>`).join("")}
     </div>`;

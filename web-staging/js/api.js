@@ -135,22 +135,8 @@
   function scriptToMarkdown(task) {
     const script = task.result;
     const lines = [`# ${script.title}`, ""];
-    if (Array.isArray(script.characterProfiles) && script.characterProfiles.length) {
-      lines.push("## 人物表", "");
-      script.characterProfiles.forEach((profile) => {
-        const details = [profile.firstAppearance, profile.appearance, profile.clothing]
-          .filter(Boolean)
-          .filter((value, index, values) => values.indexOf(value) === index)
-          .join("；");
-        lines.push(`- ${profile.name}${details ? `：${details}` : ""}`);
-      });
-      lines.push("");
-    }
     script.scenes.forEach((scene) => {
       lines.push(`## ${scene.heading}`, "");
-      if (scene.summary) lines.push(`【剧情衔接】${scene.summary}`, "");
-      lines.push(`出场人物：${scene.characters.join("、")}`, "");
-      if (scene.environment) lines.push(`【环境】${scene.environment}`, "");
       scene.blocks.forEach((block) => {
         if (block.type === "dialogue") {
           lines.push(`${block.speaker}${block.uncertain ? "【需核对】" : ""}：${block.text}`);

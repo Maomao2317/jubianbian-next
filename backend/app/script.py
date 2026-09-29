@@ -768,42 +768,8 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         text = text.strip("（）() ")
         return f"（{text}）" if text else ""
 
-    profiles = script.get("characterProfiles") or []
-    if profiles:
-        lines.extend(["## 人物表", ""])
-        for profile in profiles:
-            name = profile.get("name") or "人物"
-            appearance = profile.get("appearance") or ""
-            clothing = profile.get("clothing") or ""
-            first_appearance = profile.get("firstAppearance") or ""
-            details = "；".join(dict.fromkeys(item for item in (first_appearance, appearance, clothing) if item))
-            lines.append(f"- {name}：{details}" if details else f"- {name}")
-        lines.append("")
     for scene in script.get("scenes", []):
         lines.extend([scene.get("heading", "未标注场景"), ""])
-        characters = scene.get("characters") or []
-        if characters:
-            lines.append(f"人物：{'、'.join(characters)}")
-        if scene.get("location"):
-            lines.append(f"地点：{scene['location']}")
-        if characters or scene.get("location"):
-            lines.append("")
-        if scene.get("summary"):
-            summary_label = "剧情衔接（系统补全）" if scene.get("summaryGenerated") else "剧情衔接"
-            lines.append(f"【{summary_label}】{scene['summary']}")
-        task_parts = []
-        if scene.get("goal"):
-            task_parts.append(f"目标：{scene['goal']}")
-        if scene.get("obstacle"):
-            task_parts.append(f"阻力：{scene['obstacle']}")
-        if scene.get("result"):
-            task_parts.append(f"结果：{scene['result']}")
-        if task_parts:
-            lines.append(f"【场次任务】{'；'.join(task_parts)}")
-        if scene.get("environment"):
-            lines.append(f"环境：{scene['environment']}")
-        if scene.get("summary") or task_parts or scene.get("environment"):
-            lines.append("")
         for block in scene.get("blocks", []):
             block_type = block.get("type")
             if block_type == "dialogue":
