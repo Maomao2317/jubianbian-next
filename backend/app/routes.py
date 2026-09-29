@@ -273,7 +273,7 @@ def admin_overview(request: Request) -> dict[str, Any]:
         users = connection.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active, COALESCE(SUM(credits), 0) AS credits FROM users").fetchone()
         task_status = connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
         usage = connection.execute("SELECT COALESCE(SUM(credits_used), 0) AS used FROM tasks WHERE status = 'done'").fetchone()
-        recent = connection.execute("SELECT t.id, t.title, t.status, t.stage, t.credits_used, t.created_at, u.email, u.name FROM tasks t LEFT JOIN users u ON u.id = t.user_id ORDER BY t.created_at DESC LIMIT 10").fetchall()
+        recent = connection.execute("SELECT t.id, t.title, t.status, t.stage, t.credits_used, t.created_at, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id = t.user_id ORDER BY t.created_at DESC LIMIT 10").fetchall()
     statuses = {row["status"]: int(row["count"]) for row in task_status}
     return {
         "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
@@ -369,7 +369,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as connection:
         total = connection.execute(f"SELECT COUNT(*) AS count FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where}", params).fetchone()["count"]
-        rows = connection.execute(f"SELECT t.id, t.user_id, t.title, t.file_name, t.status, t.stage, t.progress_percent, t.estimated_minutes, t.credits_used, t.error, t.created_at, t.updated_at, u.email, u.name FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where} ORDER BY t.created_at DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+        rows = connection.execute(f"SELECT t.id, t.user_id, t.title, t.file_name, t.status, t.stage, t.progress_percent, t.estimated_minutes, t.credits_used, t.error, t.created_at, t.updated_at, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where} ORDER BY t.created_at DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
     return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit, "offset": offset}
 
 
