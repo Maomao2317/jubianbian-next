@@ -225,7 +225,10 @@ a { color: inherit; text-decoration: none; }
 .admin-action:disabled { cursor: not-allowed; opacity: .45; }
 .admin-toolbar { display: flex; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
 .admin-toolbar input, .admin-toolbar select { height: 36px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 6px; outline: 0; color: var(--text); background: #fff; font-size: 12px; }
-.admin-toolbar input { width: min(300px, 100%); }
+.admin-toolbar input { width: min(220px, 100%); }
+.admin-toolbar input[type="date"] { width: 150px; }
+.admin-toolbar select { min-width: 120px; }
+.admin-search-btn { color: #332600; border-color: var(--gold-strong); background: var(--gold-pale); }
 .admin-toolbar input:focus, .admin-toolbar select:focus { border-color: var(--gold-strong); box-shadow: 0 0 0 3px rgba(242,191,50,.16); }
 .admin-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 14px; padding: 14px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .admin-note { margin: 16px 0 0; color: var(--muted); font-size: 12px; }

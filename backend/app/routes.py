@@ -354,7 +354,7 @@ def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge
     return [dict(row) for row in rows]
 
 
-def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_id: str = "", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_id: str = "", date_from: str = "", date_to: str = "", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     _require_admin(request)
     clauses: list[str] = []
     params: list[Any] = []
@@ -366,6 +366,10 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
         clauses.append("t.status = ?"); params.append(status)
     if user_id:
         clauses.append("t.user_id = ?"); params.append(user_id)
+    if date_from.strip():
+        clauses.append("t.created_at >= ?"); params.append(date_from.strip())
+    if date_to.strip():
+        clauses.append("t.created_at < ?"); params.append(date_to.strip() + "T23:59:59.999999+00:00")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as connection:
         total = connection.execute(f"SELECT COUNT(*) AS count FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where}", params).fetchone()["count"]
