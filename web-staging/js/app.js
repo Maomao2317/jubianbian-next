@@ -122,8 +122,8 @@
             <span class="credit-label">剩余积分</span>
             <strong>${credits}</strong><span>积分</span>
           </button>
-          ${state.profile && state.profile.role === "admin" ? `<a class="text-btn" href="#/admin">管理后台</a>` : ""}
-          <button class="text-btn" type="button" data-action="recharge">充值</button>
+          ${state.profile && state.profile.role === "admin" ? `<a class="text-btn admin-link" href="#/admin"><span class="nav-icon">⌘</span>管理后台</a>` : ""}
+          <button class="text-btn recharge-btn" type="button" data-action="recharge"><span class="nav-icon">＋</span>充值</button>
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
       </div>`;
