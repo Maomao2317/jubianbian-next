@@ -340,23 +340,32 @@ async def admin_user_credits(request: Request, user_id: str) -> dict[str, Any]:
     admin = _require_admin(request)
     payload = await request.json()
     try:
-        amount = int(payload.get("amount"))
+        rmb_amount = float(payload.get("rmb_amount"))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="额度必须是整数")
-    if amount == 0 or abs(amount) > 1_000_000:
-        raise HTTPException(status_code=400, detail="额度范围无效")
-    reason = str(payload.get("reason") or "管理员调整")[:200]
+        rmb_amount = 0
+    if rmb_amount <= 0 or rmb_amount > 1_000_000:
+        raise HTTPException(status_code=400, detail="人民币金额必须大于 0")
+    points_amount = round(rmb_amount * 13.8, 1)
+    reason = str(payload.get("reason") or "管理员人民币充值")[:200]
     with db() as connection:
         row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="用户不存在")
-        balance = int(row["credits"]) + amount
-        if balance < 0:
-            raise HTTPException(status_code=400, detail="调整后额度不能为负数")
+        amount = points_amount
+        balance = round(float(row["credits"]) + points_amount, 1)
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user_id))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, admin_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (user_id, amount, balance, "recharge" if amount > 0 else "adjustment", reason, admin["id"], now_iso()))
-    _admin_audit(admin["id"], "credit_adjust", "user", user_id, f"amount={amount}; reason={reason}")
-    return {"userId": user_id, "amount": amount, "balance": balance, "reason": reason}
+        connection.execute("INSERT INTO admin_recharge_ledger(user_id, rmb_amount, points_amount, balance_after, admin_user_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (user_id, rmb_amount, points_amount, balance, admin["id"], reason, now_iso()))
+    _admin_audit(admin["id"], "credit_recharge_rmb", "user", user_id, f"rmb={rmb_amount}; points={points_amount}; reason={reason}")
+    return {"userId": user_id, "rmbAmount": rmb_amount, "pointsAmount": points_amount, "balance": balance, "reason": reason}
+
+
+def admin_recharge_ledger(request: Request, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    _require_admin(request)
+    with db() as connection:
+        total = connection.execute("SELECT COUNT(*) AS total FROM admin_recharge_ledger").fetchone()["total"]
+        rows = connection.execute("SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after, r.reason, r.created_at, u.email, u.name FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id ORDER BY r.id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    return {"total": int(total or 0), "items": [dict(row) for row in rows]}
 
 
 def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:

@@ -17,6 +17,7 @@ from .middleware import RateLimitMiddleware, RequestLogMiddleware
 from .routes import (
     admin_audit_logs,
     admin_overview,
+    admin_recharge_ledger,
     admin_retry_task,
     admin_tasks,
     admin_user_credits,
@@ -76,6 +77,7 @@ app.add_api_route("/api/admin/overview", admin_overview, methods=["GET"])
 app.add_api_route("/api/admin/users", admin_users, methods=["GET"])
 app.add_api_route("/api/admin/users/{user_id}/status", admin_user_status, methods=["PATCH"])
 app.add_api_route("/api/admin/users/{user_id}/credits", admin_user_credits, methods=["POST"])
+app.add_api_route("/api/admin/recharges", admin_recharge_ledger, methods=["GET"])
 app.add_api_route("/api/admin/users/{user_id}/ledger", admin_user_ledger, methods=["GET"])
 app.add_api_route("/api/admin/tasks", admin_tasks, methods=["GET"])
 app.add_api_route("/api/admin/tasks/{task_id}/retry", admin_retry_task, methods=["POST"])

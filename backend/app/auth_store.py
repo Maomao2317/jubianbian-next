@@ -416,6 +416,21 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, id)")
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS admin_recharge_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                rmb_amount REAL NOT NULL,
+                points_amount REAL NOT NULL,
+                balance_after REAL NOT NULL,
+                admin_user_id TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_recharge_created ON admin_recharge_ledger(created_at, id)")
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS admin_audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 admin_user_id TEXT NOT NULL,

@@ -159,6 +159,10 @@
         const users = await api.getAdminUsers({ limit: userPageSize, offset: state.adminUserPage * userPageSize, keyword: state.adminUserKeyword, status: state.adminUserStatus });
         const userPageCount = Math.max(1, Math.ceil(users.total / userPageSize));
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>启用、停用账号并调整分钟额度</p></div><span>${users.total} 个账号</span></div><div class="admin-toolbar"><input id="adminUserKeyword" value="${escapeHtml(state.adminUserKeyword)}" placeholder="搜索邮箱或姓名" /><select id="adminUserStatus"><option value="all" ${state.adminUserStatus === "all" ? "selected" : ""}>全部用户</option><option value="active" ${state.adminUserStatus === "active" ? "selected" : ""}>正常</option><option value="disabled" ${state.adminUserStatus === "disabled" ? "selected" : ""}>已停用</option></select><button class="admin-action admin-search-btn" data-action="admin-user-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>剩余额度</th><th>任务/消耗</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td><strong>${escapeHtml(user.name || "未命名")}</strong><small>${escapeHtml(user.email)}</small></td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${user.credits}</strong> 分钟</td><td>${user.taskCount} / ${user.totalUsed} 分钟</td><td><button class="admin-action" data-action="admin-credit" data-id="${user.id}">调整额度</button><button class="admin-action" data-action="admin-status" data-id="${user.id}" data-active="${user.isActive ? "0" : "1"}">${user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无用户</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-user-page" data-page="${Math.max(0, state.adminUserPage - 1)}" ${state.adminUserPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminUserPage + 1} / ${userPageCount} 页</span><button class="admin-action" data-action="admin-user-page" data-page="${Math.min(userPageCount - 1, state.adminUserPage + 1)}" ${state.adminUserPage >= userPageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
+        if (tab === "credits") {
+          const rechargePage = await api.getAdminRecharges({ limit: 20, offset: 0 });
+          body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>人民币充值流水</h2><p>每笔充值按 1 元 = 13.8 积分记录</p></div><span>${rechargePage.total} 笔充值</span></div><div class="admin-table-wrap"><table><thead><tr><th>用户账号</th><th>人民币</th><th>增加积分</th><th>充值后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(item => `<tr><td><strong>${escapeHtml(item.name || item.email || item.user_id)}</strong><small>${escapeHtml(item.email || "")}</small></td><td>¥ ${Number(item.rmb_amount).toFixed(2)}</td><td class="points-positive">+${Number(item.points_amount).toFixed(1)} 积分</td><td>${Number(item.balance_after).toFixed(1)} 积分</td><td>${escapeHtml(item.reason || "-")}</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="6">暂无充值流水</td></tr>`}</tbody></table></div></div>`;
+        }
       } else if (tab === "tasks" || tab === "usage") {
         const pageSize = 20;
         const users = await api.getAdminUsers({ limit: 200 });
@@ -793,6 +797,15 @@
     if (action === "admin-user-search") { state.adminUserKeyword = $("#adminUserKeyword")?.value.trim() || ""; state.adminUserStatus = $("#adminUserStatus")?.value || "all"; state.adminUserPage = 0; await renderAdmin(); return; }
     if (action === "admin-user-page") { state.adminUserPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
     if (action === "admin-credit") {
+      const rmbText = window.prompt("输入充值人民币金额（按 1 元 = 13.8 积分自动换算）", "100");
+      if (rmbText === null) return;
+      const rmbAmount = Number(rmbText);
+      if (!Number.isFinite(rmbAmount) || rmbAmount <= 0) { toast("请输入有效人民币金额", "error"); return; }
+      const pointsAmount = (rmbAmount * 13.8).toFixed(1);
+      const rechargeReason = window.prompt(`本次将增加 ${pointsAmount} 积分，填写充值备注`, "管理员人民币充值") || "管理员人民币充值";
+      try { await api.adjustAdminCredits(id, { rmb_amount: rmbAmount, reason: rechargeReason }); toast(`充值成功，已增加 ${pointsAmount} 积分`); await renderAdmin(); } catch (error) { toast(error.message || "充值失败", "error"); }
+      return;
+      /* legacy minute adjustment flow retained for compatibility */
       const amountText = window.prompt("输入调整分钟数（充值填正数，扣减填负数）", "100");
       if (amountText === null) return;
       const amount = Number(amountText);
