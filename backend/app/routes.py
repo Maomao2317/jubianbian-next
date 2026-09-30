@@ -33,6 +33,7 @@ from .config import (
     APP_STARTED_MONOTONIC,
     ARK_API_KEY,
     ARK_MODEL,
+    BUILD_VERSION,
     AUTH_ALLOW_DEV_CODE,
     AUTH_CODE_RESEND_SECONDS,
     AUTH_CODE_TTL_SECONDS,
@@ -84,6 +85,7 @@ def health() -> Any:
         return {
             "status": "ok",
             "environment": JBB_ENVIRONMENT,
+            "build": BUILD_VERSION,
             "uptimeSec": round(time.monotonic() - APP_STARTED_MONOTONIC, 1),
             "activeTasks": counts["queued"] + counts["running"],
             "timestamp": now_iso(),

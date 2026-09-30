@@ -25,6 +25,7 @@ WORKER_CONCURRENCY = max(1, min(10, int(os.getenv("JBB_WORKER_CONCURRENCY", "8")
 QUEUE_MAX_WAIT_MINUTES = max(1, int(os.getenv("JBB_QUEUE_MAX_WAIT_MINUTES", "600")))
 TRUST_PROXY_HEADERS = os.getenv("JBB_TRUST_PROXY_HEADERS", "0").strip().lower() in {"1", "true", "yes"}
 JBB_ENVIRONMENT = os.getenv("JBB_ENVIRONMENT", "production").strip() or "production"
+BUILD_VERSION = os.getenv("JBB_BUILD_VERSION", "608d371")
 JBB_LOG_LEVEL = os.getenv("JBB_LOG_LEVEL", "INFO").strip().upper() or "INFO"
 ADMIN_EMAILS = {value.strip().lower() for value in os.getenv("JBB_ADMIN_EMAILS", "").split(",") if value.strip()}
 JBB_LOG_MAX_BYTES = max(64 * 1024, int(os.getenv("JBB_LOG_MAX_BYTES", str(5 * 1024 * 1024))))
