@@ -27,6 +27,7 @@ services:
       OPENAI_TRANSCRIPTION_MODEL: ${OPENAI_TRANSCRIPTION_MODEL:-whisper-1}
       OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL:-gpt-4o-mini}
       ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_API_KEY_2: ${ARK_API_KEY_2:-}
       ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
       ARK_MODEL: ${ARK_MODEL:-doubao-seed-2-0-lite-260428}
       ARK_VIDEO_FPS: ${ARK_VIDEO_FPS:-0.5}

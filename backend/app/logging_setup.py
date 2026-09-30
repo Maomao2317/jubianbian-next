@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 
 from .config import (
     ARK_API_KEY,
+    ARK_API_KEY_2,
     LOG_DIR,
     JBB_LOG_BACKUP_COUNT,
     JBB_LOG_LEVEL,
@@ -45,6 +46,7 @@ def safe_error_text(error: BaseException, limit: int = 1000) -> str:
     message = str(error) or error.__class__.__name__
     for secret in (
         ARK_API_KEY,
+        ARK_API_KEY_2,
         OPENAI_API_KEY,
         TENCENTCLOUD_SECRET_ID,
         TENCENTCLOUD_SECRET_KEY,

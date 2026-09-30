@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from urllib.request import Request as UrlRequest, urlopen
 
 from .config import (
     ARK_API_KEY,
+    ARK_API_KEYS,
     ARK_BASE_URL,
     ARK_FILE_POLL_SECONDS,
     ARK_FILE_POLL_TIMEOUT_SECONDS,
@@ -43,14 +45,35 @@ def ark_fallback_message(error: ArkError) -> str:
     return "方舟识别服务暂时不可用，本次已切换到备用识别链路。"
 
 
-def ark_http(method: str, path: str, data: bytes | None = None, content_type: str = "application/json") -> Any:
-    if not ARK_API_KEY:
+_ark_pool_lock = threading.Lock()
+_ark_pool_index = 0
+_ark_cooldowns: dict[str, float] = {}
+
+
+def ark_account_key() -> str:
+    """Pick the next available account; cooldowns are isolated per API key."""
+    global _ark_pool_index
+    if not ARK_API_KEYS:
+        raise ArkError("未配置方舟 API Key，请在 fangzhou.env 中填写 ARK_API_KEY")
+    now = time.monotonic()
+    with _ark_pool_lock:
+        for _ in range(len(ARK_API_KEYS)):
+            key = ARK_API_KEYS[_ark_pool_index % len(ARK_API_KEYS)]
+            _ark_pool_index = (_ark_pool_index + 1) % len(ARK_API_KEYS)
+            if _ark_cooldowns.get(key, 0) <= now:
+                return key
+        return min(ARK_API_KEYS, key=lambda value: _ark_cooldowns.get(value, 0))
+
+
+def ark_http(method: str, path: str, data: bytes | None = None, content_type: str = "application/json", *, api_key: str | None = None) -> Any:
+    api_key = api_key or ARK_API_KEY
+    if not api_key:
         raise ArkError("未配置方舟 API Key，请在 fangzhou.env 中填写 ARK_API_KEY")
     request = UrlRequest(
         f"{ARK_BASE_URL}{path}",
         data=data,
         headers={
-            "Authorization": f"Bearer {ARK_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": content_type,
         },
         method=method,
@@ -68,6 +91,8 @@ def ark_http(method: str, path: str, data: bytes | None = None, content_type: st
         except (OSError, ValueError):
             pass
         if exc.code == 429:
+            with _ark_pool_lock:
+                _ark_cooldowns[api_key] = time.monotonic() + 30
             # Provider 429 bodies may contain account identifiers and internal
             # quota text. Keep the actionable cause without echoing that data.
             detail = "模型当前达到推理限额或已暂停，请在方舟模型激活页调整限额或关闭 Safe Experience Mode"
@@ -89,7 +114,7 @@ def ark_http(method: str, path: str, data: bytes | None = None, content_type: st
         raise ArkError("方舟接口返回了无法解析的响应") from exc
 
 
-def ark_upload_video(path: Path) -> str:
+def ark_upload_video(path: Path, api_key: str | None = None) -> str:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
     fields = {
@@ -103,7 +128,7 @@ def ark_upload_video(path: Path) -> str:
         path.read_bytes(),
         "video/mp4",
     )
-    payload = ark_http("POST", "/files", body, f"multipart/form-data; boundary={boundary}")
+    payload = ark_http("POST", "/files", body, f"multipart/form-data; boundary={boundary}", api_key=api_key)
     file_id = None
     if isinstance(payload, dict):
         file_id = payload.get("id") or payload.get("file_id")
@@ -112,11 +137,11 @@ def ark_upload_video(path: Path) -> str:
     return str(file_id)
 
 
-def ark_wait_for_file(file_id: str) -> None:
+def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
     deadline = time.monotonic() + ARK_FILE_POLL_TIMEOUT_SECONDS
     encoded_id = quote(file_id, safe="")
     while True:
-        payload = ark_http("GET", f"/files/{encoded_id}")
+        payload = ark_http("GET", f"/files/{encoded_id}", api_key=api_key)
         status = str(payload.get("status") or payload.get("state") or "").lower() if isinstance(payload, dict) else ""
         if not status or status in {"active", "ready", "uploaded", "succeeded", "completed"}:
             return
@@ -237,13 +262,14 @@ def ark_usage(payload: Any) -> dict[str, int | float | None]:
 
 
 def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str, Any], dict[str, int | None]]:
+    api_key = ark_account_key()
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s duration_sec=%.1f", path.name, duration_sec)
     upload_started = time.perf_counter()
-    file_id = ark_upload_video(path)
+    file_id = ark_upload_video(path, api_key)
     logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name, (time.perf_counter() - upload_started) * 1000)
     wait_started = time.perf_counter()
-    ark_wait_for_file(file_id)
+    ark_wait_for_file(file_id, api_key)
     logger.info("provider_step provider=ark operation=file_ready file=%s duration_ms=%.1f", path.name, (time.perf_counter() - wait_started) * 1000)
     response_started = time.perf_counter()
     payload = ark_http(
@@ -259,6 +285,7 @@ def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str
                 ],
             }],
         }, ensure_ascii=False).encode("utf-8"),
+        api_key=api_key,
     )
     logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
     text = ark_response_text(payload)

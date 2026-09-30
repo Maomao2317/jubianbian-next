@@ -12,6 +12,7 @@ from typing import Any
 from .config import (
     POINTS_PER_MINUTE,
     ARK_API_KEY,
+    ARK_API_KEYS,
     ARK_FALLBACK_ON_ERROR,
     ARK_MODEL,
     OPENAI_API_KEY,
@@ -41,7 +42,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         duration = probed
         update_task(row["id"], duration_sec=duration)
     ark_error: ArkError | None = None
-    if ARK_API_KEY:
+    if ARK_API_KEYS:
         try:
             script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration)
             script = normalize_script(script, row["title"])
@@ -118,8 +119,8 @@ async def process_task(task_id: str) -> None:
             progress_percent=100,
             result_json=json.dumps(script, ensure_ascii=False),
             quality_json=json.dumps(quality, ensure_ascii=False),
-            provider=usage.get("provider", "ark" if ARK_API_KEY else "local-fallback"),
-            model=usage.get("model", ARK_MODEL if ARK_API_KEY else None),
+            provider=usage.get("provider", "ark" if ARK_API_KEYS else "local-fallback"),
+            model=usage.get("model", ARK_MODEL if ARK_API_KEYS else None),
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             total_tokens=usage.get("total_tokens"),
