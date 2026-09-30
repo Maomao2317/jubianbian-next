@@ -296,7 +296,7 @@
   function renderList() {
     const filters = cfg.statusFilters.filter((item) => item.id !== "review").map((item) => `
       <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}">${item.label}</button>`).join("");
-    const pageSize = 6;
+    const pageSize = 10;
     const pageCount = Math.max(1, Math.ceil(state.tasks.length / pageSize));
     const pageTasks = state.tasks.slice(state.taskPage * pageSize, (state.taskPage + 1) * pageSize);
     const rows = state.tasks.length
@@ -632,7 +632,7 @@
 
   async function refreshList() {
     state.tasks = await api.listTasks({ keyword: state.keyword, status: state.status });
-    state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(state.tasks.length / 6) - 1));
+    state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(state.tasks.length / 10) - 1));
     const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
     if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
     if (!limited) state.rateLimitNotified = false;
