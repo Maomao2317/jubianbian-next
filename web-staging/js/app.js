@@ -117,6 +117,10 @@
     return task.status === "done" || task.status === "review";
   }
 
+  function normalizeUserTask(task) {
+    return task && task.status === "review" ? { ...task, status: "done", stage: "done" } : task;
+  }
+
   function renderHeader() {
     const credits = state.profile ? Number(state.profile.credits || 0).toFixed(1) : "--";
     const initial = state.profile && state.profile.name ? state.profile.name.charAt(0) : "用";
@@ -631,7 +635,7 @@
   }
 
   async function refreshList() {
-    state.tasks = await api.listTasks({ keyword: state.keyword, status: state.status });
+    state.tasks = (await api.listTasks({ keyword: state.keyword, status: state.status })).map(normalizeUserTask);
     state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(state.tasks.length / 10) - 1));
     const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
     if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
@@ -642,7 +646,7 @@
 
   async function refreshDetail() {
     try {
-      state.current = await api.getTask(state.taskId);
+      state.current = normalizeUserTask(await api.getTask(state.taskId));
       renderDetail();
       const active = state.current.status === "queued" || state.current.status === "running";
       schedulePoll(active);
