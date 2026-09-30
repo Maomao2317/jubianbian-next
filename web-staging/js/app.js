@@ -22,7 +22,7 @@
     authCooldownTimer: null,
     authEmail: "",
     menuTaskId: "",
-    upload: { file: null, durationSec: 0, reading: false, error: "" },
+    upload: { files: [], file: null, durationSec: 0, reading: false, error: "" },
     pollTimer: null,
     adminTab: "overview",
     adminTaskPage: 0,
@@ -312,6 +312,7 @@
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
         <div class="workspace-panel">
+          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（MD）</button></div>
           <div class="toolbar">
             <label class="search-wrap">
               <span aria-hidden="true"></span>
@@ -486,8 +487,8 @@
     const overDuration = upload.durationSec > cfg.upload.maxDurationMinutes * 60;
     const estimatedPoints = estimate * POINTS_PER_MINUTE;
     const insufficient = estimatedPoints > credits;
-    const canSubmit = upload.file && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient;
-    const fileBlock = upload.file ? `<div class="selected-file">
+    const canSubmit = upload.files.length && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient;
+    const fileBlock = upload.files.length ? `<div class="selected-file">
       <div class="file-thumb"><span></span></div>
       <div><strong>${escapeHtml(upload.file.name)}</strong><p>${formatSize(upload.file.size)} · ${upload.reading ? "正在读取时长..." : formatDuration(upload.durationSec)}</p></div>
       <button type="button" data-action="remove-file" aria-label="移除视频">×</button>
@@ -514,7 +515,7 @@
           <label>视频文件</label>
           <div class="drop ${upload.file ? "has-file" : ""}" id="dropzone">
             ${fileBlock}
-            <input type="file" id="fileInput" accept="${cfg.upload.accept}" hidden />
+            <input type="file" id="fileInput" accept=".mp4,video/mp4" multiple hidden />
           </div>
         </div>
         <div class="billing-note ${upload.error || overDuration || insufficient ? "warning" : ""}">
@@ -530,7 +531,7 @@
   }
 
   function openCreateModal() {
-    state.upload = { file: null, durationSec: 0, reading: false, error: "" };
+    state.upload = { files: [], file: null, durationSec: 0, reading: false, error: "" };
     $("#modalRoot").innerHTML = createModalMarkup();
   }
 
@@ -593,6 +594,25 @@
     } catch (error) {
       state.upload.error = error.message;
     }
+    state.upload.reading = false;
+    rerenderCreateModal(titleValue);
+  }
+
+  async function setUploadFiles(fileList) {
+    const files = Array.from(fileList || []);
+    const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
+    const maxBytes = cfg.upload.maxSizeMB * 1024 * 1024;
+    if (!files.length) return;
+    if (files.length > cfg.upload.maxFiles) { state.upload = { files: [], file: null, durationSec: 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
+    const invalid = files.find((file) => !/\.mp4$/i.test(file.name) || file.size > maxBytes);
+    if (invalid) { state.upload = { files: [], file: null, durationSec: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
+    state.upload = { files, file: files[0], durationSec: 0, reading: true, error: "" };
+    rerenderCreateModal(titleValue);
+    try {
+      const durations = await Promise.all(files.map(readVideoDuration));
+      state.upload.durationSec = durations.reduce((sum, value) => sum + value, 0);
+      if (durations.some((value) => value > cfg.upload.maxDurationMinutes * 60)) state.upload.error = `单个视频不能超过 ${cfg.upload.maxDurationMinutes} 分钟`;
+    } catch (error) { state.upload.error = error.message; }
     state.upload.reading = false;
     rerenderCreateModal(titleValue);
   }
@@ -911,21 +931,27 @@
       else await refreshList();
     }
     if (action === "download") await downloadTask(id, actionElement.dataset.format);
+    if (action === "download-all") {
+      try {
+        const payload = await api.getExportAll("md");
+        const url = URL.createObjectURL(payload.blob); const link = document.createElement("a"); link.href = url; link.download = payload.fileName; link.click(); URL.revokeObjectURL(url);
+      } catch (error) { toast(error.message || "下载失败", "error"); }
+    }
     if (action === "remove-file") {
       const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
-      state.upload = { file: null, durationSec: 0, reading: false, error: "" };
+      state.upload = { files: [], file: null, durationSec: 0, reading: false, error: "" };
       rerenderCreateModal(titleValue);
     }
     if (action === "submit-task") {
-      const file = state.upload.file;
+      const files = state.upload.files || (state.upload.file ? [state.upload.file] : []);
       const title = $("#taskTitle") ? $("#taskTitle").value.trim() : "";
-      if (!file || !state.upload.durationSec) return;
+      if (!files.length || !state.upload.durationSec) return;
       actionElement.disabled = true;
       actionElement.textContent = "正在创建...";
       try {
         const task = await api.createTask({
           title,
-          file,
+          files,
           durationSec: Math.round(state.upload.durationSec),
           estimatedMinutes: uploadEstimate(),
         });
@@ -933,7 +959,7 @@
         renderHeader();
         $("#modalRoot").innerHTML = "";
         toast("任务已创建，正在后台识别");
-        go("task/" + task.id);
+        go("tasks");
       } catch (error) {
         actionElement.disabled = false;
         actionElement.textContent = "开始识别";
@@ -958,7 +984,7 @@
   });
 
   document.addEventListener("change", (event) => {
-    if (event.target.id === "fileInput") setUploadFile(event.target.files[0]);
+    if (event.target.id === "fileInput") setUploadFiles(event.target.files);
   });
 
   document.addEventListener("click", (event) => {
@@ -976,7 +1002,7 @@
   document.addEventListener("drop", (event) => {
     if (!event.target.closest("#dropzone")) return;
     event.preventDefault();
-    setUploadFile(event.dataTransfer.files[0]);
+    setUploadFiles(event.dataTransfer.files);
   });
 
   document.addEventListener("keydown", (event) => {

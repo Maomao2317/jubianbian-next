@@ -548,6 +548,58 @@ async def create_task(
     return get_task(task_id, user["id"])  # type: ignore[return-value]
 
 
+async def create_tasks_batch(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    title: str = Form(""),
+) -> dict[str, Any]:
+    """Persist up to 999 independent MP4 jobs for the durable worker queue."""
+    user = current_user(request)
+    if not files or len(files) > 999:
+        raise HTTPException(status_code=400, detail="一次最多上传 999 个视频")
+    prepared: list[dict[str, Any]] = []
+    try:
+        for upload in files:
+            name = safe_filename(upload.filename or "video.mp4")
+            if not name.lower().endswith(".mp4"):
+                raise HTTPException(status_code=400, detail="目前只支持 MP4 视频")
+            task_id = f"task-{uuid.uuid4().hex}"
+            target = UPLOAD_DIR / f"{task_id}.mp4"
+            size = 0
+            with target.open("wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(status_code=413, detail=f"{name} 超过 500 MB")
+                    output.write(chunk)
+            duration = probe_duration(target) or 0
+            if duration <= 0 or duration > MAX_DURATION_SECONDS:
+                raise HTTPException(status_code=400, detail=f"{name} 时长必须不超过 {MAX_DURATION_MINUTES} 分钟")
+            minutes = max(1, int((duration + 59) // 60))
+            prepared.append({"id": task_id, "name": name, "target": target, "size": size, "duration": duration, "minutes": minutes})
+    except Exception:
+        for item in prepared:
+            item["target"].unlink(missing_ok=True)
+        raise
+    total_points = sum(item["minutes"] * POINTS_PER_MINUTE for item in prepared)
+    if total_points > int(user["credits"]):
+        for item in prepared:
+            item["target"].unlink(missing_ok=True)
+        raise HTTPException(status_code=402, detail=f"积分不足，预计需要 {total_points:.1f} 积分")
+    created = now_iso()
+    with db() as connection:
+        for item in prepared:
+            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)", (item["id"], user["id"], title.strip() or title_from_filename(item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["minutes"], created, created))
+        balance = int(user["credits"]) - total_points
+        connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
+        connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))
+    result = []
+    for item in prepared:
+        record_task_event(item["id"], "created", "任务已进入队列", status="queued", stage="queued", progress_percent=4)
+        result.append(get_task(item["id"], user["id"]))
+    return {"tasks": result, "count": len(result)}
+
+
 async def retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
     user_id = current_user(request)["id"]
     row = task_row(task_id, user_id)
@@ -572,6 +624,23 @@ def delete_task(request: Request, task_id: str) -> Response:
         connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
     logger.info("task_deleted task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     return Response(status_code=204)
+
+
+def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
+    user = current_user(request)
+    with db() as connection:
+        rows = connection.execute("SELECT * FROM tasks WHERE user_id = ? AND status = 'done' ORDER BY created_at ASC", (user["id"],)).fetchall()
+    if not rows:
+        raise HTTPException(status_code=409, detail="暂无已完成剧本")
+    content_parts = []
+    for row in rows:
+        task = row_to_task(row)
+        markdown = script_to_markdown(task)
+        content_parts.append(markdown if fmt == "md" else re.sub(r"^#{1,6}\\s+", "", markdown, flags=re.MULTILINE))
+    content = "\n\n---\n\n".join(content_parts)
+    filename = f"全部剧本.{fmt}"
+    encoded_filename = quote(filename)
+    return Response(content=content, media_type="text/markdown" if fmt == "md" else "text/plain", headers={"X-Filename": encoded_filename, "Content-Disposition": f"attachment; filename=all-scripts.{fmt}; filename*=UTF-8''{encoded_filename}"})
 
 
 def download_task(request: Request, task_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:

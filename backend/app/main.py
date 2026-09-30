@@ -7,6 +7,7 @@ entire backend file, while route paths and middleware remain easy to audit.
 
 from __future__ import annotations
 
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -25,8 +26,10 @@ from .routes import (
     admin_user_status,
     admin_users,
     create_task,
+    create_tasks_batch,
     delete_task,
     download_task,
+    download_all_tasks,
     health,
     list_tasks,
     login,
@@ -41,6 +44,9 @@ from .routes import (
     task_event_list,
     user_credit_ledger,
 )
+from .worker import run_worker
+
+worker_task: asyncio.Task | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +92,25 @@ app.add_api_route("/api/tasks", list_tasks, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}", task_detail, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}/events", task_event_list, methods=["GET"])
 app.add_api_route("/api/tasks", create_task, methods=["POST"])
+app.add_api_route("/api/tasks/batch", create_tasks_batch, methods=["POST"])
 app.add_api_route("/api/tasks/{task_id}/retry", retry_task, methods=["POST"])
 app.add_api_route("/api/tasks/{task_id}", delete_task, methods=["DELETE"], status_code=204)
 app.add_api_route("/api/tasks/{task_id}/download", download_task, methods=["GET"])
+app.add_api_route("/api/export/tasks-all", download_all_tasks, methods=["GET"])
 
 
 # Create tables before the first request, matching the original startup order.
 init_db()
+
+@app.on_event("startup")
+async def start_durable_worker() -> None:
+    global worker_task
+    worker_task = asyncio.create_task(run_worker())
+
+@app.on_event("shutdown")
+async def stop_durable_worker() -> None:
+    if worker_task:
+        worker_task.cancel()
 
 
 # The frontend is served last so API routes always win over static fallback.

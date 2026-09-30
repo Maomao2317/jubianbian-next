@@ -277,6 +277,12 @@
         content,
       };
     },
+    async getExportAll(format) {
+      const url = this.url("/export/tasks-all") + `?fmt=${encodeURIComponent(format)}`;
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) throw new Error("暂无可下载的已完成剧本");
+      return { fileName: response.headers.get("X-Filename") || `all-scripts.${format}`, blob: await response.blob() };
+    },
 
     async resetDemo() {
       mockStore = createDefaultStore();
@@ -356,10 +362,10 @@
     },
     createTask(payload) {
       const form = new FormData();
-      form.append("file", payload.file);
+      (payload.files || [payload.file]).forEach((file) => form.append("files", file));
       form.append("title", payload.title || "");
       form.append("durationSec", String(payload.durationSec || 0));
-      return this.request(this.url(cfg().api.endpoints.createTask), { method: "POST", body: form });
+      return this.request(this.url("/tasks/batch"), { method: "POST", body: form });
     },
     retryTask(id) {
       return this.request(this.url(cfg().api.endpoints.task, { id }) + "/retry", { method: "POST" });

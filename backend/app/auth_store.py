@@ -364,6 +364,7 @@ def init_db() -> None:
                 output_tokens INTEGER,
                 total_tokens INTEGER,
                 api_cost_rmb REAL NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 completed_at TEXT
@@ -381,6 +382,7 @@ def init_db() -> None:
             ("output_tokens", "INTEGER"),
             ("total_tokens", "INTEGER"),
             ("api_cost_rmb", "REAL NOT NULL DEFAULT 0"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")

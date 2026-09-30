@@ -81,7 +81,7 @@ window.APP_CONFIG = {
     accept: ".mp4,video/mp4",
     maxSizeMB: 500,
     maxDurationMinutes: 6,
-    maxFiles: 1,
+    maxFiles: 999,
     hint: "支持 MP4，单个视频最长 6 分钟、最大 500MB",
   },
 
