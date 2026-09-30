@@ -328,6 +328,82 @@ def repair_action_subjects(blocks: list[dict[str, Any]], characters: list[str]) 
             active_subject = clause_subject
 
 
+def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: list[dict[str, Any]]) -> None:
+    """Carry a character's visible identity into the first matching action.
+
+    Providers are asked to repeat appearance details in the screenplay, but
+    older responses often put them only in ``characterProfiles``.  Keep the
+    profile as the source of truth and add its concrete details to the first
+    action that names the character.  This makes the exported ``▲`` line
+    usable on its own without inventing facts or adding a separate character
+    table to the screenplay.
+    """
+
+    def clean_detail(value: Any) -> str:
+        text = normalize_text(value).strip("。！？；; ")
+        if not text or text in {"不明", "未知", "待核对", "首登外观/服装待核对"}:
+            return ""
+        return text
+
+    def details_for(profile: dict[str, Any]) -> tuple[str, list[str]]:
+        name = str(profile.get("name") or "").strip()
+        details = [
+            clean_detail(profile.get("appearance")),
+            clean_detail(profile.get("clothing")),
+        ]
+        details = list(dict.fromkeys(item for item in details if item and item != name))
+        if not details:
+            # Some legacy provider responses put the whole introduction in
+            # firstAppearance. Use only the descriptive lead before the name,
+            # rather than copying a complete action sentence into another one.
+            first = clean_detail(profile.get("firstAppearance"))
+            if name and name in first:
+                first = first.split(name, 1)[0].rstrip("，、；：: ")
+                first = re.sub(r"的$", "", first).strip()
+            if first and first != name and len(first) <= 48:
+                details = [first]
+        return name, details
+
+    character_details = [details_for(profile) for profile in profiles if isinstance(profile, dict)]
+    character_details = [(name, details) for name, details in character_details if name]
+    if not character_details:
+        return
+
+    introduced: set[str] = set()
+    for block in blocks:
+        if block.get("type") != "action":
+            continue
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+        for name, details in character_details:
+            if name in introduced or name not in text:
+                continue
+            if not details:
+                introduced.add(name)
+                continue
+            missing = [detail for detail in details if detail not in text]
+            if missing:
+                descriptor = "、".join(missing)
+                styled_with_suffix = False
+                # Turn “梳双丸子头的小女孩” + “穿红碎花袄” into the
+                # natural screenplay phrasing “梳双丸子头、穿红碎花袄的
+                # 小女孩希希”.
+                if len(missing) >= 2 and re.match(r"^(?:穿|身着|穿着)", missing[1]) and "的" in missing[0]:
+                    action_lead, noun = missing[0].rsplit("的", 1)
+                    descriptor = f"{action_lead}、{missing[1]}的{noun}"
+                    styled_with_suffix = True
+                name_position = text.find(name)
+                # Keep the wording natural for appearance verbs such as
+                # “梳/扎/穿/戴/编”; noun-like details read better directly
+                # before the name (for example “小女孩希希”).
+                needs_de = bool(re.search(r"(?:梳|扎|穿|戴|编|披|留|身着|穿着|戴着)", descriptor) or "、" in descriptor)
+                styled_name = f"{descriptor}{'' if styled_with_suffix else ('的' if needs_de else '')}{name}"
+                text = text[:name_position] + styled_name + text[name_position + len(name) :]
+                block["text"] = normalize_text(text, sentence=True)
+            introduced.add(name)
+
+
 def clean_environment(text: Any) -> str:
     value = normalize_text(text)
     if not value:
@@ -700,6 +776,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if str(profile.get("name") or "").strip()
         ]
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
+        add_character_visual_descriptions(blocks, character_profiles)
         for block in blocks:
             speaker = str(block.get("speaker") or "").strip()
             if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"旁白", "未知说话人", "OS", "内心独白"}:
@@ -901,6 +978,18 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     def text_of(value: Any) -> str:
         return str(value or "").strip()
 
+    def action_has_subject(text: str) -> bool:
+        if text.startswith(("未知人物", "未知说话人")):
+            return True
+        for name in known_characters:
+            position = text.find(name)
+            # An appearance lead may precede the name, e.g. “穿红袄的希希
+            # 趴在米缸口”. Do not treat a name buried after a sentence break
+            # as the action subject.
+            if 0 <= position <= 48 and not re.search(r"[。！？]", text[:position]):
+                return True
+        return False
+
     def add_issue(tag: str, severity: str, description: str, scene_index: int | None = None, block_index: int | None = None) -> None:
         issue: dict[str, Any] = {"tag": tag, "severity": severity, "description": description}
         if scene_index is not None:
@@ -979,9 +1068,7 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 vo_classification_warnings += 1
                 add_issue("OS/VO混淆", "P1", f"第 {scene_index} 场第 {block_index} 条声音来源不明确。", scene_index, block_index)
             elif block_type == "action":
-                has_explicit_subject = text.startswith("未知人物") or text.startswith("未知说话人") or any(
-                    text.startswith(name) for name in known_characters
-                )
+                has_explicit_subject = action_has_subject(text)
                 if known_characters and not has_explicit_subject:
                     action_subject_warnings += 1
                     add_issue("可拍摄性", "P0", f"第 {scene_index} 场第 {block_index} 个动作缺少明确人物主体。", scene_index, block_index)
