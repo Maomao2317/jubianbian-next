@@ -596,7 +596,7 @@
         <div class="field">
           <label>视频文件</label>
           <div class="drop ${upload.file ? "has-file" : ""}" id="dropzone">
-            ${upload.files.length > 1 ? selectedFilesMarkup(upload) : fileBlock}
+            ${upload.files.length ? selectedFilesMarkup(upload) : fileBlock}
             <input type="file" id="fileInput" accept=".mp4,video/mp4" multiple hidden />
           </div>
         </div>
@@ -681,12 +681,19 @@
     rerenderCreateModal(titleValue);
   }
 
-  async function setUploadFiles(fileList) {
-    const files = Array.from(fileList || []);
+  async function setUploadFiles(fileList, options = {}) {
+    const incoming = Array.from(fileList || []);
+    // Keep every selected file. Some browsers emit a change event with one
+    // file when the picker is used repeatedly, so merge by file identity
+    // instead of silently replacing the existing selection.
+    const existing = options.replace ? [] : (Array.isArray(state.upload.files) ? state.upload.files : []);
+    const files = [...existing, ...incoming].filter((file, index, all) =>
+      all.findIndex((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified) === index
+    );
     const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
     const maxBytes = cfg.upload.maxSizeMB * 1024 * 1024;
     if (!files.length) return;
-    if (files.length > cfg.upload.maxFiles) { state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
+    if (files.length > cfg.upload.maxFiles) { state.upload = { files: existing, file: existing[0] || null, durationSec: state.upload.durationSec || 0, estimatedMinutes: state.upload.estimatedMinutes || 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
     const invalid = files.find((file) => !/\.mp4$/i.test(file.name) || file.size > maxBytes);
     if (invalid) { state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
     state.upload = { files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
@@ -1042,7 +1049,7 @@
       const index = Number(actionElement.dataset.index);
       if (Number.isInteger(index) && state.upload.files.length > 1) {
         const remaining = state.upload.files.filter((_, itemIndex) => itemIndex !== index);
-        await setUploadFiles(remaining);
+        await setUploadFiles(remaining, { replace: true });
         return;
       }
       state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" };

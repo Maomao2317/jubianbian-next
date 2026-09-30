@@ -226,30 +226,37 @@
     async createTask(payload) {
       await delay(180);
       const { title, files, estimatedMinutes, durationSec } = payload;
-      const file = files && files[0] ? files[0] : payload.file;
+      const selected = (files && files.length ? files : [payload.file]).filter(Boolean);
+      const file = selected[0];
       if (!file) throw new Error("请选择视频文件");
       if (estimatedMinutes > mockStore.profile.credits) {
         throw new Error(`额度不足，当前剩余 ${mockStore.profile.credits} 分钟`);
       }
-      const id = "task-" + Date.now();
-      const task = {
-        id,
-        title: title || file.name.replace(/\.[^.]+$/, ""),
-        fileName: file.name,
-        fileSize: file.size,
+      const batchId = "batch-" + Date.now();
+      const createdAt = new Date().toISOString();
+      const perFileMinutes = Math.max(1, Number(estimatedMinutes || 0) / selected.length);
+      const tasks = selected.map((item, index) => ({
+        id: `${batchId}-${index + 1}`,
+        batchId,
+        batchTitle: title || `短剧批次 ${createdAt.slice(0, 16).replace("T", " ")}`,
+        batchIndex: index + 1,
+        batchTotal: selected.length,
+        title: title || item.name.replace(/\.[^.]+$/, ""),
+        fileName: item.name,
+        fileSize: item.size,
         status: "queued",
         stage: "queued",
         progressPercent: 4,
-        durationSec,
-        estimatedMinutes,
+        durationSec: Math.round(Number(durationSec || 0) / selected.length),
+        estimatedMinutes: perFileMinutes,
         creditsUsed: 0,
-        createdAt: new Date().toISOString(),
+        createdAt,
         result: null,
-      };
-      mockStore.profile.credits -= estimatedMinutes;
-      mockStore.tasks.unshift(task);
+      }));
+      mockStore.profile.credits -= Number(estimatedMinutes || 0);
+      mockStore.tasks.unshift(...tasks.reverse());
       persist();
-      return clone(task);
+      return clone({ tasks, count: tasks.length });
     },
 
     async retryTask(id) {
