@@ -145,7 +145,7 @@ async def process_task(task_id: str) -> None:
     except Exception as exc:  # pragma: no cover - defensive boundary for background work
         attempts = int(row["attempts"] or 0) + 1
         if attempts <= 2:
-            update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试")
+            update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试：{safe_error_text(exc)}")
             record_task_event(task_id, "retry", "处理失败，任务已自动重新排队", status="queued", stage="queued", progress_percent=4)
             logger.warning("task_retry_auto task_id=%s attempt=%s error=%s", task_id, attempts, safe_error_text(exc))
             return

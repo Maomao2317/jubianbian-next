@@ -24,6 +24,7 @@
     menuTaskId: "",
     upload: { files: [], file: null, durationSec: 0, reading: false, error: "" },
     pollTimer: null,
+    rateLimitNotified: false,
     adminTab: "overview",
     adminTaskPage: 0,
     adminTaskKeyword: "",
@@ -624,6 +625,9 @@
 
   async function refreshList() {
     state.tasks = await api.listTasks({ keyword: state.keyword, status: state.status });
+    const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
+    if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
+    if (!limited) state.rateLimitNotified = false;
     renderList();
     schedulePoll(state.tasks.some((task) => task.status === "queued" || task.status === "running"));
   }
