@@ -403,6 +403,8 @@ def init_db() -> None:
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id, created_at)")
+        # Migrate legacy review rows to the user-facing completed state.
+        connection.execute("UPDATE tasks SET status = 'done', stage = 'done', progress_percent = 100 WHERE status = 'review'")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS credit_ledger (

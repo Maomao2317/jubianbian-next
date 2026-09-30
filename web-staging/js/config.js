@@ -38,7 +38,6 @@ window.APP_CONFIG = {
     { id: "all", label: "全部" },
     { id: "queued", label: "待开始" },
     { id: "running", label: "进行中" },
-    { id: "review", label: "待复核" },
     { id: "done", label: "已完成" },
     { id: "failed", label: "失败" },
   ],
@@ -46,7 +45,7 @@ window.APP_CONFIG = {
   statusText: {
     queued: "待开始",
     running: "进行中",
-    review: "待复核",
+    review: "已完成",
     done: "已完成",
     failed: "失败",
   },
