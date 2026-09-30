@@ -42,25 +42,27 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         duration = probed
         update_task(row["id"], duration_sec=duration)
     ark_error: ArkError | None = None
-    if ARK_API_KEYS:
-        try:
-            script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration)
-            script = normalize_script(script, row["title"])
-            quality = script_quality(script, "ark")
-            approved, blocking = quality_gate(quality)
-            quality["deliveryStatus"] = "approved" if approved else "review_required"
-            quality["blockingIssues"] = blocking
-            return script, quality, usage
-        except ArkError as exc:
-            ark_error = exc
-            logger.warning(
-                "provider_failed provider=ark task_id=%s status_code=%s error=%s",
-                row["id"],
-                exc.status_code,
-                safe_error_text(exc),
-            )
-            if not ARK_FALLBACK_ON_ERROR:
-                raise
+    if not ARK_API_KEYS:
+        raise ArkError("未配置方舟 API Key，任务无法进行真实视频识别")
+    try:
+        script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration)
+        script = normalize_script(script, row["title"])
+        quality = script_quality(script, "ark")
+        approved, blocking = quality_gate(quality)
+        quality["deliveryStatus"] = "approved" if approved else "review_required"
+        quality["blockingIssues"] = blocking
+        return script, quality, usage
+    except ArkError as exc:
+        ark_error = exc
+        logger.warning(
+            "provider_failed provider=ark task_id=%s status_code=%s error=%s",
+            row["id"],
+            exc.status_code,
+            safe_error_text(exc),
+        )
+        # Never expose a synthetic screenplay as a successful result. Let the
+        # durable worker retry this task, then mark it failed after the limit.
+        raise
 
     transcript = ""
     script = None
