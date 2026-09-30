@@ -274,14 +274,14 @@
       ? `<div class="row-progress" aria-label="处理进度 ${task.progressPercent || 0}%"><span style="width:${task.progressPercent || 0}%"></span></div>`
       : "";
     const quickAction = isCompletedTask(task)
-      ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button>`
+      ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>`
       : task.status === "failed"
         ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>`
         : "";
     return `<article class="task-row" data-open="${task.id}">
       <div class="file-mark" aria-hidden="true"><span></span></div>
       <div class="task-main">
-        <div class="task-title">${escapeHtml(task.title)}</div>
+        <div class="task-title-line"><div class="task-title">${escapeHtml(task.title)}</div><div class="task-inline-actions">${statusBadge(task)}${quickAction}</div></div>
         <div class="task-meta">${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
         ${progress}
       </div>
@@ -318,7 +318,7 @@
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
         <div class="workspace-panel">
-          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
+          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
           <div class="toolbar">
             <label class="search-wrap">
               <span aria-hidden="true"></span>
@@ -328,7 +328,7 @@
             <div class="task-count">${state.tasks.length} 个任务</div>
           </div>
           <div class="task-list">${rows}</div>
-          ${state.tasks.length > pageSize ? `<div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, state.taskPage - 1)}" ${state.taskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.taskPage + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, state.taskPage + 1)}" ${state.taskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>` : ""}
+          <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, state.taskPage - 1)}" ${state.taskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.taskPage + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, state.taskPage + 1)}" ${state.taskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
         </div>
       </section>`;
     const batchActions = document.querySelector(".batch-download-actions");
@@ -404,6 +404,7 @@
   }
 
   function renderResult(task) {
+    if (!task.result) return `<div class="empty-result"><strong>剧本内容暂未生成</strong><span>任务虽然已完成，但当前没有可展示的剧本内容，请稍后刷新或重新识别。</span></div>`;
     const quality = task.quality || {};
     const severity = quality.severityCounts || {};
     const issues = Array.isArray(quality.issues) ? quality.issues.slice(0, 5) : [];
