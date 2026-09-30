@@ -503,6 +503,11 @@
     const overDuration = upload.durationSec > cfg.upload.maxDurationMinutes * 60;
     const estimatedPoints = estimate * POINTS_PER_MINUTE;
     const insufficient = estimatedPoints > credits;
+    const durationSummary = upload.reading
+      ? "正在读取视频总时长…"
+      : upload.durationSec
+        ? `视频总时长 ${formatDuration(upload.durationSec)}`
+        : "";
     const canSubmit = upload.files.length && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient;
     const fileBlock = upload.files.length ? `<div class="selected-file">
       <div class="file-thumb"><span></span></div>
@@ -537,7 +542,7 @@
         </div>
         <div class="billing-note ${upload.error || overDuration || insufficient ? "warning" : ""}">
           <span>${upload.error || overDuration || insufficient ? "!" : "i"}</span>
-          <div><strong>${billing}</strong><p>按视频实际时长向上取整预扣；任务失败自动退回。</p></div>
+          <div><strong>${billing}</strong><p>${durationSummary ? `${durationSummary} · ` : ""}按视频实际时长向上取整预扣；任务失败自动退回。</p></div>
         </div>
         <div class="modal-actions">
           <button class="cancel-btn" type="button" data-action="close-modal">取消</button>
