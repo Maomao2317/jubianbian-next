@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 from .config import VOLCENGINE_ACCESS_KEY, VOLCENGINE_SECRET_KEY
+from .logging_setup import logger
 
 
 def _hmac(key: bytes, value: str) -> bytes:
@@ -51,7 +52,8 @@ def fetch_monthly_ark_cost(month: str) -> float | None:
     try:
         with urlopen(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except Exception as exc:
+        logger.warning("volcengine_billing_failed month=%s error=%s", month, str(exc)[:300])
         return None
     rows = ((payload.get("Result") or {}).get("List") or []) if isinstance(payload, dict) else []
     total = 0.0
