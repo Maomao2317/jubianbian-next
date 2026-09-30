@@ -40,6 +40,7 @@
     adminRechargeFrom: "",
     adminRechargeTo: "",
     taskPage: 0,
+    expandedBatches: {},
     pointsPage: 0,
     pointsKeyword: "",
     pointsType: "all",
@@ -296,14 +297,40 @@
     </article>`;
   }
 
+  function groupedTaskItems(tasks) {
+    const groups = new Map();
+    const items = [];
+    tasks.forEach((task) => {
+      if (!task.batchId) { items.push({ type: "task", task }); return; }
+      let group = groups.get(task.batchId);
+      if (!group) {
+        group = { type: "batch", id: task.batchId, title: task.batchTitle || "短剧批次", tasks: [] };
+        groups.set(task.batchId, group);
+        items.push(group);
+      }
+      group.tasks.push(task);
+    });
+    return items;
+  }
+
+  function batchRow(group) {
+    const done = group.tasks.filter((task) => isCompletedTask(task)).length;
+    const running = group.tasks.filter((task) => task.status === "running").length;
+    const failed = group.tasks.filter((task) => task.status === "failed").length;
+    const expanded = Boolean(state.expandedBatches[group.id]);
+    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><button class="batch-row" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${expanded ? `<div class="batch-children">${group.tasks.map(taskRow).join("")}</div>` : ""}</div>`;
+  }
+
   function renderList() {
     const filters = cfg.statusFilters.filter((item) => item.id !== "review").map((item) => `
       <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}">${item.label}</button>`).join("");
     const pageSize = 10;
-    const pageCount = Math.max(1, Math.ceil(state.tasks.length / pageSize));
-    const pageTasks = state.tasks.slice(state.taskPage * pageSize, (state.taskPage + 1) * pageSize);
+    const grouped = groupedTaskItems(state.tasks);
+    const pageCount = Math.max(1, Math.ceil(grouped.length / pageSize));
+    const pageTasks = grouped.slice(state.taskPage * pageSize, (state.taskPage + 1) * pageSize);
     const rows = state.tasks.length
-      ? pageTasks.map(taskRow).join("")
+      ? pageTasks.map((item) => item.type === "batch" ? batchRow(item) : taskRow(item.task)).join("")
       : `<div class="empty">
           <div class="empty-icon">＋</div>
           <h3>${state.keyword || state.status !== "all" ? "没有匹配的任务" : "还没有识别任务"}</h3>
@@ -643,7 +670,7 @@
 
   async function refreshList() {
     state.tasks = (await api.listTasks({ keyword: state.keyword, status: state.status })).map(normalizeUserTask);
-    state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(state.tasks.length / 10) - 1));
+    state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(groupedTaskItems(state.tasks).length / 10) - 1));
     const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
     if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
     if (!limited) state.rateLimitNotified = false;
@@ -913,6 +940,7 @@
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "points") { await openPointsModal(); return; }
     if (action === "task-page") { state.taskPage = Number(actionElement.dataset.page) || 0; renderList(); return; }
+    if (action === "toggle-batch") { const batchId = actionElement.dataset.id; state.expandedBatches[batchId] = !state.expandedBatches[batchId]; renderList(); return; }
     if (action === "search") { state.keyword = $("#keyword")?.value.trim() || ""; state.taskPage = 0; await refreshList(); return; }
     if (action === "points-page") { state.pointsPage = Number(actionElement.dataset.page) || 0; await openPointsModal(); return; }
     if (action === "points-filter") {

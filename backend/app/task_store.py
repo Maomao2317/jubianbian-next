@@ -52,6 +52,10 @@ def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         else None
     )
     task["apiCostRmb"] = round(float(task.pop("api_cost_rmb", 0) or 0), 6)
+    task["batchId"] = task.pop("batch_id", None)
+    task["batchTitle"] = task.pop("batch_title", None)
+    task["batchIndex"] = task.pop("batch_index", None)
+    task["batchTotal"] = task.pop("batch_total", None)
     task.pop("stored_path", None)
     return task
 

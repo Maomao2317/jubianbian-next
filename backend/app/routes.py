@@ -587,9 +587,11 @@ async def create_tasks_batch(
             item["target"].unlink(missing_ok=True)
         raise HTTPException(status_code=402, detail=f"积分不足，预计需要 {total_points:.1f} 积分")
     created = now_iso()
+    batch_id = f"batch-{uuid.uuid4().hex}"
+    batch_title = title.strip() or f"短剧批次 {created[:16].replace('T', ' ')}"
     with db() as connection:
-        for item in prepared:
-            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)", (item["id"], user["id"], title.strip() or title_from_filename(item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["minutes"], created, created))
+        for index, item in enumerate(prepared, start=1):
+            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title.strip() or title_from_filename(item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["minutes"], created, created, batch_id, batch_title, index, len(prepared)))
         balance = int(user["credits"]) - total_points
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))

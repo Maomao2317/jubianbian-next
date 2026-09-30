@@ -383,6 +383,10 @@ def init_db() -> None:
             ("total_tokens", "INTEGER"),
             ("api_cost_rmb", "REAL NOT NULL DEFAULT 0"),
             ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("batch_id", "TEXT"),
+            ("batch_title", "TEXT"),
+            ("batch_index", "INTEGER"),
+            ("batch_total", "INTEGER"),
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
