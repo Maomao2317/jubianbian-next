@@ -41,6 +41,7 @@
     adminRechargeTo: "",
     taskPage: 0,
     expandedBatches: {},
+    queue: { waitMinutes: 0, blocked: false, workerConcurrency: 8 },
     pointsPage: 0,
     pointsKeyword: "",
     pointsType: "all",
@@ -322,6 +323,29 @@
     return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><button class="batch-row" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${expanded ? `<div class="batch-children">${group.tasks.map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
+  function formatEta(minutes) {
+    const value = Math.max(0, Math.ceil(Number(minutes) || 0));
+    if (!value) return "已完成";
+    if (value < 60) return `预计约 ${value} 分钟`;
+    const hours = Math.floor(value / 60);
+    const rest = value % 60;
+    return `预计约 ${hours} 小时${rest ? ` ${rest} 分钟` : ""}`;
+  }
+
+  // Batch rows intentionally keep each episode action available after expansion.
+  function batchRow(group) {
+    const done = group.tasks.filter((task) => isCompletedTask(task)).length;
+    const running = group.tasks.filter((task) => task.status === "running").length;
+    const failed = group.tasks.filter((task) => task.status === "failed").length;
+    const expanded = Boolean(state.expandedBatches[group.id]);
+    const remaining = group.tasks.reduce((sum, task) => isCompletedTask(task) ? sum : sum + Number(task.estimatedMinutes || 1) * Math.max(0.05, 1 - Number(task.progressPercent || 0) / 100), 0);
+    const eta = formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8))));
+    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    const downloads = done ? `<span class="batch-downloads"><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button></span>` : "";
+    const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
+    return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => Number(a.batchIndex || 0) - Number(b.batchIndex || 0)).map(taskRow).join("")}</div>` : ""}</div>`;
+  }
+
   function renderList() {
     const filters = cfg.statusFilters.filter((item) => item.id !== "review").map((item) => `
       <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}">${item.label}</button>`).join("");
@@ -349,6 +373,7 @@
         </div>
         <div class="workspace-panel">
           <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
+          ${state.queue.blocked ? `<div class="queue-blocked-notice">当前排队预计超过 10 小时，暂时不能继续上传，请稍后再试。</div>` : state.queue.waitMinutes ? `<div class="queue-summary">当前预计排队 ${formatEta(state.queue.waitMinutes)} · 可同时处理 ${state.queue.workerConcurrency || 8} 个视频</div>` : ""}
           <div class="toolbar">
             <label class="search-wrap">
               <input class="search" id="keyword" placeholder="搜索任务或文件名" value="${escapeHtml(state.keyword)}" />
@@ -537,7 +562,8 @@
       : upload.durationSec
         ? `视频总时长 ${formatDuration(upload.durationSec)}`
         : "";
-    const canSubmit = upload.files.length && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient;
+    const queueBlocked = Boolean(state.queue.blocked);
+    const canSubmit = upload.files.length && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient && !queueBlocked;
     const fileBlock = upload.files.length ? `<div class="selected-file">
       <div class="file-thumb"><span></span></div>
       <div><strong>${escapeHtml(upload.file.name)}</strong><p>${formatSize(upload.file.size)} · ${upload.reading ? "正在读取时长..." : formatDuration(upload.durationSec)}</p></div>
@@ -549,7 +575,8 @@
       <small>可一次选择多个文件，也可以拖入整批视频</small>
     </div>`;
     let billing = "选择视频后自动读取时长并预估积分";
-    if (upload.error) billing = upload.error;
+    if (queueBlocked) billing = "当前排队预计超过 10 小时，暂时不能继续上传";
+    else if (upload.error) billing = upload.error;
     else if (overDuration) billing = `视频超过 ${cfg.upload.maxDurationMinutes} 分钟，请更换文件`;
     else if (estimate) billing = `预计消耗 ${estimatedPoints.toFixed(1)} 积分，当前可用 ${Number(credits).toFixed(1)} 积分`;
     return `<div class="modal-mask" id="modalMask">
@@ -669,7 +696,9 @@
   }
 
   async function refreshList() {
-    state.tasks = (await api.listTasks({ keyword: state.keyword, status: state.status })).map(normalizeUserTask);
+    const [tasks, queue] = await Promise.all([api.listTasks({ keyword: state.keyword, status: state.status }), api.getQueueSummary().catch(() => state.queue)]);
+    state.tasks = tasks.map(normalizeUserTask);
+    state.queue = queue || state.queue;
     state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(groupedTaskItems(state.tasks).length / 10) - 1));
     const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
     if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
@@ -962,7 +991,7 @@
       return;
     }
     if (action === "logout") { await logout(); return; }
-    if (action === "create") openCreateModal();
+    if (action === "create") { if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; } openCreateModal(); }
     if (action === "close-modal") $("#modalRoot").innerHTML = "";
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
@@ -988,6 +1017,12 @@
       else await refreshList();
     }
     if (action === "download") await downloadTask(id, actionElement.dataset.format);
+    if (action === "download-batch") {
+      try {
+        const payload = await api.getExportBatch(id, actionElement.dataset.format || "md");
+        const url = URL.createObjectURL(payload.blob); const link = document.createElement("a"); link.href = url; link.download = payload.fileName; link.click(); URL.revokeObjectURL(url);
+      } catch (error) { toast(error.message || "下载失败", "error"); }
+    }
     if (action === "download-all") {
       try {
         const payload = await api.getExportAll(actionElement.dataset.format || "md");

@@ -30,12 +30,14 @@ from .routes import (
     delete_task,
     download_task,
     download_all_tasks,
+    download_batch,
     health,
     list_tasks,
     login,
     logout,
     metrics,
     profile,
+    queue_summary,
     register,
     request_auth_code,
     reset_password,
@@ -79,6 +81,7 @@ app.add_api_route("/api/auth/reset-password", reset_password, methods=["POST"])
 app.add_api_route("/api/auth/logout", logout, methods=["POST"])
 app.add_api_route("/api/me", profile, methods=["GET"])
 app.add_api_route("/api/me/ledger", user_credit_ledger, methods=["GET"])
+app.add_api_route("/api/queue/summary", queue_summary, methods=["GET"])
 app.add_api_route("/api/admin/overview", admin_overview, methods=["GET"])
 app.add_api_route("/api/admin/users", admin_users, methods=["GET"])
 app.add_api_route("/api/admin/users/{user_id}/status", admin_user_status, methods=["PATCH"])
@@ -97,6 +100,7 @@ app.add_api_route("/api/tasks/{task_id}/retry", retry_task, methods=["POST"])
 app.add_api_route("/api/tasks/{task_id}", delete_task, methods=["DELETE"], status_code=204)
 app.add_api_route("/api/tasks/{task_id}/download", download_task, methods=["GET"])
 app.add_api_route("/api/export/tasks-all", download_all_tasks, methods=["GET"])
+app.add_api_route("/api/export/batch/{batch_id}", download_batch, methods=["GET"])
 
 
 # Create tables before the first request, matching the original startup order.

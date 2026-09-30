@@ -43,6 +43,7 @@ from .config import (
     MAX_DURATION_SECONDS,
     MAX_UPLOAD_BYTES,
     POINTS_PER_MINUTE,
+    QUEUE_MAX_WAIT_MINUTES,
     REGISTER_POINTS,
     OPENAI_API_KEY,
     PASSWORD_DIGIT_RE,
@@ -117,6 +118,43 @@ def metrics() -> dict[str, Any]:
         },
         "timestamp": now_iso(),
     }
+
+
+def _queue_summary(connection: sqlite3.Connection, additional_minutes: int = 0) -> dict[str, Any]:
+    """Estimate backlog time using the same worker concurrency as the runner."""
+    from .config import WORKER_CONCURRENCY
+
+    rows = connection.execute(
+        "SELECT status, estimated_minutes, progress_percent FROM tasks WHERE status IN ('queued', 'running')"
+    ).fetchall()
+    workload = 0.0
+    queued_count = 0
+    running_count = 0
+    for row in rows:
+        minutes = max(1.0, float(row["estimated_minutes"] or 1))
+        if row["status"] == "running":
+            running_count += 1
+            workload += minutes * max(0.05, 1 - float(row["progress_percent"] or 0) / 100)
+        else:
+            queued_count += 1
+            workload += minutes
+    workload += max(0, int(additional_minutes or 0))
+    wait_minutes = int((workload + WORKER_CONCURRENCY - 1) // WORKER_CONCURRENCY)
+    return {
+        "waitMinutes": wait_minutes,
+        "waitHours": round(wait_minutes / 60, 1),
+        "blocked": wait_minutes > QUEUE_MAX_WAIT_MINUTES,
+        "thresholdMinutes": QUEUE_MAX_WAIT_MINUTES,
+        "workerConcurrency": WORKER_CONCURRENCY,
+        "queuedCount": queued_count,
+        "runningCount": running_count,
+    }
+
+
+def queue_summary(request: Request) -> dict[str, Any]:
+    current_user(request)
+    with db() as connection:
+        return _queue_summary(connection)
 
 
 # Authentication and account lifecycle
@@ -586,6 +624,12 @@ async def create_tasks_batch(
         for item in prepared:
             item["target"].unlink(missing_ok=True)
         raise HTTPException(status_code=402, detail=f"积分不足，预计需要 {total_points:.1f} 积分")
+    with db() as connection:
+        queue = _queue_summary(connection, sum(item["minutes"] for item in prepared))
+    if queue["blocked"]:
+        for item in prepared:
+            item["target"].unlink(missing_ok=True)
+        raise HTTPException(status_code=429, detail=f"当前任务排队预计超过 {QUEUE_MAX_WAIT_MINUTES // 60} 小时，请稍后再上传", headers={"Retry-After": "600"})
     created = now_iso()
     batch_id = f"batch-{uuid.uuid4().hex}"
     batch_title = title.strip() or f"短剧批次 {created[:16].replace('T', ' ')}"
@@ -643,6 +687,25 @@ def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|tx
     filename = f"全部剧本.{fmt}"
     encoded_filename = quote(filename)
     return Response(content=content, media_type="text/markdown" if fmt == "md" else "text/plain", headers={"X-Filename": encoded_filename, "Content-Disposition": f"attachment; filename=all-scripts.{fmt}; filename*=UTF-8''{encoded_filename}"})
+
+
+def download_batch(request: Request, batch_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
+    user = current_user(request)
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'done' ORDER BY batch_index ASC, created_at ASC",
+            (user["id"], batch_id),
+        ).fetchall()
+    if not rows:
+        raise HTTPException(status_code=409, detail="该批次暂无可下载的剧本")
+    parts = []
+    for row in rows:
+        markdown = script_to_markdown(row_to_task(row))
+        parts.append(markdown if fmt == "md" else re.sub(r"^#{1,6}\s+", "", markdown, flags=re.MULTILINE))
+    content = "\n\n---\n\n".join(parts)
+    title = safe_filename(rows[0]["batch_title"] or "批次剧本")
+    encoded_filename = quote(f"{title}.{fmt}")
+    return Response(content=content, media_type="text/markdown" if fmt == "md" else "text/plain", headers={"X-Filename": encoded_filename, "Content-Disposition": f"attachment; filename=batch-scripts.{fmt}; filename*=UTF-8''{encoded_filename}"})
 
 
 def download_task(request: Request, task_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:

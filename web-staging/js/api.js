@@ -207,6 +207,14 @@
       }));
     },
 
+    async getQueueSummary() {
+      await delay(40);
+      const active = mockStore.tasks.filter((task) => task.status === "queued" || task.status === "running");
+      const workload = active.reduce((sum, task) => sum + Number(task.estimatedMinutes || 1), 0);
+      const waitMinutes = Math.ceil(workload / 8);
+      return { waitMinutes, waitHours: Math.round(waitMinutes / 60 * 10) / 10, blocked: waitMinutes > 600, thresholdMinutes: 600, workerConcurrency: 8, queuedCount: active.filter((task) => task.status === "queued").length, runningCount: active.filter((task) => task.status === "running").length };
+    },
+
     async getTask(id) {
       await delay(100);
       const task = mockStore.tasks.find((item) => item.id === id);
@@ -283,6 +291,20 @@
       if (!response.ok) throw new Error("暂无可下载的已完成剧本");
       return { fileName: response.headers.get("X-Filename") || `all-scripts.${format}`, blob: await response.blob() };
     },
+    async getExportBatch(batchId, format) {
+      const url = this.url("/export/batch/:id", { id: batchId }) + `?fmt=${encodeURIComponent(format)}`;
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) throw new Error("该批次暂无可下载的剧本");
+      return { fileName: response.headers.get("X-Filename") || `batch-scripts.${format}`, blob: await response.blob() };
+    },
+
+    async getExportBatch(batchId, format) {
+      await delay(80);
+      const tasks = mockStore.tasks.filter((task) => task.batchId === batchId && task.status === "done").sort((a, b) => Number(a.batchIndex || 0) - Number(b.batchIndex || 0));
+      if (!tasks.length) throw new Error("该批次暂无可下载的剧本");
+      const content = tasks.map((task) => scriptToMarkdown(task)).join("\n\n---\n\n");
+      return { fileName: `${tasks[0].batchTitle || "批次剧本"}.${format}`, mimeType: format === "txt" ? "text/plain;charset=utf-8" : "text/markdown;charset=utf-8", content: format === "txt" ? content.replace(/^#{1,6}\s+/gm, "").replace(/\*\*/g, "") : content };
+    },
 
     async resetDemo() {
       mockStore = createDefaultStore();
@@ -357,6 +379,7 @@
       const search = new URLSearchParams(query || {}).toString();
       return this.request(this.url(cfg().api.endpoints.tasks) + (search ? "?" + search : ""));
     },
+    getQueueSummary() { return this.request(this.url("/queue/summary")); },
     getTask(id) {
       return this.request(this.url(cfg().api.endpoints.task, { id }));
     },
