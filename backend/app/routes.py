@@ -30,6 +30,7 @@ from .auth_store import (
     now_iso,
 )
 from .config import (
+    ADMIN_EMAILS,
     APP_STARTED_MONOTONIC,
     ARK_API_KEY,
     ARK_MODEL,
@@ -229,10 +230,10 @@ async def register(request: Request) -> JSONResponse:
     try:
         with db() as connection:
             connection.execute(
-                "INSERT INTO users(id, email, password_hash, name, credits, plan, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users(id, email, password_hash, name, credits, plan, created_at, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 # Testing mode: keep newly registered accounts unblocked while
                 # screenplay quality is being evaluated in both environments.
-                (user_id, email, _password_hash(password), name, REGISTER_POINTS, "体验版", created),
+                (user_id, email, _password_hash(password), name, REGISTER_POINTS, "体验版", created, "admin" if email in ADMIN_EMAILS else "user"),
             )
             connection.execute(
                 "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
