@@ -257,7 +257,6 @@
       ? `<button type="button" data-action="retry" data-id="${task.id}">重新识别</button>`
       : "";
     return `<div class="task-menu" role="menu">
-      <button type="button" data-action="open-task" data-id="${task.id}">查看详情</button>
       ${download}${retry}
       <button class="danger-item" type="button" data-action="ask-delete" data-id="${task.id}">删除任务</button>
     </div>`;
@@ -321,8 +320,8 @@
           <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
           <div class="toolbar">
             <label class="search-wrap">
-              <span aria-hidden="true"></span>
               <input class="search" id="keyword" placeholder="搜索任务或文件名" value="${escapeHtml(state.keyword)}" />
+              <button class="search-submit" type="button" data-action="search" aria-label="执行搜索" title="执行搜索">⌕</button>
             </label>
             <div class="filters" aria-label="任务状态筛选">${filters}</div>
             <div class="task-count">${state.tasks.length} 个任务</div>
@@ -903,6 +902,7 @@
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "points") { await openPointsModal(); return; }
     if (action === "task-page") { state.taskPage = Number(actionElement.dataset.page) || 0; renderList(); return; }
+    if (action === "search") { state.keyword = $("#keyword")?.value.trim() || ""; state.taskPage = 0; await refreshList(); return; }
     if (action === "points-page") { state.pointsPage = Number(actionElement.dataset.page) || 0; await openPointsModal(); return; }
     if (action === "points-filter") {
       state.pointsKeyword = $("#pointsKeyword")?.value.trim() || "";
@@ -999,12 +999,9 @@
     }
   });
 
-  let searchTimer;
   document.addEventListener("input", (event) => {
     if (event.target.id !== "keyword") return;
     state.keyword = event.target.value.trim();
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(refreshList, 180);
   });
 
   document.addEventListener("change", (event) => {
