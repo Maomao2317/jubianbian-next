@@ -56,6 +56,7 @@ from .config import (
     TENCENTCLOUD_SES_TEMPLATE_ID,
     UPLOAD_DIR,
 )
+from .billing import fetch_monthly_ark_cost
 from .logging_setup import _email_log_id, logger, safe_error_text
 from .media import probe_duration, safe_filename, title_from_filename
 from .processing import process_task
@@ -289,11 +290,14 @@ def admin_overview(request: Request) -> dict[str, Any]:
         usage = connection.execute("SELECT COALESCE(SUM(credits_used), 0) AS used, COALESCE(SUM(api_cost_rmb), 0) AS api_cost FROM tasks WHERE status IN ('done', 'review')").fetchone()
         recent = connection.execute("SELECT t.id, t.user_id, t.title, t.status, t.stage, t.credits_used, t.created_at, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id = t.user_id ORDER BY t.created_at DESC LIMIT 10").fetchall()
     statuses = {row["status"]: int(row["count"]) for row in task_status}
+    # Provider billing is delayed and may be temporarily unavailable; retain
+    # the locally recorded amount as a safe fallback in that case.
+    billing_cost = fetch_monthly_ark_cost(now_iso()[:7])
     return {
         "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
         "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
         "creditsUsed": int(usage["used"] or 0),
-        "apiCostRmb": round(float(usage["api_cost"] or 0), 2),
+        "apiCostRmb": billing_cost if billing_cost is not None else round(float(usage["api_cost"] or 0), 2),
         "recentTasks": [dict(row) for row in recent],
         "sections": {"analytics": False, "funnel": False, "retention": False, "codeManagement": False},
         "timestamp": now_iso(),
