@@ -305,10 +305,11 @@
 
   function groupedTaskItems(tasks) {
     const orderedTasks = tasks.slice().sort((a, b) => {
-      const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY;
-      const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY;
-      if (ae !== be) return ae - be;
-      return String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+      const at = Date.parse(String(a.createdAt || ""));
+      const bt = Date.parse(String(b.createdAt || ""));
+      if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return bt - at;
+      if (Number.isFinite(at) !== Number.isFinite(bt)) return Number.isFinite(bt) ? 1 : -1;
+      return String(b.id || "").localeCompare(String(a.id || ""));
     });
     const groups = new Map();
     const items = [];

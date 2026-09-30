@@ -228,7 +228,13 @@
       return clone(mockStore.tasks.filter((task) => {
         const haystack = `${task.title} ${task.fileName || ""}`.toLocaleLowerCase();
         return (!query || haystack.includes(query)) && matchStatus(task, status);
-      }).sort((a, b) => (Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Infinity) - (Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Infinity) || String(a.createdAt || "").localeCompare(String(b.createdAt || ""))));
+      }).sort((a, b) => {
+        const at = Date.parse(String(a.createdAt || ""));
+        const bt = Date.parse(String(b.createdAt || ""));
+        if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return bt - at;
+        if (Number.isFinite(at) !== Number.isFinite(bt)) return Number.isFinite(bt) ? 1 : -1;
+        return String(b.id || "").localeCompare(String(a.id || ""));
+      }));
     },
 
     async getQueueSummary() {

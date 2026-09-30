@@ -533,17 +533,11 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as connection:
-        rows = connection.execute(f"SELECT * FROM tasks {where} ORDER BY created_at ASC", params).fetchall()
-    tasks = [row_to_task(row) for row in rows]
-    # Episode labels in filenames are the canonical order for a screenplay
-    # collection. Unnumbered files remain after numbered episodes.
-    return [
-        item
-        for _, item in sorted(
-            enumerate(tasks),
-            key=lambda pair: episode_sort_key(str(pair[1].get("fileName") or ""), pair[0]),
-        )
-    ]
+        # The workspace is a recency-based task inbox: the most recently
+        # created task must be visible first. Keep the id as a deterministic
+        # tie-breaker for tasks created in the same timestamp tick.
+        rows = connection.execute(f"SELECT * FROM tasks {where} ORDER BY created_at DESC, id DESC", params).fetchall()
+    return [row_to_task(row) for row in rows]
 
 
 def task_detail(request: Request, task_id: str) -> dict[str, Any]:
