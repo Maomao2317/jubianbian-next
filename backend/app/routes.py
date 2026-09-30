@@ -415,19 +415,28 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
     params: list[Any] = []
     if keyword.strip():
         value = f"%{keyword.strip()}%"
-        clauses.append("(u.email LIKE ? OR u.name LIKE ? OR r.reason LIKE ?)")
+        clauses.append("(u.email LIKE ? OR u.name LIKE ? OR reason LIKE ?)")
         params.extend([value, value, value])
     if date_from:
-        clauses.append("r.created_at >= ?")
+        clauses.append("created_at >= ?")
         params.append(f"{date_from}T00:00:00")
     if date_to:
-        clauses.append("r.created_at <= ?")
+        clauses.append("created_at <= ?")
         params.append(f"{date_to}T23:59:59")
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     with db() as connection:
-        total = connection.execute(f"SELECT COUNT(*) AS total FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id {where}", tuple(params)).fetchone()["total"]
-        rows = connection.execute(f"SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after, r.reason, r.created_at, u.email, u.name FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id {where} ORDER BY r.id DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
-    return {"total": int(total or 0), "items": [dict(row) for row in rows]}
+        recharge = connection.execute("SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after, r.reason, r.created_at, u.email, u.name, 'recharge' AS entry_type FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id").fetchall()
+        credit = connection.execute("SELECT c.id, c.user_id, 0 AS rmb_amount, c.amount AS points_amount, c.balance_after, c.reason, c.created_at, u.email, u.name, c.entry_type FROM credit_ledger c LEFT JOIN users u ON u.id = c.user_id").fetchall()
+    combined = [dict(row) for row in (*recharge, *credit)]
+    if clauses:
+        def matches(item: dict[str, Any]) -> bool:
+            if keyword.strip() and keyword.strip().lower() not in " ".join(str(item.get(key) or "") for key in ("email", "name", "reason")).lower(): return False
+            if date_from and str(item.get("created_at") or "") < f"{date_from}T00:00:00": return False
+            if date_to and str(item.get("created_at") or "") > f"{date_to}T23:59:59": return False
+            return True
+        combined = [item for item in combined if matches(item)]
+    combined.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"total": len(combined), "items": combined[offset:offset + limit]}
 
 
 def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
