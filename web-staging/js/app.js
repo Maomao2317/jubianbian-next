@@ -312,7 +312,7 @@
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
         <div class="workspace-panel">
-          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（TXT）</button><small>最多上传 999 个 MP4 视频，单个不超过 6 分钟</small></div>
+          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
           <div class="toolbar">
             <label class="search-wrap">
               <span aria-hidden="true"></span>
@@ -480,6 +480,10 @@
     return estimatedMinutes(state.upload.durationSec);
   }
 
+  function selectedFilesMarkup(upload) {
+    return `<div class="selected-files-list"><div class="selected-files-head"><strong>已选择 ${upload.files.length} 个视频</strong><span>将分别创建任务</span></div>${upload.files.map((file, index) => `<div class="selected-file-row"><span>${index + 1}</span><strong>${escapeHtml(file.name)}</strong><small>${formatSize(file.size)}</small><button type="button" data-action="remove-file" data-index="${index}">移除</button></div>`).join("")}</div>`;
+  }
+
   function createModalMarkup() {
     const upload = state.upload;
     const estimate = uploadEstimate();
@@ -515,7 +519,7 @@
         <div class="field">
           <label>视频文件</label>
           <div class="drop ${upload.file ? "has-file" : ""}" id="dropzone">
-            ${fileBlock}
+            ${upload.files.length > 1 ? selectedFilesMarkup(upload) : fileBlock}
             <input type="file" id="fileInput" accept=".mp4,video/mp4" multiple hidden />
           </div>
         </div>
@@ -940,6 +944,12 @@
     }
     if (action === "remove-file") {
       const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
+      const index = Number(actionElement.dataset.index);
+      if (Number.isInteger(index) && state.upload.files.length > 1) {
+        const remaining = state.upload.files.filter((_, itemIndex) => itemIndex !== index);
+        await setUploadFiles(remaining);
+        return;
+      }
       state.upload = { files: [], file: null, durationSec: 0, reading: false, error: "" };
       rerenderCreateModal(titleValue);
     }
