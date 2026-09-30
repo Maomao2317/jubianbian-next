@@ -882,6 +882,8 @@
     state.authCooldownTimer = null;
     state.authCooldown = 0;
     state.profile = null; state.authBusy = false; state.authMode = "login"; state.authEmail = "";
+    state.expandedBatches = {};
+    window.location.replace(`${window.location.pathname}?ui=${Date.now()}#/tasks`);
     $("#modalRoot").innerHTML = ""; renderAuth(); toast("已退出登录");
   }
 

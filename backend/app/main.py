@@ -68,6 +68,18 @@ app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestLogMiddleware)
 
 
+@app.middleware("http")
+async def no_cache_frontend(request, call_next):
+    """Prevent stale HTML/assets from resurrecting an older workspace UI."""
+    response = await call_next(request)
+    path = request.url.path
+    if path in {"/", "/index.html"} or path.startswith(("/js/", "/css/")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # API route table (the handlers themselves live in routes.py)
 # ---------------------------------------------------------------------------
