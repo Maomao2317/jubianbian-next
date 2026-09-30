@@ -826,6 +826,43 @@ a { color: inherit; text-decoration: none; }
 .toast[data-tone="error"] { border-color: #7a2335; background: #691c2d; }
 
 .user-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 16px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+
+/* Compact workspace controls and task rows */
+.batch-download-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #fffdf8 0%, #faf8f2 100%);
+}
+.batch-download-actions .secondary-btn {
+  min-width: 148px;
+  height: 38px;
+  padding: 0 18px;
+  border: 1px solid #d8c58a;
+  border-radius: 9px;
+  color: #5a4514;
+  background: #fffdf6;
+  box-shadow: 0 2px 5px rgba(104, 78, 15, .06);
+  font-weight: 700;
+  transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+.batch-download-actions .secondary-btn:hover:not(:disabled) {
+  border-color: var(--gold-strong);
+  background: #fff7d9;
+  box-shadow: 0 5px 14px rgba(104, 78, 15, .12);
+  transform: translateY(-1px);
+}
+.batch-download-actions .secondary-btn:disabled { opacity: .48; box-shadow: none; }
+.task-list { padding: 0 18px 4px; }
+.task-row { min-height: 78px; gap: 12px; }
+.file-mark { width: 36px; height: 40px; }
+.task-title { font-size: 14px; }
+.task-meta { margin-top: 4px; font-size: 12px; }
+.task-state { gap: 8px; }
+.user-pagination { padding: 12px 18px; background: #fcfbf8; }
+.user-pagination .secondary-btn { height: 32px; padding: 0 13px; border-radius: 7px; }
 .points-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0 12px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfc; }
 .points-filter-input, .points-filter-select, .points-filter-date { height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: #fff; font: inherit; font-size: 12px; }
 .points-filter-input { flex: 1 1 150px; min-width: 140px; }

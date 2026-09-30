@@ -106,10 +106,15 @@
   }
 
   function statusBadge(task) {
+    const displayStatus = task.status === "review" ? "done" : task.status;
     const text = task.status === "running"
       ? cfg.stageText[task.stage]
-      : cfg.statusText[task.status] || task.status;
-    return `<span class="badge ${task.status}"><span class="badge-dot"></span>${escapeHtml(text)}</span>`;
+      : cfg.statusText[displayStatus] || displayStatus;
+    return `<span class="badge ${displayStatus}"><span class="badge-dot"></span>${escapeHtml(text)}</span>`;
+  }
+
+  function isCompletedTask(task) {
+    return task.status === "done" || task.status === "review";
   }
 
   function renderHeader() {
@@ -268,7 +273,7 @@
     const progress = task.status === "running" || task.status === "queued"
       ? `<div class="row-progress" aria-label="处理进度 ${task.progressPercent || 0}%"><span style="width:${task.progressPercent || 0}%"></span></div>`
       : "";
-    const quickAction = task.status === "done"
+    const quickAction = isCompletedTask(task)
       ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button>`
       : task.status === "failed"
         ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>`
@@ -289,9 +294,9 @@
   }
 
   function renderList() {
-    const filters = cfg.statusFilters.map((item) => `
+    const filters = cfg.statusFilters.filter((item) => item.id !== "review").map((item) => `
       <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}">${item.label}</button>`).join("");
-    const pageSize = 10;
+    const pageSize = 6;
     const pageCount = Math.max(1, Math.ceil(state.tasks.length / pageSize));
     const pageTasks = state.tasks.slice(state.taskPage * pageSize, (state.taskPage + 1) * pageSize);
     const rows = state.tasks.length
@@ -326,6 +331,8 @@
           ${state.tasks.length > pageSize ? `<div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, state.taskPage - 1)}" ${state.taskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.taskPage + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, state.taskPage + 1)}" ${state.taskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>` : ""}
         </div>
       </section>`;
+    const batchActions = document.querySelector(".batch-download-actions");
+    if (batchActions) [...batchActions.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).forEach((node) => node.remove());
   }
 
   function pipeline(task) {
@@ -447,14 +454,14 @@
       $("#main").innerHTML = `<section class="page"><div class="empty"><h3>任务不存在</h3></div></section>`;
       return;
     }
-    const downloadActions = task.status === "done" ? `
+    const downloadActions = isCompletedTask(task) ? `
       <div class="download-actions">
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
       </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0/P1 级质量问题，完成复核前不可导出。</div>` : "";
     let content = "";
-    if (task.status === "done" || task.status === "review") content = renderResult(task);
+    if (isCompletedTask(task)) content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);
     if (task.status === "failed") content = `<div class="error-panel">
       <div class="error-symbol">!</div>
@@ -625,6 +632,7 @@
 
   async function refreshList() {
     state.tasks = await api.listTasks({ keyword: state.keyword, status: state.status });
+    state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(state.tasks.length / 6) - 1));
     const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
     if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
     if (!limited) state.rateLimitNotified = false;
