@@ -424,6 +424,22 @@ def init_db() -> None:
             """
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, id)")
+        # Backfill the visible signup grant for accounts created before the
+        # ledger entry was introduced. This only records history; it never
+        # changes the user's existing balance.
+        connection.execute(
+            """
+            INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at)
+            SELECT u.id, 25, 25, 'grant', '新用户注册赠送 25 积分', u.created_at
+            FROM users u
+            WHERE u.credits = 25
+              AND NOT EXISTS (
+                SELECT 1 FROM credit_ledger c
+                WHERE c.user_id = u.id AND c.entry_type = 'grant'
+                  AND c.reason LIKE '%注册赠送%'
+              )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS admin_recharge_ledger (
