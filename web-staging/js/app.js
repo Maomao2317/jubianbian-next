@@ -22,7 +22,7 @@
     authCooldownTimer: null,
     authEmail: "",
     menuTaskId: "",
-    upload: { files: [], file: null, durationSec: 0, reading: false, error: "" },
+    upload: { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" },
     pollTimer: null,
     rateLimitNotified: false,
     adminTab: "overview",
@@ -545,8 +545,7 @@
   }
 
   function uploadEstimate() {
-    if (!state.upload.durationSec) return 0;
-    return estimatedMinutes(state.upload.durationSec);
+    return Number(state.upload.estimatedMinutes || 0);
   }
 
   function selectedFilesMarkup(upload) {
@@ -614,7 +613,7 @@
   }
 
   function openCreateModal() {
-    state.upload = { files: [], file: null, durationSec: 0, reading: false, error: "" };
+    state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" };
     $("#modalRoot").innerHTML = createModalMarkup();
   }
 
@@ -661,19 +660,20 @@
     const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
     const maxBytes = cfg.upload.maxSizeMB * 1024 * 1024;
     if (!/\.mp4$/i.test(file.name)) {
-      state.upload = { file: null, durationSec: 0, reading: false, error: "目前只支持 MP4 视频" };
+      state.upload = { file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "目前只支持 MP4 视频" };
       rerenderCreateModal(titleValue);
       return;
     }
     if (file.size > maxBytes) {
-      state.upload = { file: null, durationSec: 0, reading: false, error: `文件超过 ${cfg.upload.maxSizeMB} MB` };
+      state.upload = { file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: `文件超过 ${cfg.upload.maxSizeMB} MB` };
       rerenderCreateModal(titleValue);
       return;
     }
-    state.upload = { file, durationSec: 0, reading: true, error: "" };
+    state.upload = { file, durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
     rerenderCreateModal(titleValue);
     try {
       state.upload.durationSec = await readVideoDuration(file);
+      state.upload.estimatedMinutes = estimatedMinutes(state.upload.durationSec);
     } catch (error) {
       state.upload.error = error.message;
     }
@@ -686,14 +686,15 @@
     const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
     const maxBytes = cfg.upload.maxSizeMB * 1024 * 1024;
     if (!files.length) return;
-    if (files.length > cfg.upload.maxFiles) { state.upload = { files: [], file: null, durationSec: 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
+    if (files.length > cfg.upload.maxFiles) { state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
     const invalid = files.find((file) => !/\.mp4$/i.test(file.name) || file.size > maxBytes);
-    if (invalid) { state.upload = { files: [], file: null, durationSec: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
-    state.upload = { files, file: files[0], durationSec: 0, reading: true, error: "" };
+    if (invalid) { state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
+    state.upload = { files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
     rerenderCreateModal(titleValue);
     try {
       const durations = await Promise.all(files.map(readVideoDuration));
       state.upload.durationSec = durations.reduce((sum, value) => sum + value, 0);
+      state.upload.estimatedMinutes = durations.reduce((sum, value) => sum + estimatedMinutes(value), 0);
       if (durations.some((value) => value > cfg.upload.maxDurationMinutes * 60)) state.upload.error = `单个视频不能超过 ${cfg.upload.maxDurationMinutes} 分钟`;
     } catch (error) { state.upload.error = error.message; }
     state.upload.reading = false;
@@ -1042,7 +1043,7 @@
         await setUploadFiles(remaining);
         return;
       }
-      state.upload = { files: [], file: null, durationSec: 0, reading: false, error: "" };
+      state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" };
       rerenderCreateModal(titleValue);
     }
     if (action === "submit-task") {
