@@ -872,14 +872,14 @@
         } else {
           state.profile = await api.register({ email, password, name, code });
           toast("注册成功，欢迎来到剧编编");
-          await render();
+          hardRefreshApp();
         }
       }
       catch (error) { state.authBusy = false; renderAuth(); toast(error.message || (state.authMode === "forgot" ? "密码重置失败" : "注册失败"), "error"); }
       return;
     }
     state.authBusy = true; renderAuth();
-    try { state.profile = await api.login(email, password); toast("登录成功"); await render(); }
+    try { state.profile = await api.login(email, password); toast("登录成功"); hardRefreshApp(); }
     catch (error) { state.authBusy = false; renderAuth(); toast(error.message || "登录失败", "error"); }
   }
 
@@ -890,8 +890,17 @@
     state.authCooldown = 0;
     state.profile = null; state.authBusy = false; state.authMode = "login"; state.authEmail = "";
     state.expandedBatches = {};
-    window.location.replace(`${window.location.pathname}?ui=${Date.now()}#/tasks`);
+    hardRefreshApp();
     $("#modalRoot").innerHTML = ""; renderAuth(); toast("已退出登录");
+  }
+
+  // Always rebuild the app after an auth boundary. This prevents the browser
+  // bfcache or a stale in-memory bundle from restoring the pre-login layout.
+  function hardRefreshApp() {
+    const url = new URL(window.location.href);
+    url.searchParams.set("ui", String(Date.now()));
+    url.hash = "#/tasks";
+    window.location.replace(url.toString());
   }
 
   document.addEventListener("click", async (event) => {
@@ -1120,6 +1129,9 @@
   });
 
   window.addEventListener("hashchange", render);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) window.location.reload();
+  });
 
   async function boot() {
     try {
