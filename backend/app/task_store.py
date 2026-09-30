@@ -10,24 +10,29 @@ from .auth_store import db, now_iso
 from .config import REQUEST_ID
 from .errors import ArkError
 from .logging_setup import logger
+from .media import episode_from_filename, title_with_episode
 from .script import normalize_script
 
 # Read adapters keep the API shape independent from SQLite column names.
 def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
     task = dict(row)
+    file_name = str(task.pop("file_name") or "")
+    display_title = title_with_episode(str(task.get("title") or "未命名视频"), file_name)
+    task["title"] = display_title
     raw_result = json.loads(task.pop("result_json")) if task.get("result_json") else None
     # Normalize on read as well as on generation so older tasks immediately
     # benefit from the same punctuation, VO, scene-granularity and micro-detail
     # rules without rewriting their stored source response.
     if raw_result:
         try:
-            task["result"] = normalize_script(raw_result, task.get("title") or "未命名视频")
+            task["result"] = normalize_script(raw_result, display_title)
         except (ArkError, TypeError, ValueError, KeyError):
             task["result"] = raw_result
     else:
         task["result"] = None
     task["quality"] = json.loads(task.pop("quality_json")) if task.get("quality_json") else None
-    task["fileName"] = task.pop("file_name")
+    task["fileName"] = file_name
+    task["episodeNumber"] = episode_from_filename(file_name)
     task["fileSize"] = task.pop("file_size")
     task["mimeType"] = task.pop("mime_type")
     task["durationSec"] = task.pop("duration_sec")

@@ -304,9 +304,15 @@
   }
 
   function groupedTaskItems(tasks) {
+    const orderedTasks = tasks.slice().sort((a, b) => {
+      const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY;
+      const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY;
+      if (ae !== be) return ae - be;
+      return String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+    });
     const groups = new Map();
     const items = [];
-    tasks.forEach((task) => {
+    orderedTasks.forEach((task) => {
       if (!task.batchId) { items.push({ type: "task", task }); return; }
       let group = groups.get(task.batchId);
       if (!group) {
@@ -348,7 +354,7 @@
     const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     const downloads = done ? `<span class="batch-downloads"><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button></span>` : "";
     const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
-    return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => Number(a.batchIndex || 0) - Number(b.batchIndex || 0)).map(taskRow).join("")}</div>` : ""}</div>`;
+    return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
   function renderList() {
@@ -420,7 +426,9 @@
       return `<small class="block-time">${clock(start)}${end !== null ? `–${clock(end)}` : ""}</small>`;
     }
     function renderBlock(block) {
-      const time = blockTime(block);
+      // The screenplay follows 剧拆拆's readable text layout; timestamps stay
+      // in the underlying data for review but are not printed in the body.
+      const time = "";
       if (block.type === "dialogue") {
         const warning = block.uncertain ? `<small class="uncertain">需核对</small>` : "";
         const performance = block.performance ? `<em>${escapeHtml(block.performance)}</em>` : "";
@@ -439,20 +447,20 @@
         return `<p class="sound-line">${time}<strong>【${label} · ${source}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "emotion") {
-        return `<p class="emotion-line">${time}<strong>【情绪】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+        return `<p class="action-line">${time}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
       }
       if (block.type === "screen_text") {
         return `<p class="sound-line">${time}<strong>【字幕】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "transition") {
-        return `<p class="sound-line">${time}<strong>【${escapeHtml(block.transitionType || "转场")}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+        const transitionLabel = { flashback: "闪回", return: "闪出", flash: "闪白" }[String(block.transitionType || "").toLowerCase()] || block.transitionType || "转场";
+        return `<p class="sound-line">${time}<strong>【${escapeHtml(transitionLabel)}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
-      const actionMeta = [block.object && `对象：${block.object}`, block.result && `结果：${block.result}`].filter(Boolean).join("；");
-      return `<p class="action-line">${time}<i>▲</i>${block.emotion ? `<em>${escapeHtml(block.emotion)}</em>` : ""}${escapeHtml(block.text || "")}${actionMeta ? `<small>${escapeHtml(actionMeta)}</small>` : ""}</p>`;
+      return `<p class="action-line">${time}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
     }
     return `<div class="script-paper">
       <div class="script-title">
-        <span>AI 结构化剧本</span>
+        <span>镜头剧本</span>
         <h2>${escapeHtml(script.title)}</h2>
       </div>
       ${script.scenes.map((scene) => `<section class="scene">

@@ -107,7 +107,7 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="transcribing", progress_percent=34, message="正在整理语音和对白")
         mark_task_stage(task_id, status="running", stage="vision", progress_percent=62, message="正在识别画面与动作")
         script, quality, usage = await run_recognizer(task_row(task_id))
-        mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在合并场景和人物")
+        mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
         # Keep quality findings for internal inspection, but expose every

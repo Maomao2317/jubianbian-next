@@ -199,7 +199,12 @@ def is_micro_action(text: str) -> bool:
 
 
 def compact_action_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse adjacent action fragments into story beats, not shot fragments."""
+    """Keep each visible action beat as its own 剧拆拆-style ``▲`` line.
+
+    Earlier versions collapsed adjacent actions into a prose paragraph. That
+    loses the visual rhythm and makes subtitles/actions hard to compare with a
+    source video, so normalization now only cleans/filter micro-details.
+    """
     compacted: list[dict[str, Any]] = []
     for block in blocks:
         if block.get("type") != "action":
@@ -209,19 +214,6 @@ def compact_action_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not text:
             continue
         block["text"] = text
-        if compacted and compacted[-1].get("type") == "action":
-            previous = compacted[-1]
-            if previous["text"].endswith(("，", "；", "：", "、", "。", "！", "？", "…")):
-                joiner = ""
-            else:
-                joiner = "，"
-            previous["text"] = normalize_text(f"{previous['text']}{joiner}{text}")
-            if block.get("endSec") is not None:
-                previous_end = previous.get("endSec")
-                previous["endSec"] = max(previous_end or 0, block["endSec"])
-            # Keep the first meaningful timestamp; the merged end locates the
-            # whole beat when the user jumps back to the source video.
-            continue
         compacted.append(block)
 
     # A detail may precede the action it belongs to. Attach it to an adjacent
@@ -533,14 +525,21 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         return f"1-{index} {time_of_day} {interior_exterior} {heading_location}"
 
     scenes: list[dict[str, Any]] = []
+    non_plot_segments = {"recap", "trailer", "title_card", "credits"}
     for index, raw_scene in enumerate(script["scenes"], start=1):
         if not isinstance(raw_scene, dict):
             continue
         raw_segment_type = str(raw_scene.get("segmentType") or "main").strip().lower()
         raw_heading = str(raw_scene.get("heading") or "").strip()
-        if raw_segment_type in {"recap", "trailer", "title_card", "credits"} or any(
-            marker in raw_heading for marker in ("上集回顾", "精彩预告", "下集预告", "片尾", "演员表", "片头")
-        ):
+        has_screen_text = any(
+            isinstance(item, dict)
+            and (
+                str(item.get("type") or "").strip().lower() in {"screen_text", "subtitle", "caption", "system", "title_card"}
+                or str(item.get("screenType") or "").strip().lower() in {"subtitle", "system", "title_card", "other"}
+            )
+            for item in (raw_scene.get("blocks") or [])
+        )
+        if raw_segment_type in non_plot_segments and not has_screen_text:
             continue
         blocks: list[dict[str, Any]] = []
         scene_location = str(raw_scene.get("location") or "待补充").strip()
@@ -551,12 +550,15 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 for item in (raw_scene["sound"] if isinstance(raw_scene["sound"], list) else [raw_scene["sound"]])
             )
         if raw_scene.get("emotion"):
-            raw_blocks.append({"type": "emotion", "text": raw_scene["emotion"]})
+            # Standalone emotion notes are visual prose in 剧拆拆 output.
+            raw_blocks.append({"type": "action", "text": raw_scene["emotion"]})
         raw_blocks.extend(raw_scene.get("blocks") or [])
         for raw_block in raw_blocks:
             if not isinstance(raw_block, dict):
                 continue
-            if raw_block.get("isNonPlot") or str(raw_block.get("segmentType") or "").lower() in {"recap", "trailer", "title_card", "credits"}:
+            raw_block_type = str(raw_block.get("type") or "").strip().lower()
+            is_screen_text = raw_block_type in {"screen_text", "subtitle", "caption", "system", "title_card"} or str(raw_block.get("screenType") or "").strip().lower() in {"subtitle", "system", "title_card", "other"}
+            if (raw_block.get("isNonPlot") or str(raw_block.get("segmentType") or "").lower() in non_plot_segments) and not is_screen_text:
                 continue
             text = str(raw_block.get("text") or raw_block.get("description") or "").strip()
             if not text:
@@ -578,6 +580,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 "title_card": "screen_text",
                 "flashback": "transition",
                 "return": "transition",
+                "emotion": "action",
             }.get(raw_type, raw_type)
             if block_type not in {"action", "dialogue", "vo", "sound", "emotion", "screen_text", "transition"}:
                 block_type = "action"
@@ -752,9 +755,22 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             scene["startSec"] = scene_start
         if scene_end is not None:
             scene["endSec"] = scene_end
-        scenes.append(scene)
+        if blocks:
+            scenes.append(scene)
     if not scenes:
         raise ArkError("方舟返回的剧本没有可用场景")
+    # Providers occasionally return scenes in upload/semantic order instead of
+    # video order. Timestamped scenes are the least ambiguous source of truth.
+    if len(scenes) > 1 and any(scene.get("startSec") is not None for scene in scenes):
+        scenes = [
+            scene
+            for _, scene in sorted(
+                enumerate(scenes),
+                key=lambda pair: (pair[1].get("startSec") is None, pair[1].get("startSec", 0), pair[0]),
+            )
+        ]
+        for scene_index, scene in enumerate(scenes, start=1):
+            scene["heading"] = re.sub(r"^\s*\d+-\d+", f"1-{scene_index}", str(scene.get("heading") or ""), count=1)
     used_characters: list[str] = []
     for scene in scenes:
         for character in scene.get("characters", []):
@@ -778,7 +794,9 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             })
     return {
         "version": str(script.get("version") or "1.0"),
-        "title": str(script.get("title") or title),
+        # The task title already carries an episode marker when the source file
+        # is numbered. It is authoritative for the screenplay/export title.
+        "title": str(title or script.get("title") or "未命名视频"),
         "eventChain": event_chain,
         "settingRules": setting_rules,
         "characters": used_characters or names(script.get("characters")),
@@ -832,8 +850,13 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             elif block_type == "screen_text":
                 lines.append(f"【字幕：{block.get('text', '')}】")
             elif block_type == "transition":
-                transition_type = block.get("transitionType") or "转场"
-                lines.append(f"【{transition_type}：{block.get('text', '')}】")
+                transition_type = {
+                    "flashback": "闪回",
+                    "return": "闪出",
+                    "flash": "闪白",
+                }.get(str(block.get("transitionType") or "").strip().lower(), block.get("transitionType") or "转场")
+                text = str(block.get("text") or "").strip()
+                lines.append(f"【{transition_type}：{text}】" if text else f"【{transition_type}】")
             else:
                 lines.append(f"▲ {block.get('text', '')}")
         lines.append("")
@@ -886,27 +909,10 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
             issue["block"] = block_index
         issues.append(issue)
 
-    event_chain = script.get("eventChain") or []
+    # The visible output follows 剧拆拆 and intentionally has no global event
+    # chain or scene-task section. Keep those fields optional for compatibility
+    # with stored results, but never turn their absence into a warning.
     event_chain_warnings = 0
-    event_roles = {
-        str(item.get("role") or "").strip().lower()
-        for item in event_chain
-        if isinstance(item, dict)
-    }
-    if not event_chain:
-        event_chain_warnings += 1
-        add_issue("漏关键剧情", "P0", "未生成可验收的起因—冲突—转折—结果事件链，需人工核对关键剧情是否完整。")
-    else:
-        if not {"cause", "conflict", "turn"}.issubset(event_roles):
-            event_chain_warnings += 1
-            add_issue("漏关键剧情", "P0", "事件链没有起因、冲突或转折节点，无法确认剧情因果是否成立。")
-        if "result" not in event_roles:
-            event_chain_warnings += 1
-            add_issue("场次衔接", "P1", "事件链没有结果节点，需核对结尾是否真正推动了下一步。")
-
-        if "hook" not in event_roles:
-            event_chain_warnings += 1
-            add_issue("集尾无钩子", "P1", "事件链没有钩子节点，需核对集尾是否留下新危机、反转或待解决问题。")
 
     action_subject_warnings = 0
     action_detail_warnings = 0
@@ -932,22 +938,6 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
             add_issue("格式错误", "P2", f"第 {scene_index} 场缺少统一的‘编号 时段 内外 地点’场次头。", scene_index)
         if not location or location == "待补充":
             add_issue("空间跳跃", "P1", f"第 {scene_index} 场没有明确地点，无法确认空间关系。", scene_index)
-        for field, label in (("goal", "目标"), ("obstacle", "阻力"), ("result", "结果")):
-            if not str(scene.get(field) or "").strip():
-                scene_task_warnings += 1
-                add_issue("场次任务", "P1", f"第 {scene_index} 场缺少{label}，场次可能退化为流水账。", scene_index)
-        if not str(scene.get("summary") or "").strip():
-            add_issue("场次衔接", "P1", f"第 {scene_index} 场缺少剧情衔接说明。", scene_index)
-        if scene.get("summaryGenerated") or scene.get("summarySource") == "derived":
-            summary_generated_warnings += 1
-            add_issue("场次衔接", "P1", f"第 {scene_index} 场的剧情衔接由系统补全，需核对起因、结果和下一步动机。", scene_index)
-        if scene_index > 1 and not str(scene.get("continuityIn") or "").strip():
-            continuity_warnings += 1
-            add_issue("空间跳跃", "P1", f"第 {scene_index} 场没有说明上一场结果如何带入。", scene_index)
-        if scene_index < len(scenes) and not str(scene.get("continuityOut") or "").strip():
-            continuity_warnings += 1
-            add_issue("场次衔接", "P1", f"第 {scene_index} 场没有说明结果如何推动下一场。", scene_index)
-
         scene_blocks = [block for block in (scene.get("blocks") or []) if isinstance(block, dict)]
         scene_text = " ".join(text_of(block.get("text")) for block in scene_blocks)
         scene_time = text_of(scene.get("timeOfDay"))
@@ -1049,25 +1039,9 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 add_issue("情绪变化丢失", "P1", f"第 {scene_index} 场第 {block_index + 1} 个块情绪强度跨级变化，但没有记录变化节点。", scene_index, block_index + 1)
             previous_intensity = intensity
 
-    profile_by_name = {
-        str(profile.get("name") or "").strip(): profile
-        for profile in (script.get("characterProfiles") or [])
-        if isinstance(profile, dict) and str(profile.get("name") or "").strip()
-    }
-    character_introduction_warnings = sum(
-        1
-        for name in known_characters
-        if not any(
-            (value := str(profile_by_name.get(name, {}).get(field) or "").strip())
-            and "待核对" not in value
-            for field in ("firstAppearance", "appearance", "clothing")
-        )
-    )
-    if character_introduction_warnings:
-        add_issue("人物信息", "P1", f"有 {character_introduction_warnings} 个人物缺少首次出现时的外观或服装证据。")
-
-    if scenes and not str(scenes[-1].get("hook") or "").strip():
-        add_issue("结尾无钩子", "P1", "最后一场没有明确的新危机、反转、悬念或强情绪落点。", len(scenes))
+    # Appearance profiles and hook/continuity notes are internal metadata, not
+    # required sections of the 剧拆拆-style screenplay.
+    character_introduction_warnings = 0
 
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0

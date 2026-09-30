@@ -60,7 +60,13 @@ from .config import (
 )
 from .billing import fetch_monthly_ark_cost
 from .logging_setup import _email_log_id, logger, safe_error_text
-from .media import probe_duration, safe_filename, title_from_filename
+from .media import (
+    episode_sort_key,
+    probe_duration,
+    safe_filename,
+    title_from_filename,
+    title_with_episode,
+)
 from .processing import process_task
 from .script import script_to_markdown
 from .task_store import (
@@ -527,8 +533,17 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as connection:
-        rows = connection.execute(f"SELECT * FROM tasks {where} ORDER BY created_at DESC", params).fetchall()
-    return [row_to_task(row) for row in rows]
+        rows = connection.execute(f"SELECT * FROM tasks {where} ORDER BY created_at ASC", params).fetchall()
+    tasks = [row_to_task(row) for row in rows]
+    # Episode labels in filenames are the canonical order for a screenplay
+    # collection. Unnumbered files remain after numbered episodes.
+    return [
+        item
+        for _, item in sorted(
+            enumerate(tasks),
+            key=lambda pair: episode_sort_key(str(pair[1].get("fileName") or ""), pair[0]),
+        )
+    ]
 
 
 def task_detail(request: Request, task_id: str) -> dict[str, Any]:
@@ -574,7 +589,7 @@ async def create_task(
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"视频超过 {MAX_DURATION_MINUTES} 分钟")
     created = now_iso()
-    task_title = title.strip() or title_from_filename(file_name)
+    task_title = title_with_episode(title.strip() or title_from_filename(file_name), file_name)
     estimated = max(1, int((duration + 59) // 60)) if duration else 1
     with db() as connection:
         connection.execute(
@@ -648,7 +663,7 @@ async def create_tasks_batch(
             if duration <= 0 or duration > MAX_DURATION_SECONDS:
                 raise HTTPException(status_code=400, detail=f"{name} 时长必须不超过 {MAX_DURATION_MINUTES} 分钟")
             minutes = max(1, int((duration + 59) // 60))
-            prepared.append({"id": task_id, "name": name, "target": target, "size": size, "duration": duration, "minutes": minutes})
+            prepared.append({"id": task_id, "name": name, "target": target, "size": size, "duration": duration, "minutes": minutes, "input_index": len(prepared)})
     except Exception:
         for item in prepared:
             item["target"].unlink(missing_ok=True)
@@ -667,9 +682,10 @@ async def create_tasks_batch(
     created = now_iso()
     batch_id = f"batch-{uuid.uuid4().hex}"
     batch_title = title.strip() or f"短剧批次 {created[:16].replace('T', ' ')}"
+    prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item.get("input_index") or 0)))
     with db() as connection:
         for index, item in enumerate(prepared, start=1):
-            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title.strip() or title_from_filename(item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["minutes"], created, created, batch_id, batch_title, index, len(prepared)))
+            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["minutes"], created, created, batch_id, batch_title, index, len(prepared)))
         balance = int(user["credits"]) - total_points
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))
@@ -712,6 +728,13 @@ def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|tx
         rows = connection.execute("SELECT * FROM tasks WHERE user_id = ? AND status = 'done' ORDER BY created_at ASC", (user["id"],)).fetchall()
     if not rows:
         raise HTTPException(status_code=409, detail="暂无已完成剧本")
+    rows = [
+        row
+        for _, row in sorted(
+            enumerate(rows),
+            key=lambda pair: episode_sort_key(str(pair[1]["file_name"] or ""), pair[0]),
+        )
+    ]
     content_parts = []
     for row in rows:
         task = row_to_task(row)
@@ -727,11 +750,12 @@ def download_batch(request: Request, batch_id: str, fmt: str = Query("md", patte
     user = current_user(request)
     with db() as connection:
         rows = connection.execute(
-            "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'done' ORDER BY batch_index ASC, created_at ASC",
+            "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'done' ORDER BY created_at ASC",
             (user["id"], batch_id),
         ).fetchall()
     if not rows:
         raise HTTPException(status_code=409, detail="该批次暂无可下载的剧本")
+    rows = sorted(rows, key=lambda row: episode_sort_key(str(row["file_name"] or ""), int(row["batch_index"] or 0)))
     parts = []
     for row in rows:
         markdown = script_to_markdown(row_to_task(row))

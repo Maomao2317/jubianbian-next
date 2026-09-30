@@ -30,7 +30,7 @@ window.APP_CONFIG = {
     credits: true,
     recharge: false,
     notify: false,
-    multiEpisode: false,
+    multiEpisode: true,
     extraToolsPlaceholder: false,
   },
 
@@ -55,7 +55,7 @@ window.APP_CONFIG = {
     probing: "读取视频信息",
     transcribing: "提取台词",
     vision: "分析画面与情绪",
-    merging: "整理人物与剧本",
+    merging: "整理字幕与画面",
     exporting: "生成导出文件",
     review: "等待人工复核",
     done: "识别完成",
@@ -66,7 +66,7 @@ window.APP_CONFIG = {
     { id: "probing", label: "读取视频" },
     { id: "transcribing", label: "提取台词" },
     { id: "vision", label: "分析画面" },
-    { id: "merging", label: "整理剧本" },
+    { id: "merging", label: "整理字幕与画面" },
     { id: "exporting", label: "生成文件" },
   ],
 

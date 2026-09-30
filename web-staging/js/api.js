@@ -52,6 +52,24 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  function episodeFromFileName(name) {
+    const stem = String(name || "").replace(/\.[^.]+$/, "");
+    if (/^(?:19|20)\d{6}(?:$|[\s_.-])/.test(stem)) return null;
+    if (/^\d{1,4}$/.test(stem)) return Number(stem);
+    let match = stem.match(/第\s*(\d{1,4})\s*(?:集|话|期)/i) || stem.match(/(?:^|[\s_.()（）\[\]【】-])(?:ep|e|episode)\s*(\d{1,4})(?=$|[\s_.()（）\[\]【】-])/i);
+    if (!match) match = stem.match(/^0*(\d{1,4})(?=$|[\s_.()（）\[\]【】-])/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function titleWithEpisode(title, fileName) {
+    const base = String(title || "").trim() || String(fileName || "").replace(/\.[^.]+$/, "") || "未命名视频";
+    const episode = episodeFromFileName(fileName);
+    const stem = String(fileName || "").replace(/\.[^.]+$/, "");
+    if (!episode) return base;
+    if (/第\s*\d+\s*(?:集|话|期)/.test(base)) return base.replace(/第\s*\d+\s*(集|话|期)/i, `第${episode}集`);
+    return base === stem && /^\d+$/.test(stem) ? `第${episode}集` : `${base} 第${episode}集`;
+  }
+
   function createDefaultStore() {
     return {
       profile: {
@@ -65,6 +83,7 @@
           id: "demo-001",
           title: "雨夜来客 · 第 1 集",
           fileName: "雨夜来客_第01集.mp4",
+          episodeNumber: 1,
           status: "done",
           stage: "done",
           progressPercent: 100,
@@ -122,6 +141,7 @@
     task.completedAt = new Date().toISOString();
     task.creditsUsed = task.estimatedMinutes;
     task.result = clone(sampleScript);
+    task.title = titleWithEpisode(task.title, task.fileName);
     task.result.title = task.title;
     task.quality = { dialogueCoverage: 98, speakerConfidence: 95, warnings: 1 };
     persist();
@@ -149,7 +169,11 @@
         } else if (block.type === "sound") {
           lines.push(`【${block.category || "音效"}】${block.text}`);
         } else if (block.type === "emotion") {
-          lines.push(`【情绪】${block.text}`);
+          lines.push(`▲ ${block.text}`);
+        } else if (block.type === "screen_text") {
+          lines.push(`【字幕：${block.text}】`);
+        } else if (block.type === "transition") {
+          lines.push(`【${block.transitionType || "转场"}：${block.text}】`);
         } else {
           lines.push(`▲ ${block.text}`);
         }
@@ -204,7 +228,7 @@
       return clone(mockStore.tasks.filter((task) => {
         const haystack = `${task.title} ${task.fileName || ""}`.toLocaleLowerCase();
         return (!query || haystack.includes(query)) && matchStatus(task, status);
-      }));
+      }).sort((a, b) => (Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Infinity) - (Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Infinity) || String(a.createdAt || "").localeCompare(String(b.createdAt || ""))));
     },
 
     async getQueueSummary() {
@@ -241,7 +265,8 @@
         batchTitle: title || `短剧批次 ${createdAt.slice(0, 16).replace("T", " ")}`,
         batchIndex: index + 1,
         batchTotal: selected.length,
-        title: title || item.name.replace(/\.[^.]+$/, ""),
+        title: titleWithEpisode(title || item.name.replace(/\.[^.]+$/, ""), item.name),
+        episodeNumber: episodeFromFileName(item.name),
         fileName: item.name,
         fileSize: item.size,
         status: "queued",
@@ -307,7 +332,7 @@
 
     async getExportBatch(batchId, format) {
       await delay(80);
-      const tasks = mockStore.tasks.filter((task) => task.batchId === batchId && task.status === "done").sort((a, b) => Number(a.batchIndex || 0) - Number(b.batchIndex || 0));
+      const tasks = mockStore.tasks.filter((task) => task.batchId === batchId && task.status === "done").sort((a, b) => (Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Infinity) - (Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Infinity) || Number(a.batchIndex || 0) - Number(b.batchIndex || 0));
       if (!tasks.length) throw new Error("该批次暂无可下载的剧本");
       const content = tasks.map((task) => scriptToMarkdown(task)).join("\n\n---\n\n");
       return { fileName: `${tasks[0].batchTitle || "批次剧本"}.${format}`, mimeType: format === "txt" ? "text/plain;charset=utf-8" : "text/markdown;charset=utf-8", content: format === "txt" ? content.replace(/^#{1,6}\s+/gm, "").replace(/\*\*/g, "") : content };

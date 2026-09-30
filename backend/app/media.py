@@ -19,6 +19,60 @@ def title_from_filename(name: str) -> str:
     return re.sub(r"\.[^.]+$", "", safe_filename(name)).strip() or "未命名视频"
 
 
+_EPISODE_PATTERNS = (
+    re.compile(r"第\s*0*(\d{1,4})\s*(?:集|话|期)", re.IGNORECASE),
+    re.compile(r"(?:^|[\s_\-.()（）\[\]【】])(?:ep|e|episode)\s*0*(\d{1,4})(?=$|[\s_\-.()（）\[\]【】])", re.IGNORECASE),
+)
+
+
+def episode_from_filename(name: str) -> int | None:
+    """Extract an episode number only from an explicit filename marker.
+
+    Pure numeric filenames (``1.mp4``) are common for episode batches.  Other
+    numbers are accepted when they are separated from the title, while long
+    hashes and dates remain untouched instead of being mistaken for episodes.
+    """
+    stem = re.sub(r"\.[^.]+$", "", safe_filename(name)).strip()
+    if not stem:
+        return None
+    if re.match(r"^(?:19|20)\d{6}(?:$|[\s_\-.])", stem):
+        return None
+    if stem.isdigit():
+        value = int(stem)
+        return value if 0 < value <= 9999 else None
+    for pattern in _EPISODE_PATTERNS:
+        match = pattern.search(stem)
+        if match:
+            value = int(match.group(1))
+            return value if 0 < value <= 9999 else None
+    # A standalone leading number such as 01_开场.mp4 is an episode marker.
+    match = re.match(r"^0*(\d{1,4})(?=$|[\s_\-.()（）\[\]【】])", stem)
+    if match:
+        value = int(match.group(1))
+        return value if 0 < value <= 9999 else None
+    return None
+
+
+def title_with_episode(title: str, file_name: str) -> str:
+    """Make the episode visible in the displayed and exported screenplay title."""
+    base = str(title or "").strip() or title_from_filename(file_name)
+    episode = episode_from_filename(file_name)
+    stem = re.sub(r"\.[^.]+$", "", safe_filename(file_name)).strip()
+    if episode is None:
+        return base
+    if re.search(r"第\s*\d+\s*(?:集|话|期)", base, re.IGNORECASE):
+        return re.sub(r"第\s*\d+\s*(集|话|期)", f"第{episode}集", base, count=1, flags=re.IGNORECASE)
+    if base == stem and stem.isdigit():
+        return f"第{episode}集"
+    return f"{base} 第{episode}集"
+
+
+def episode_sort_key(file_name: str, fallback: int = 0) -> tuple[int, int, int]:
+    """Sort numbered episodes before unnumbered videos, preserving input order."""
+    episode = episode_from_filename(file_name)
+    return (0, episode, fallback) if episode is not None else (1, 0, fallback)
+
+
 def probe_duration(path: Path) -> float | None:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
