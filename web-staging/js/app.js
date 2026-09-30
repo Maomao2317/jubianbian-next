@@ -312,7 +312,7 @@
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
         <div class="workspace-panel">
-          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（MD）</button></div>
+          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some((task) => task.status === "done") ? "" : "disabled"}>下载全部剧本（TXT）</button><small>最多上传 999 个 MP4 视频，单个不超过 6 分钟</small></div>
           <div class="toolbar">
             <label class="search-wrap">
               <span aria-hidden="true"></span>
@@ -933,7 +933,7 @@
     if (action === "download") await downloadTask(id, actionElement.dataset.format);
     if (action === "download-all") {
       try {
-        const payload = await api.getExportAll("md");
+        const payload = await api.getExportAll(actionElement.dataset.format || "md");
         const url = URL.createObjectURL(payload.blob); const link = document.createElement("a"); link.href = url; link.download = payload.fileName; link.click(); URL.revokeObjectURL(url);
       } catch (error) { toast(error.message || "下载失败", "error"); }
     }

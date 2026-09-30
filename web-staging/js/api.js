@@ -382,6 +382,12 @@
       try { fileName = decodeURIComponent(rawName); } catch (_) {}
       return { fileName, blob: await response.blob() };
     },
+    async getExportAll(format) {
+      const url = this.url("/export/tasks-all") + `?fmt=${encodeURIComponent(format)}`;
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) throw new Error("暂无可下载的已完成剧本");
+      return { fileName: response.headers.get("X-Filename") || `all-scripts.${format}`, blob: await response.blob() };
+    },
   };
 
   global.AppAPI = cfg().api.useMock ? MockApi : HttpApi;
