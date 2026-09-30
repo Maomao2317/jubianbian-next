@@ -464,9 +464,28 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
         clauses.append("t.created_at < ?"); params.append(date_to.strip() + "T23:59:59.999999+00:00")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as connection:
-        total = connection.execute(f"SELECT COUNT(*) AS count FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where}", params).fetchone()["count"]
-        rows = connection.execute(f"SELECT t.id, t.user_id, t.title, t.file_name, t.status, t.stage, t.progress_percent, t.estimated_minutes, t.credits_used, t.error, t.created_at, t.updated_at, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where} ORDER BY t.created_at DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
-    return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit, "offset": offset}
+        rows = connection.execute(f"SELECT t.id, t.user_id, t.title, t.file_name, t.status, t.stage, t.progress_percent, t.estimated_minutes, t.credits_used, t.error, t.created_at, t.updated_at, t.batch_id, t.batch_title, t.batch_index, t.batch_total, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where} ORDER BY t.created_at DESC", params).fetchall()
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item = dict(row)
+        key = item.get("batch_id") or item["id"]
+        group = groups.get(key)
+        if not group:
+            group = {**item, "id": item["id"], "title": item.get("batch_title") or item["title"], "file_name": "", "task_count": 0, "done_count": 0, "failed_count": 0, "credits_used": 0, "estimated_minutes": 0, "progress_percent": 0}
+            groups[key] = group
+        group["task_count"] += 1
+        group["done_count"] += int(item["status"] in {"done", "review"})
+        group["failed_count"] += int(item["status"] == "failed")
+        group["credits_used"] += int(item.get("credits_used") or 0)
+        group["estimated_minutes"] += int(item.get("estimated_minutes") or 0)
+        group["progress_percent"] = round((group["progress_percent"] * (group["task_count"] - 1) + int(item.get("progress_percent") or 0)) / group["task_count"])
+        if item["status"] == "failed": group["status"] = "failed"
+        elif group["status"] != "failed" and item["status"] == "running": group["status"] = "running"
+        elif group["status"] not in {"failed", "running"} and item["status"] == "queued": group["status"] = "queued"
+        group["file_name"] = f"{group['task_count']} 集"
+    grouped = list(groups.values())
+    grouped.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"items": grouped[offset:offset + limit], "total": len(grouped), "limit": limit, "offset": offset}
 
 
 async def admin_retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
