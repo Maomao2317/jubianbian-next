@@ -495,7 +495,8 @@
     </div>` : `<div class="drop-content">
       <div class="upload-icon">↑</div>
       <strong>拖入视频，或点击选择文件</strong>
-      <span>${cfg.upload.hint}</span>
+      <span>支持选择 1-999 个 MP4 视频，单个视频不超过 6 分钟、最大 500MB</span>
+      <small>可一次选择多个文件，也可以拖入整批视频</small>
     </div>`;
     let billing = "选择视频后自动读取时长并预估积分";
     if (upload.error) billing = upload.error;
