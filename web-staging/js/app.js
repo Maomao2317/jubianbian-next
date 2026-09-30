@@ -500,7 +500,9 @@
     const upload = state.upload;
     const estimate = uploadEstimate();
     const credits = state.profile ? state.profile.credits : 0;
-    const overDuration = upload.durationSec > cfg.upload.maxDurationMinutes * 60;
+    // The six-minute limit applies to each file, never to the batch total.
+    // setUploadFiles validates every probed duration independently.
+    const overDuration = false;
     const estimatedPoints = estimate * POINTS_PER_MINUTE;
     const insufficient = estimatedPoints > credits;
     const durationSummary = upload.reading
