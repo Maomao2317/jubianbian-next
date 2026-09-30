@@ -385,8 +385,7 @@ a { color: inherit; text-decoration: none; }
   min-height: 70px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  position: relative;
+  justify-content: flex-start;
   gap: 12px;
   padding: 14px 16px;
   border-bottom: 1px solid var(--line);
@@ -398,8 +397,7 @@ a { color: inherit; text-decoration: none; }
   display: flex;
   align-items: center;
   flex: none;
-  position: absolute;
-  left: 16px;
+  position: static;
   padding-left: 14px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -447,7 +445,7 @@ a { color: inherit; text-decoration: none; }
 .search-submit { width: 30px; height: 30px; display: grid; place-items: center; flex: none; border: 0; border-radius: 7px; color: #7b6218; background: transparent; font-size: 22px; line-height: 1; cursor: pointer; }
 .search-submit:hover { background: #fff4c9; color: #5d4710; }
 
-.filters { display: flex; align-items: center; gap: 4px; position: absolute; left: 50%; transform: translateX(-50%); }
+.filters { display: flex; align-items: center; gap: 4px; position: static; transform: none; }
 
 .chip {
   height: 34px;
@@ -461,7 +459,7 @@ a { color: inherit; text-decoration: none; }
 
 .chip:hover { background: #f5f3ee; }
 .chip.active { color: var(--ink); background: var(--gold-pale); border-color: #edd989; font-weight: 700; }
-.task-count { position: absolute; right: 16px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.task-count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 
 .task-list { padding: 0 16px 8px; }
 
