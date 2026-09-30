@@ -226,6 +226,10 @@ async def register(request: Request) -> JSONResponse:
                 # screenplay quality is being evaluated in both environments.
                 (user_id, email, _password_hash(password), name, REGISTER_POINTS, "体验版", created),
             )
+            connection.execute(
+                "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, REGISTER_POINTS, REGISTER_POINTS, "grant", "新用户注册赠送 25 积分", created),
+            )
             user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
