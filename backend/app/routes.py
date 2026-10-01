@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import mimetypes
 import re
 import sqlite3
@@ -158,6 +159,36 @@ def _queue_summary(connection: sqlite3.Connection, additional_minutes: int = 0) 
         "queuedCount": queued_count,
         "runningCount": running_count,
     }
+
+
+def _allocate_batch_billing_minutes(prepared: list[dict[str, Any]], total_minutes: int) -> None:
+    """Distribute one batch bill across its task rows without rounding twice.
+
+    ``estimated_minutes`` remains a per-file queue estimate, but credits are
+    billed from the batch's aggregate duration.  The largest-remainder
+    allocation keeps the per-task refunds and the task detail display exactly
+    consistent with the one ledger charge, including batches whose total is
+    just under a minute boundary.
+    """
+    if not prepared:
+        return
+    total_duration = sum(max(0.0, float(item.get("duration") or 0)) for item in prepared)
+    if total_duration <= 0:
+        shares = [1 / len(prepared)] * len(prepared)
+    else:
+        shares = [max(0.0, float(item.get("duration") or 0)) / total_duration for item in prepared]
+    exact = [share * max(0, int(total_minutes)) for share in shares]
+    allocated = [int(value) for value in exact]
+    remaining = max(0, int(total_minutes) - sum(allocated))
+    remainders = sorted(
+        range(len(prepared)),
+        key=lambda index: (exact[index] - allocated[index], -int(prepared[index].get("input_index") or index)),
+        reverse=True,
+    )
+    for index in remainders[:remaining]:
+        allocated[index] += 1
+    for item, minutes in zip(prepared, allocated):
+        item["billing_minutes"] = minutes
 
 
 def queue_summary(request: Request) -> dict[str, Any]:
@@ -585,7 +616,7 @@ async def create_task(
         raise HTTPException(status_code=400, detail=f"视频超过 {MAX_DURATION_MINUTES} 分钟")
     created = now_iso()
     task_title = title_with_episode(title.strip() or title_from_filename(file_name), file_name)
-    estimated = max(1, int((duration + 59) // 60)) if duration else 1
+    estimated = max(1, math.ceil(duration / 60)) if duration else 1
     with db() as connection:
         connection.execute(
             """
@@ -663,7 +694,12 @@ async def create_tasks_batch(
         for item in prepared:
             item["target"].unlink(missing_ok=True)
         raise
-    total_points = sum(item["minutes"] * POINTS_PER_MINUTE for item in prepared)
+    # Bill the aggregate duration once.  Rounding every episode separately
+    # turns a 51:16 batch into 83 billable minutes instead of 52.
+    total_duration = sum(float(item["duration"] or 0) for item in prepared)
+    total_minutes = max(1, math.ceil(total_duration / 60))
+    _allocate_batch_billing_minutes(prepared, total_minutes)
+    total_points = total_minutes * POINTS_PER_MINUTE
     if total_points > int(user["credits"]):
         for item in prepared:
             item["target"].unlink(missing_ok=True)
@@ -680,7 +716,7 @@ async def create_tasks_batch(
     prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item.get("input_index") or 0)))
     with db() as connection:
         for index, item in enumerate(prepared, start=1):
-            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["minutes"], created, created, batch_id, batch_title, index, len(prepared)))
+            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["billing_minutes"], created, created, batch_id, batch_title, index, len(prepared)))
         balance = int(user["credits"]) - total_points
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))

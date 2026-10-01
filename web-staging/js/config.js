@@ -95,6 +95,9 @@ window.APP_CONFIG = {
     // 生产环境同源走 /api；直接双击 index.html 时指向本机后端，避免 file:// 请求落回本地文件系统。
     baseUrl: window.location.protocol === "file:" ? "http://127.0.0.1:8000/api" : "/api",
     timeoutMs: 30000,
+    // Batch creation uploads and probes every selected episode before the
+    // server can return task IDs, so it needs a longer request window.
+    batchTimeoutMs: 10 * 60 * 1000,
     endpoints: {
       me: "/me",
       authCode: "/auth/request-code",

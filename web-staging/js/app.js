@@ -277,7 +277,7 @@
     const meta = [
       task.fileName || "未命名视频",
       formatDuration(task.durationSec),
-      `${(Number(task.estimatedMinutes || 0) * POINTS_PER_MINUTE).toFixed(1)} 积分`,
+      `${(Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE).toFixed(1)} 积分`,
       timeAgo(task.createdAt),
     ];
     const progress = task.status === "running" || task.status === "queued"
@@ -485,7 +485,7 @@
           <strong class="aside-file">${escapeHtml(task.fileName)}</strong>
           <dl class="meta-list">
             <div><dt>视频时长</dt><dd>${formatDuration(task.durationSec)}</dd></div>
-            <div><dt>消耗积分</dt><dd>${(Number(task.creditsUsed || task.estimatedMinutes || 0) * POINTS_PER_MINUTE).toFixed(1)} 积分</dd></div>
+            <div><dt>消耗积分</dt><dd>${(Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE).toFixed(1)} 积分</dd></div>
             <div><dt>完成时间</dt><dd>${formatDate(task.completedAt || task.createdAt)}</dd></div>
           </dl>
         </div>
@@ -611,7 +611,7 @@
         </div>
         <div class="billing-note ${upload.error || overDuration || insufficient ? "warning" : ""}">
           <span>${upload.error || overDuration || insufficient ? "!" : "i"}</span>
-          <div><strong>${billing}</strong><p>${durationSummary ? `${durationSummary} · ` : ""}按视频实际时长向上取整预扣；任务失败自动退回。</p></div>
+          <div><strong>${billing}</strong><p>${durationSummary ? `${durationSummary} · ` : ""}按本批视频总时长向上取整预扣；任务失败自动退回。</p></div>
         </div>
         <div class="modal-actions">
           <button class="cancel-btn" type="button" data-action="close-modal">取消</button>
@@ -710,7 +710,9 @@
     try {
       const durations = await Promise.all(files.map(readVideoDuration));
       state.upload.durationSec = durations.reduce((sum, value) => sum + value, 0);
-      state.upload.estimatedMinutes = durations.reduce((sum, value) => sum + estimatedMinutes(value), 0);
+      // Bill the selected batch by its aggregate duration, rounded once. This
+      // must match the backend, otherwise every short episode is overcharged.
+      state.upload.estimatedMinutes = estimatedMinutes(state.upload.durationSec);
       if (durations.some((value) => value > cfg.upload.maxDurationMinutes * 60)) state.upload.error = `单个视频不能超过 ${cfg.upload.maxDurationMinutes} 分钟`;
     } catch (error) { state.upload.error = error.message; }
     state.upload.reading = false;

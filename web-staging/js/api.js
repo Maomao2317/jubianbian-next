@@ -139,7 +139,8 @@
     task.stage = "done";
     task.progressPercent = 100;
     task.completedAt = new Date().toISOString();
-    task.creditsUsed = task.estimatedMinutes;
+    // Batch credits are allocated when the tasks are created. Keep that
+    // allocation instead of replacing it with the per-file queue estimate.
     task.result = clone(sampleScript);
     task.title = titleWithEpisode(task.title, task.fileName);
     task.result.title = task.title;
@@ -259,12 +260,15 @@
       const selected = (files && files.length ? files : [payload.file]).filter(Boolean);
       const file = selected[0];
       if (!file) throw new Error("请选择视频文件");
-      if (estimatedMinutes > mockStore.profile.credits) {
-        throw new Error(`额度不足，当前剩余 ${mockStore.profile.credits} 分钟`);
-      }
       const batchId = "batch-" + Date.now();
       const createdAt = new Date().toISOString();
-      const perFileMinutes = Math.max(1, Number(estimatedMinutes || 0) / selected.length);
+      const totalMinutes = Math.max(1, Math.ceil(Number(durationSec || 0) / 60), Number(estimatedMinutes || 0));
+      if (totalMinutes * 5 > mockStore.profile.credits) {
+        throw new Error(`额度不足，当前剩余 ${mockStore.profile.credits} 积分`);
+      }
+      const perFileMinutes = Math.max(1, Math.ceil(totalMinutes / selected.length));
+      const baseBilling = Math.floor(totalMinutes / selected.length);
+      const remainder = totalMinutes % selected.length;
       const tasks = selected.map((item, index) => ({
         id: `${batchId}-${index + 1}`,
         batchId,
@@ -280,11 +284,11 @@
         progressPercent: 4,
         durationSec: Math.round(Number(durationSec || 0) / selected.length),
         estimatedMinutes: perFileMinutes,
-        creditsUsed: 0,
+        creditsUsed: baseBilling + (index < remainder ? 1 : 0),
         createdAt,
         result: null,
       }));
-      mockStore.profile.credits -= Number(estimatedMinutes || 0);
+      mockStore.profile.credits -= totalMinutes * 5;
       mockStore.tasks.unshift(...tasks.reverse());
       persist();
       return clone({ tasks, count: tasks.length });
@@ -362,14 +366,16 @@
 
     async request(path, options = {}) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), cfg().api.timeoutMs);
+      const timeoutMs = Number(options.timeoutMs || cfg().api.timeoutMs);
+      const { timeoutMs: _timeoutMs, ...fetchOptions } = options;
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+        const isFormData = typeof FormData !== "undefined" && fetchOptions.body instanceof FormData;
         const response = await fetch(path, {
-          headers: isFormData ? { ...(options.headers || {}) } : { "Content-Type": "application/json", ...(options.headers || {}) },
+          headers: isFormData ? { ...(fetchOptions.headers || {}) } : { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
           credentials: "include",
           signal: controller.signal,
-          ...options,
+          ...fetchOptions,
         });
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
@@ -426,7 +432,7 @@
       (payload.files || [payload.file]).forEach((file) => form.append("files", file));
       form.append("title", payload.title || "");
       form.append("durationSec", String(payload.durationSec || 0));
-      return this.request(this.url("/tasks/batch"), { method: "POST", body: form });
+      return this.request(this.url("/tasks/batch"), { method: "POST", body: form, timeoutMs: cfg().api.batchTimeoutMs });
     },
     retryTask(id) {
       return this.request(this.url(cfg().api.endpoints.task, { id }) + "/retry", { method: "POST" });
