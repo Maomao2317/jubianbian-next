@@ -455,6 +455,15 @@
       if (!response.ok) throw new Error("暂无可下载的已完成剧本");
       return { fileName: response.headers.get("X-Filename") || `all-scripts.${format}`, blob: await response.blob() };
     },
+    async getExportBatch(batchId, format) {
+      const url = this.url("/export/batch/:id", { id: batchId }) + `?fmt=${encodeURIComponent(format)}`;
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) throw new Error("\u8be5\u6279\u6b21\u6682\u65e0\u53ef\u4e0b\u8f7d\u7684\u5267\u672c");
+      const rawName = response.headers.get("X-Filename") || `batch-scripts.${format}`;
+      let fileName = rawName;
+      try { fileName = decodeURIComponent(rawName); } catch (_) {}
+      return { fileName, blob: await response.blob() };
+    },
   };
 
   global.AppAPI = cfg().api.useMock ? MockApi : HttpApi;
