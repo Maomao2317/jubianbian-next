@@ -40,7 +40,10 @@ _REACTION_ACTION_RE = re.compile(
 _HIGH_IMPACT_DIALOGUE_RE = re.compile(
     r"(?:[！？]|不|别|不要|为什么|怎么|滚|住手|救命|我恨|杀)"
 )
-_SCENE_HEADING_RE = re.compile(r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|不明)\s+(?:内|外|不明)\s+.+")
+_SCENE_HEADING_RE = re.compile(
+    r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
+    r"(?:内|外|内外|内转外|外转内|不明)\s+.+"
+)
 _VO_KINDS = {"os", "narration", "memory", "phone", "unknown"}
 _VO_KIND_ALIASES = {
     "inner_monologue": "os",
@@ -190,6 +193,34 @@ def clean_action_text(text: Any) -> str:
     # Action beats are prose too: close an unfinished sentence so exports do
     # not alternate between complete lines and dangling fragments.
     return normalize_text(value.strip(), sentence=True)
+
+
+def compact_performance(value: Any) -> str:
+    """Keep dialogue parentheticals short and playable.
+
+    Provider responses sometimes copy an entire prosody analysis into
+    ``performance`` (tone, volume, pauses, emphasis, and repeated labels).
+    《剧拆拆》 uses only a few useful emotion/action words in parentheses, so
+    retain at most two concise clauses and discard technical narration.
+    """
+    text = normalize_text(value).strip("，。！？；：: ")
+    if not text:
+        return ""
+    text = re.sub(r"^(?:语气|神态|情绪|声音|音量|重音|停顿)\s*[：:]\s*", "", text)
+    parts = [part.strip("，。！？；：: ") for part in re.split(r"[；;，,。]", text) if part.strip()]
+    kept: list[str] = []
+    for part in parts:
+        if not part or part in kept:
+            continue
+        if len(part) > 18:
+            # Prefer the first compact descriptive clause over a verbose
+            # explanation such as "重音落在……、停顿……".
+            part = part[:18].rstrip("，。！？；：: ")
+        if part and part not in kept:
+            kept.append(part)
+        if len(kept) >= 2:
+            break
+    return "、".join(kept)
 
 
 def is_micro_action(text: str) -> bool:
@@ -588,17 +619,25 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
 
     def scene_heading(raw_scene: dict[str, Any], index: int, location: str) -> str:
         raw_heading = str(raw_scene.get("heading") or "").strip()
-        valid = re.match(r"^\s*\d+-\d+\s+(日|夜|清晨|黄昏|不明)\s+(内|外|不明)\s+.+", raw_heading)
+        valid = re.match(
+            r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
+            r"(?:内|外|内外|内转外|外转内|不明)\s+.+",
+            raw_heading,
+        )
         if valid:
             return raw_heading
-        time_of_day = str(raw_scene.get("timeOfDay") or "不明").strip()
-        if time_of_day not in {"日", "夜", "清晨", "黄昏", "不明"}:
-            time_of_day = "不明"
-        interior_exterior = str(raw_scene.get("interiorExterior") or "不明").strip()
-        if interior_exterior not in {"内", "外", "不明"}:
-            interior_exterior = "不明"
+        time_of_day = normalize_time_of_day(raw_scene.get("timeOfDay"))
+        interior_exterior = normalize_interior_exterior(raw_scene.get("interiorExterior"))
         heading_location = location if location != "待补充" else (raw_heading or "未标注地点")
         return f"1-{index} {time_of_day} {interior_exterior} {heading_location}"
+
+    def normalize_time_of_day(value: Any) -> str:
+        text = str(value or "不明").strip()
+        return text if text in {"日", "夜", "清晨", "黄昏", "傍晚", "傍晚转夜", "日转夜", "不明"} else "不明"
+
+    def normalize_interior_exterior(value: Any) -> str:
+        text = str(value or "不明").strip()
+        return text if text in {"内", "外", "内外", "内转外", "外转内", "不明"} else "不明"
 
     scenes: list[dict[str, Any]] = []
     non_plot_segments = {"recap", "trailer", "title_card", "credits"}
@@ -715,17 +754,16 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block["emotion"] = ""
                 block["emotionImportant"] = False
                 block.update(emotion_fields(raw_block))
+                # Keep only the short playable emotion cue. Technical
+                # prosody fields (volume/pause/emphasis) belong to QA data,
+                # not to the screenplay parenthetical.
                 performance_parts = [
                     raw_block.get("performance") or raw_block.get("acting") or raw_block.get("delivery"),
                     raw_block.get("speechTone"),
-                    raw_block.get("tone"),
-                    raw_block.get("volume"),
-                    raw_block.get("pause"),
-                    raw_block.get("emphasis"),
                 ]
-                performance = "；".join(
+                performance = compact_performance("、".join(
                     value for value in (normalize_text(item) for item in performance_parts) if value
-                )
+                ))
                 if performance:
                     block["performance"] = performance
             elif block_type == "vo":
@@ -769,7 +807,19 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block.pop("_dialogueSource", None)
         blocks = order_blocks_without_crossing_sentences(blocks)
         blocks = compact_action_blocks(blocks)
-        scene_characters = names(raw_scene.get("characters"))
+        raw_scene_characters = names(raw_scene.get("characters"))
+        all_profile_names = [
+            str(profile.get("name") or "").strip()
+            for profile in character_profiles
+            if str(profile.get("name") or "").strip()
+        ]
+        block_text = " ".join(str(block.get("text") or "") for block in blocks)
+        # Do not copy a provider's global cast list into every scene. Keep a
+        # character only when the scene's visual/dialogue text actually
+        # mentions them; this removes the "导演、全体工作人员、工人..." pileup
+        # seen in the comparison sample while retaining action-only roles.
+        candidate_characters = list(dict.fromkeys(raw_scene_characters + names(script.get("characters")) + all_profile_names))
+        scene_characters = [name for name in candidate_characters if name and name in block_text]
         fallback_characters = scene_characters + names(script.get("characters")) + [
             str(profile.get("name") or "").strip()
             for profile in character_profiles
@@ -777,6 +827,10 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         ]
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
         add_character_visual_descriptions(blocks, character_profiles)
+        block_text = " ".join(str(block.get("text") or "") for block in blocks)
+        for name in candidate_characters:
+            if name and name in block_text and name not in scene_characters:
+                scene_characters.append(name)
         for block in blocks:
             speaker = str(block.get("speaker") or "").strip()
             if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"旁白", "未知说话人", "OS", "内心独白"}:
@@ -801,8 +855,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             "id": str(raw_scene.get("id") or f"scene_{index:03d}"),
             "heading": scene_heading(raw_scene, index, scene_location),
             "location": scene_location,
-            "timeOfDay": str(raw_scene.get("timeOfDay") or "不明"),
-            "interiorExterior": str(raw_scene.get("interiorExterior") or "不明"),
+            "timeOfDay": normalize_time_of_day(raw_scene.get("timeOfDay")),
+            "interiorExterior": normalize_interior_exterior(raw_scene.get("interiorExterior")),
             "segmentType": raw_segment_type,
             "characters": scene_characters,
             "environment": clean_environment(raw_scene.get("environment")),
