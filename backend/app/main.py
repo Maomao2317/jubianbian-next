@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .auth_store import init_db
-from .config import FRONTEND_DIR
+from .config import CORS_ORIGINS, FRONTEND_DIR
 from .middleware import RateLimitMiddleware, RequestLogMiddleware
 from .routes import (
     admin_audit_logs,
@@ -58,11 +58,13 @@ worker_task: asyncio.Task | None = None
 app = FastAPI(title="剧编编 API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_origin_regex=r".*",
+    # Credentials are carried by the session cookie, so wildcard origins are
+    # unsafe and are rejected inconsistently by browsers. Keep cross-origin
+    # access limited to the configured first-party frontends.
+    allow_origins=list(CORS_ORIGINS),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "X-Request-ID"],
 )
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestLogMiddleware)

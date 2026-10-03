@@ -33,29 +33,22 @@ from .auth_store import (
 from .config import (
     ADMIN_EMAILS,
     APP_STARTED_MONOTONIC,
-    ARK_API_KEY,
-    ARK_MODEL,
     BUILD_VERSION,
     AUTH_ALLOW_DEV_CODE,
     AUTH_CODE_RESEND_SECONDS,
     AUTH_CODE_TTL_SECONDS,
     JBB_ENVIRONMENT,
-    JBB_LOG_LEVEL,
-    LOG_DIR,
     MAX_DURATION_MINUTES,
     MAX_DURATION_SECONDS,
     MAX_UPLOAD_BYTES,
     POINTS_PER_MINUTE,
     QUEUE_MAX_WAIT_MINUTES,
     REGISTER_POINTS,
-    OPENAI_API_KEY,
     PASSWORD_DIGIT_RE,
     PASSWORD_LETTER_RE,
     PASSWORD_MIN_LENGTH,
     REQUEST_ID,
     SESSION_COOKIE,
-    TENCENTCLOUD_SECRET_ID,
-    TENCENTCLOUD_SECRET_KEY,
     TENCENTCLOUD_SES_FROM_EMAIL,
     TENCENTCLOUD_SES_TEMPLATE_ID,
     UPLOAD_DIR,
@@ -104,28 +97,14 @@ def health() -> Any:
 
 
 def metrics() -> dict[str, Any]:
-    counts = task_counts()
-    log_size = (LOG_DIR / "app.log").stat().st_size if (LOG_DIR / "app.log").exists() else 0
+    # This endpoint is polled by the local staging monitor without a user
+    # session. Do not expose global task counts, provider configuration, or
+    # log sizes to the public internet; the authenticated admin overview owns
+    # that operational data.
     return {
         "status": "ok",
         "environment": JBB_ENVIRONMENT,
         "uptimeSec": round(time.monotonic() - APP_STARTED_MONOTONIC, 1),
-        "tasks": counts,
-        "provider": {
-            "arkConfigured": bool(ARK_API_KEY),
-            "openaiConfigured": bool(OPENAI_API_KEY),
-            "arkModel": ARK_MODEL if ARK_API_KEY else None,
-            "tencentSesConfigured": bool(TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY and TENCENTCLOUD_SES_FROM_EMAIL and TENCENTCLOUD_SES_TEMPLATE_ID),
-            "tencentSesSenderConfigured": bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", TENCENTCLOUD_SES_FROM_EMAIL)),
-            "tencentSesTemplateConfigured": bool(TENCENTCLOUD_SES_TEMPLATE_ID),
-            "tencentSesTemplateId": TENCENTCLOUD_SES_TEMPLATE_ID or None,
-            "authDevCodeEnabled": AUTH_ALLOW_DEV_CODE,
-            "authCodeResendSeconds": AUTH_CODE_RESEND_SECONDS,
-        },
-        "logging": {
-            "level": JBB_LOG_LEVEL,
-            "fileBytes": log_size,
-        },
         "timestamp": now_iso(),
     }
 
@@ -192,9 +171,36 @@ def _allocate_batch_billing_minutes(prepared: list[dict[str, Any]], total_minute
 
 
 def queue_summary(request: Request) -> dict[str, Any]:
-    current_user(request)
+    user = current_user(request)
     with db() as connection:
-        return _queue_summary(connection)
+        # A normal account should not learn the size or progress of another
+        # account's queue. Upload admission still uses the global queue below.
+        rows = connection.execute(
+            "SELECT status, estimated_minutes, progress_percent FROM tasks WHERE user_id = ? AND status IN ('queued', 'running')",
+            (user["id"],),
+        ).fetchall()
+        workload = 0.0
+        queued_count = 0
+        running_count = 0
+        for row in rows:
+            minutes = max(1.0, float(row["estimated_minutes"] or 1))
+            if row["status"] == "running":
+                running_count += 1
+                workload += minutes * max(0.05, 1 - float(row["progress_percent"] or 0) / 100)
+            else:
+                queued_count += 1
+                workload += minutes
+        from .config import WORKER_CONCURRENCY
+        wait_minutes = int((workload + WORKER_CONCURRENCY - 1) // WORKER_CONCURRENCY)
+        return {
+            "waitMinutes": wait_minutes,
+            "waitHours": round(wait_minutes / 60, 1),
+            "blocked": wait_minutes > QUEUE_MAX_WAIT_MINUTES,
+            "thresholdMinutes": QUEUE_MAX_WAIT_MINUTES,
+            "workerConcurrency": WORKER_CONCURRENCY,
+            "queuedCount": queued_count,
+            "runningCount": running_count,
+        }
 
 
 # Authentication and account lifecycle
@@ -411,7 +417,10 @@ def admin_users(request: Request, keyword: str = "", status: str = "all", limit:
 async def admin_user_status(request: Request, user_id: str) -> dict[str, Any]:
     admin = _require_admin(request)
     payload = await request.json()
-    active = bool(payload.get("isActive"))
+    active_value = payload.get("isActive")
+    if not isinstance(active_value, bool):
+        raise HTTPException(status_code=400, detail="isActive 必须是布尔值")
+    active = active_value
     if user_id == admin["id"] and not active:
         raise HTTPException(status_code=400, detail="不能禁用当前管理员账号")
     with db() as connection:
@@ -432,7 +441,7 @@ async def admin_user_credits(request: Request, user_id: str) -> dict[str, Any]:
         rmb_amount = float(payload.get("rmb_amount"))
     except (TypeError, ValueError):
         rmb_amount = 0
-    if rmb_amount <= 0 or rmb_amount > 1_000_000:
+    if not math.isfinite(rmb_amount) or rmb_amount <= 0 or rmb_amount > 1_000_000:
         raise HTTPException(status_code=400, detail="人民币金额必须大于 0")
     points_amount = round(rmb_amount * 13.8, 1)
     reason = str(payload.get("reason") or "管理员人民币充值")[:200]

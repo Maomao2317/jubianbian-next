@@ -44,6 +44,15 @@ _SCENE_HEADING_RE = re.compile(
     r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
     r"(?:内|外|内外|内转外|外转内|不明)\s+.+"
 )
+# Episode markers are intentionally kept independent from the media upload
+# helpers.  Normalization also runs on provider responses and on legacy JSON
+# that may not have gone through an upload route first.
+_EPISODE_MARKER_RE = re.compile(
+    r"(?:\u7b2c\s*0*(\d{1,4})\s*(?:\u96c6|\u8bdd|\u671f)|"
+    r"(?:^|[\s_.()\[\]\u3010\u3011-])(?:ep|e|episode)\s*0*(\d{1,4})(?=$|[\s_.()\[\]\u3010\u3011-]))",
+    re.IGNORECASE,
+)
+_SCENE_NUMBER_RE = re.compile(r"^\s*(\d{1,4})-(\d{1,5})(?=\s|$)")
 _VO_KINDS = {"os", "narration", "memory", "phone", "unknown"}
 _VO_KIND_ALIASES = {
     "inner_monologue": "os",
@@ -91,6 +100,26 @@ def normalize_dialogue_text(text: Any) -> str:
     punctuation cleanup used by exports and restores a terminal mark.
     """
     return normalize_text(text, sentence=True)
+
+
+def episode_from_text(value: Any) -> int | None:
+    """Extract an explicit episode number from a title or scene heading."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        number = int(text)
+        return number if 0 < number <= 9999 else None
+    match = _EPISODE_MARKER_RE.search(text)
+    if match:
+        raw = match.group(1) or match.group(2)
+        number = int(raw)
+        return number if 0 < number <= 9999 else None
+    match = _SCENE_NUMBER_RE.match(text)
+    if match:
+        number = int(match.group(1))
+        return number if 0 < number <= 9999 else None
+    return None
 
 
 def dialogue_integrity_issues(text: str, speaker: str) -> list[str]:
@@ -178,6 +207,7 @@ def clean_action_text(text: Any) -> str:
     # Camera language belongs to the editing plan, not the screenplay. Remove
     # it defensively because models occasionally echo it despite the prompt.
     value = _CAMERA_LANGUAGE_RE.sub("", value)
+    value = dedupe_repeated_action_clauses(value)
     value = re.sub(r"\s*([，。；、])\s*", r"\1", value)
     value = re.sub(r"^[，。；、]+", "", value)
     value = re.sub(r"[，；、]{2,}", "，", value)
@@ -193,6 +223,37 @@ def clean_action_text(text: Any) -> str:
     # Action beats are prose too: close an unfinished sentence so exports do
     # not alternate between complete lines and dangling fragments.
     return normalize_text(value.strip(), sentence=True)
+
+
+def dedupe_repeated_action_clauses(value: Any) -> str:
+    """Remove exact repeated visual clauses without rewriting the action.
+
+    Vision responses occasionally paste the same appearance sentence twice in
+    one action. This only drops a later *identical* clause (six or more
+    characters); different clothing in a flashback or a later time period is
+    intentionally preserved.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    pieces = re.split(r"([\uFF0C\uFF1B\u3002\uFF01\uFF1F])", text)
+    output: list[str] = []
+    seen: set[str] = set()
+    index = 0
+    while index < len(pieces):
+        clause = pieces[index].strip()
+        delimiter = pieces[index + 1] if index + 1 < len(pieces) else ""
+        key = re.sub(r"\s+", "", clause)
+        duplicate = len(key) >= 6 and key in seen
+        if not duplicate:
+            if len(key) >= 6:
+                seen.add(key)
+            if clause:
+                output.append(clause)
+            if delimiter:
+                output.append(delimiter)
+        index += 2
+    return "".join(output).strip("，；。！？ ")
 
 
 def compact_performance(value: Any) -> str:
@@ -617,6 +678,28 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
     event_chain = normalize_notes(script.get("eventChain"), structured=True)
     setting_rules = normalize_notes(script.get("settingRules"))
 
+    # The upload title is authoritative when it contains an episode marker.
+    # Legacy/provider payloads may omit it from the title but still emit
+    # headings such as ``2-1``; use that as a safe fallback before defaulting
+    # to episode one.
+    episode_number = episode_from_text(title) or episode_from_text(script.get("title"))
+    if episode_number is None:
+        raw_episode = script.get("episodeNumber") or script.get("episode")
+        try:
+            parsed_episode = int(raw_episode)
+        except (TypeError, ValueError):
+            parsed_episode = 0
+        if 0 < parsed_episode <= 9999:
+            episode_number = parsed_episode
+    if episode_number is None:
+        for candidate in script.get("scenes") or []:
+            if not isinstance(candidate, dict):
+                continue
+            episode_number = episode_from_text(candidate.get("heading"))
+            if episode_number is not None:
+                break
+    episode_number = episode_number or 1
+
     def scene_heading(raw_scene: dict[str, Any], index: int, location: str) -> str:
         raw_heading = str(raw_scene.get("heading") or "").strip()
         valid = re.match(
@@ -625,11 +708,18 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             raw_heading,
         )
         if valid:
-            return raw_heading
+            # Keep the provider's time/place wording, but always make the
+            # episode-scene prefix deterministic and scoped to this episode.
+            return re.sub(
+                r"^\s*\d+-\d+",
+                f"{episode_number}-{index}",
+                raw_heading,
+                count=1,
+            )
         time_of_day = normalize_time_of_day(raw_scene.get("timeOfDay"))
         interior_exterior = normalize_interior_exterior(raw_scene.get("interiorExterior"))
         heading_location = location if location != "待补充" else (raw_heading or "未标注地点")
-        return f"1-{index} {time_of_day} {interior_exterior} {heading_location}"
+        return f"{episode_number}-{index} {time_of_day} {interior_exterior} {heading_location}"
 
     def normalize_time_of_day(value: Any) -> str:
         text = str(value or "不明").strip()
@@ -901,7 +991,12 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             )
         ]
         for scene_index, scene in enumerate(scenes, start=1):
-            scene["heading"] = re.sub(r"^\s*\d+-\d+", f"1-{scene_index}", str(scene.get("heading") or ""), count=1)
+            scene["heading"] = re.sub(
+                r"^\s*\d+-\d+",
+                f"{episode_number}-{scene_index}",
+                str(scene.get("heading") or ""),
+                count=1,
+            )
     used_characters: list[str] = []
     for scene in scenes:
         for character in scene.get("characters", []):
@@ -925,6 +1020,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             })
     return {
         "version": str(script.get("version") or "1.0"),
+        "episodeNumber": episode_number,
         # The task title already carries an episode marker when the source file
         # is numbered. It is authoritative for the screenplay/export title.
         "title": str(title or script.get("title") or "未命名视频"),

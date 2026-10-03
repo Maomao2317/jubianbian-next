@@ -27,6 +27,15 @@ TRUST_PROXY_HEADERS = os.getenv("JBB_TRUST_PROXY_HEADERS", "0").strip().lower() 
 JBB_ENVIRONMENT = os.getenv("JBB_ENVIRONMENT", "production").strip() or "production"
 BUILD_VERSION = os.getenv("JBB_BUILD_VERSION", "8b3c16f")
 JBB_LOG_LEVEL = os.getenv("JBB_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+_DEFAULT_CORS_ORIGINS = {
+    "staging": "https://test.jubianbian.com",
+    "production": "https://jubianbian.com,https://www.jubianbian.com",
+}.get(JBB_ENVIRONMENT, "http://127.0.0.1:8000,http://localhost:8000")
+CORS_ORIGINS = tuple(
+    origin.strip().rstrip("/")
+    for origin in os.getenv("JBB_CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
+)
 ADMIN_EMAILS = {value.strip().lower() for value in os.getenv("JBB_ADMIN_EMAILS", "").split(",") if value.strip()}
 JBB_LOG_MAX_BYTES = max(64 * 1024, int(os.getenv("JBB_LOG_MAX_BYTES", str(5 * 1024 * 1024))))
 JBB_LOG_BACKUP_COUNT = max(1, int(os.getenv("JBB_LOG_BACKUP_COUNT", "5")))

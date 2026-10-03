@@ -6,6 +6,7 @@ from collections import deque
 from threading import Lock
 import time
 import uuid
+import re
 from typing import Any
 
 from fastapi import Request
@@ -26,7 +27,12 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
     """Emit one request record with a correlation id and elapsed time."""
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+        supplied_request_id = request.headers.get("x-request-id", "")[:64]
+        request_id = (
+            supplied_request_id
+            if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_request_id)
+            else uuid.uuid4().hex[:12]
+        )
         token = REQUEST_ID.set(request_id)
         started = time.perf_counter()
         try:
