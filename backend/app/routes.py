@@ -68,7 +68,6 @@ from .task_store import (
     get_task,
     record_task_event,
     row_to_task,
-    task_counts,
     task_events,
     task_row,
     update_task,
@@ -82,13 +81,11 @@ def health() -> Any:
     try:
         with db() as connection:
             connection.execute("SELECT 1").fetchone()
-        counts = task_counts()
         return {
             "status": "ok",
             "environment": JBB_ENVIRONMENT,
             "build": BUILD_VERSION,
             "uptimeSec": round(time.monotonic() - APP_STARTED_MONOTONIC, 1),
-            "activeTasks": counts["queued"] + counts["running"],
             "timestamp": now_iso(),
         }
     except sqlite3.Error as exc:
