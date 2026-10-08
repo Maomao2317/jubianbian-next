@@ -98,7 +98,16 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
     text = str(error).casefold()
     return any(
         marker in text
-        for marker in ("read operation timed out", "modelnotopen", "model_not_open", "not active", "未激活")
+        for marker in (
+            "read operation timed out",
+            "timed out",
+            "timeout",
+            "超时",
+            "modelnotopen",
+            "model_not_open",
+            "not active",
+            "未激活",
+        )
     )
 
 
