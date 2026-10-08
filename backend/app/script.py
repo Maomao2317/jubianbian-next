@@ -40,6 +40,20 @@ _REACTION_ACTION_RE = re.compile(
 _HIGH_IMPACT_DIALOGUE_RE = re.compile(
     r"(?:[！？]|不|别|不要|为什么|怎么|滚|住手|救命|我恨|杀)"
 )
+# Models occasionally copy review notes from a reference screenplay into the
+# returned JSON.  These phrases are instructions to the editor, not visible
+# video content, and must never become an action/dialogue block.
+_EDITORIAL_ARTIFACT_RE = re.compile(
+    r"^(?:"
+    r"这里(?:不需要|无需|不用|应该|是|画面|缺少)|"
+    r"画面(?:应该|需要|缺少)|"
+    r"缺少(?:人物|台词|对白|动作|情绪|描述|字幕|画面|内容)|"
+    r"少[^，。；：:]{0,16}(?:说话|台词|对白|动作|描述|情绪|字幕)|"
+    r"(?:这(?:里|一段|一大段|两句|三句|几句)|本段)(?:不需要|无需|不用|是|为)|"
+    r"(?:需要|待)补(?:充|齐)|待核对|此处(?:省略|删除)|"
+    r"\d+[：:][^。]{0,20}(?:这里|说话|台词|字幕)"
+    r")"
+)
 _SCENE_HEADING_RE = re.compile(
     r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
     r"(?:内|外|内外|内转外|外转内|不明)\s+.+"
@@ -109,6 +123,18 @@ def episode_from_text(value: Any) -> int | None:
         return None
     if text.isdigit():
         number = int(text)
+        return number if 0 < number <= 9999 else None
+    # Uploads are often named simply ``2.mp4``, ``episode_02_final.mp4`` or
+    # ``part-003.mov`` rather than using the Chinese “第N集” marker.  Accept an
+    # isolated one-to-four digit filename token, while deliberately ignoring
+    # long hash-like names and numbers embedded inside words.
+    basename = re.split(r"[\\/]", text)[-1]
+    stem = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", basename)
+    token = re.search(r"(?:^|[_\-.()\s])0*(\d{1,4})(?=$|[_\-.()\s])", stem)
+    has_extension = bool(re.search(r"\.[A-Za-z0-9]{1,8}$", basename))
+    date_like_name = bool(re.search(r"(?:^|[_\-.])\d{4}[-_.]\d{1,2}(?:[-_.]\d{1,2})?(?:$|[_\-.])", stem))
+    if token and (has_extension or len(token.group(1)) <= 3) and not date_like_name:
+        number = int(token.group(1))
         return number if 0 < number <= 9999 else None
     match = _EPISODE_MARKER_RE.search(text)
     if match:
@@ -204,6 +230,7 @@ def clean_action_text(text: Any) -> str:
     value = normalize_text(text)
     if not value:
         return ""
+    value = re.sub(r"^(?:▲\s*)+", "", value).strip()
     # Camera language belongs to the editing plan, not the screenplay. Remove
     # it defensively because models occasionally echo it despite the prompt.
     value = _CAMERA_LANGUAGE_RE.sub("", value)
@@ -211,17 +238,11 @@ def clean_action_text(text: Any) -> str:
     value = re.sub(r"\s*([，。；、])\s*", r"\1", value)
     value = re.sub(r"^[，。；、]+", "", value)
     value = re.sub(r"[，；、]{2,}", "，", value)
-    if is_micro_action(value):
-        return ""
-    # Remove standalone close-up details even when the model embedded them in
-    # a longer action paragraph. Keep a clause when it also contains a causal
-    # meaningful plot action (for example “擦去嘴角的血迹” or “挥出第一拳”).
-    clauses = [part.strip() for part in re.split(r"[，；]", value) if part.strip()]
-    if len(clauses) > 1:
-        clauses = [part for part in clauses if not is_micro_action(part)]
-        value = "，".join(clauses)
-    # Action beats are prose too: close an unfinished sentence so exports do
-    # not alternate between complete lines and dangling fragments.
+    # Do not delete a visible detail here.  A close-up reaction can be the only
+    # evidence of a reveal or a decision, and earlier cleanup silently lost it.
+    # ``compact_action_blocks`` may attach a purely microscopic detail to a
+    # neighbouring beat, but it keeps the detail when there is no safe
+    # neighbour.  This is intentionally lossless for arbitrary video genres.
     return normalize_text(value.strip(), sentence=True)
 
 
@@ -254,6 +275,32 @@ def dedupe_repeated_action_clauses(value: Any) -> str:
                 output.append(delimiter)
         index += 2
     return "".join(output).strip("，；。！？ ")
+
+
+def is_editorial_artifact(text: Any, block_type: str = "") -> bool:
+    """Identify reference-document review notes accidentally returned as prose.
+
+    The detector is deliberately narrow and only matches explicit meta wording
+    (for example ``这里不需要展示`` or ``缺少某角色台词``).  Ordinary dialogue
+    and subtitle text are left intact, even when they contain words such as
+    “需要” or “这里”.
+    """
+    value = normalize_text(text).strip(" 【】")
+    if not value or value in {"---", "———", "…"}:
+        return value in {"---", "———"}
+    if block_type == "screen_text":
+        return False
+    if _EDITORIAL_ARTIFACT_RE.match(value):
+        return True
+    # A review note often contains several labels in one line.  Only apply
+    # this secondary check to generated action/dialogue/VO fields, never to
+    # screen_text where the same words may be the actual overlay subtitle.
+    if block_type != "screen_text" and re.search(
+        r"(?:这里是|这里画面|这(?:两|三|几)句(?:话|台词)|少.+(?:说话|台词)|缺少.+(?:描述|台词|动作))",
+        value,
+    ):
+        return True
+    return False
 
 
 def compact_performance(value: Any) -> str:
@@ -310,20 +357,24 @@ def compact_action_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     # A detail may precede the action it belongs to. Attach it to an adjacent
     # action instead of exposing a standalone “fingertips/eyes” block. If no
-    # adjacent story action exists, omit the detail: it is an editing cue, not
-    # a screenplay beat.
+    # adjacent story action exists, keep it: dropping visible content makes the
+    # transcript impossible to compare with the source video.
     for index, block in list(enumerate(compacted)):
         if block is None or block.get("type") != "action" or not is_micro_action(block.get("text", "")):
             continue
+        merged = False
         if index + 1 < len(compacted) and compacted[index + 1] is not None and compacted[index + 1].get("type") == "action":
             next_block = compacted[index + 1]
             joiner = "" if block["text"].endswith(("，", "；", "：", "、", "。", "！", "？", "…")) else "，"
             next_block["text"] = normalize_text(f"{block['text']}{joiner}{next_block['text']}")
+            merged = True
         elif index > 0 and compacted[index - 1] is not None and compacted[index - 1].get("type") == "action":
             previous = compacted[index - 1]
             joiner = "" if previous["text"].endswith(("，", "；", "：", "、", "。", "！", "？", "…")) else "，"
             previous["text"] = normalize_text(f"{previous['text']}{joiner}{block['text']}")
-        compacted[index] = None  # type: ignore[assignment]
+            merged = True
+        if merged:
+            compacted[index] = None  # type: ignore[assignment]
     return [block for block in compacted if block is not None]
 
 
@@ -642,6 +693,25 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         for alias in profile.get("aliases", []):
             alias_map[str(alias).casefold()] = canonical_name
 
+    def canonicalize_visible_names(text: Any) -> str:
+        """Use canonical profile names in visible action prose as well as speakers.
+
+        Alias normalization used to apply only to ``speaker`` and ``characters``.
+        When an action used an alias, appearance injection missed the first
+        introduction and the screenplay then mixed names across blocks.  Replace
+        only multi-character aliases; pronouns and generic labels are too
+        ambiguous to rewrite safely.
+        """
+        value = str(text or "")
+        replacements: list[tuple[str, str]] = []
+        for alias, canonical in alias_map.items():
+            if alias == canonical.casefold() or len(alias) < 2:
+                continue
+            replacements.append((alias, canonical))
+        for alias, canonical in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+            value = re.sub(re.escape(alias), canonical, value, flags=re.IGNORECASE)
+        return value
+
     def normalize_notes(values: Any, *, structured: bool = False) -> list[Any]:
         """Keep evidence-oriented provider notes without inventing content."""
         if isinstance(values, dict):
@@ -682,7 +752,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
     # Legacy/provider payloads may omit it from the title but still emit
     # headings such as ``2-1``; use that as a safe fallback before defaulting
     # to episode one.
-    episode_number = episode_from_text(title) or episode_from_text(script.get("title"))
+    title_episode = episode_from_text(title) or episode_from_text(script.get("title"))
+    episode_number = title_episode
     if episode_number is None:
         raw_episode = script.get("episodeNumber") or script.get("episode")
         try:
@@ -700,7 +771,17 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 break
     episode_number = episode_number or 1
 
-    def scene_heading(raw_scene: dict[str, Any], index: int, location: str) -> str:
+    # A batch upload can contain several episodes even when the upload title
+    # carries the first episode marker.  Preserve explicit ``N-M`` prefixes in
+    # that case; for a single-episode file the title remains authoritative.
+    heading_episodes = {
+        episode_from_text(item.get("heading"))
+        for item in (script.get("scenes") or [])
+        if isinstance(item, dict) and episode_from_text(item.get("heading")) is not None
+    }
+    multi_episode = len(heading_episodes) > 1
+
+    def scene_heading(raw_scene: dict[str, Any], index: int, location: str, scene_episode: int) -> str:
         raw_heading = str(raw_scene.get("heading") or "").strip()
         valid = re.match(
             r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
@@ -712,14 +793,14 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             # episode-scene prefix deterministic and scoped to this episode.
             return re.sub(
                 r"^\s*\d+-\d+",
-                f"{episode_number}-{index}",
+                f"{scene_episode}-{index}",
                 raw_heading,
                 count=1,
             )
         time_of_day = normalize_time_of_day(raw_scene.get("timeOfDay"))
         interior_exterior = normalize_interior_exterior(raw_scene.get("interiorExterior"))
         heading_location = location if location != "待补充" else (raw_heading or "未标注地点")
-        return f"{episode_number}-{index} {time_of_day} {interior_exterior} {heading_location}"
+        return f"{scene_episode}-{index} {time_of_day} {interior_exterior} {heading_location}"
 
     def normalize_time_of_day(value: Any) -> str:
         text = str(value or "不明").strip()
@@ -736,6 +817,10 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             continue
         raw_segment_type = str(raw_scene.get("segmentType") or "main").strip().lower()
         raw_heading = str(raw_scene.get("heading") or "").strip()
+        heading_episode = episode_from_text(raw_heading)
+        scene_episode = heading_episode if multi_episode and heading_episode is not None else episode_number
+        scene_number_match = _SCENE_NUMBER_RE.match(raw_heading)
+        raw_scene_number = int(scene_number_match.group(2)) if scene_number_match else None
         has_screen_text = any(
             isinstance(item, dict)
             and (
@@ -769,6 +854,20 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if not text:
                 continue
             raw_type = str(raw_block.get("type") or "action").strip().lower()
+            editorial_type = "screen_text" if raw_type in {"screen_text", "subtitle", "caption", "system", "title_card"} else raw_type
+            if is_editorial_artifact(text, editorial_type):
+                continue
+            if editorial_type == "screen_text":
+                wrapped_text = re.match(r"^【(?:字幕|画面文字|屏幕文字)[：:](.+?)】(?:\s*(.*))?$", text)
+                if wrapped_text and (not wrapped_text.group(2) or is_editorial_artifact(wrapped_text.group(2), "action")):
+                    text = wrapped_text.group(1).strip()
+            overlay_match = re.match(
+                r"^【(?:字幕|画面文字|屏幕文字|标题|系统提示)[：:](.+?)】$",
+                text,
+            )
+            if overlay_match and raw_type in {"action", "visual", "text"}:
+                raw_type = "screen_text"
+                text = overlay_match.group(1).strip()
             block_type = {
                 "narration": "vo",
                 "voiceover": "vo",
@@ -790,7 +889,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block_type not in {"action", "dialogue", "vo", "sound", "emotion", "screen_text", "transition"}:
                 block_type = "action"
             if block_type == "action":
-                text = clean_action_text(text)
+                text = clean_action_text(canonicalize_visible_names(text))
             elif block_type == "dialogue":
                 # Never merge or paraphrase dialogue while normalizing it.
                 # `sourceText`/`verbatimText` is accepted for providers that
@@ -926,50 +1025,30 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"旁白", "未知说话人", "OS", "内心独白"}:
                 if speaker not in scene_characters:
                     scene_characters.append(speaker)
-        summary = normalize_text(
-            raw_scene.get("summary")
-            or raw_scene.get("transition")
-            or raw_scene.get("continuity"),
-            sentence=True,
-        )
-        summary_generated = not bool(summary)
-        if not summary:
-            summary = derive_scene_summary(blocks)
-        goal = normalize_text(raw_scene.get("goal") or raw_scene.get("objective") or raw_scene.get("task"))
-        obstacle = normalize_text(raw_scene.get("obstacle") or raw_scene.get("resistance") or raw_scene.get("conflict"))
-        result = normalize_text(raw_scene.get("result") or raw_scene.get("outcome") or raw_scene.get("ending"))
-        continuity_in = normalize_text(raw_scene.get("continuityIn") or raw_scene.get("previousState") or raw_scene.get("inputState"))
-        continuity_out = normalize_text(raw_scene.get("continuityOut") or raw_scene.get("nextState") or raw_scene.get("outputState"))
-        hook = normalize_text(raw_scene.get("hook") or raw_scene.get("cliffhanger") or raw_scene.get("nextQuestion"))
         scene: dict[str, Any] = {
             "id": str(raw_scene.get("id") or f"scene_{index:03d}"),
-            "heading": scene_heading(raw_scene, index, scene_location),
+            "heading": scene_heading(raw_scene, raw_scene_number or index, scene_location, scene_episode),
             "location": scene_location,
             "timeOfDay": normalize_time_of_day(raw_scene.get("timeOfDay")),
             "interiorExterior": normalize_interior_exterior(raw_scene.get("interiorExterior")),
             "segmentType": raw_segment_type,
             "characters": scene_characters,
-            "environment": clean_environment(raw_scene.get("environment")),
-            "summary": summary,
-            "summaryGenerated": summary_generated,
-            "summarySource": "derived" if summary_generated else "model",
+            # The visible screenplay is a visual transcript.  Do not expose
+            # model-written scene goals, summaries, or environment analysis.
+            "environment": "",
             "blocks": blocks,
         }
+        # Internal ordering keys are removed after sorting.  A scene number from
+        # the provider wins over a timestamp because timestamps can reset for
+        # each file in a multi-episode upload.
+        scene["_episodeOrder"] = scene_episode
+        scene["_sceneOrder"] = raw_scene_number
+        scene["_inputOrder"] = index
         raw_props = raw_scene.get("props") or raw_scene.get("propsState") or raw_scene.get("items")
         if isinstance(raw_props, (list, dict)):
             # Keep only evidence-oriented item state; do not synthesize an
             # item's location or ownership when the provider did not observe it.
             scene["props"] = raw_props if isinstance(raw_props, list) else [raw_props]
-        for key, value in (
-            ("goal", goal),
-            ("obstacle", obstacle),
-            ("result", result),
-            ("continuityIn", continuity_in),
-            ("continuityOut", continuity_out),
-            ("hook", hook),
-        ):
-            if value:
-                scene[key] = value
         scene_start = number(raw_scene.get("startSec"))
         scene_end = number(raw_scene.get("endSec"))
         if scene_start is not None:
@@ -980,23 +1059,35 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             scenes.append(scene)
     if not scenes:
         raise ArkError("方舟返回的剧本没有可用场景")
-    # Providers occasionally return scenes in upload/semantic order instead of
-    # video order. Timestamped scenes are the least ambiguous source of truth.
-    if len(scenes) > 1 and any(scene.get("startSec") is not None for scene in scenes):
-        scenes = [
-            scene
-            for _, scene in sorted(
-                enumerate(scenes),
-                key=lambda pair: (pair[1].get("startSec") is None, pair[1].get("startSec", 0), pair[0]),
-            )
-        ]
-        for scene_index, scene in enumerate(scenes, start=1):
-            scene["heading"] = re.sub(
-                r"^\s*\d+-\d+",
-                f"{episode_number}-{scene_index}",
-                str(scene.get("heading") or ""),
-                count=1,
-            )
+    # Sort batches by episode first.  Within an episode retain the provider's
+    # explicit scene number when present; otherwise use timestamps, then input
+    # order.  The old global timestamp sort could move episode 10 before episode
+    # 2 and then renumber every scene as ``1-N``.
+    def scene_sort_key(scene: dict[str, Any]) -> tuple[Any, ...]:
+        episode = int(scene.get("_episodeOrder") or episode_number)
+        scene_no = scene.get("_sceneOrder")
+        start = scene.get("startSec")
+        return (
+            episode,
+            0 if scene_no is not None else 1,
+            int(scene_no) if scene_no is not None else (start if start is not None else float("inf")),
+            start if start is not None else float("inf"),
+            int(scene.get("_inputOrder") or 0),
+        )
+
+    scenes = sorted(scenes, key=scene_sort_key)
+    scene_counts: dict[int, int] = {}
+    for scene in scenes:
+        scene_episode = int(scene.get("_episodeOrder") or episode_number)
+        scene_counts[scene_episode] = scene_counts.get(scene_episode, 0) + 1
+        scene["heading"] = re.sub(
+            r"^\s*\d+-\d+",
+            f"{scene_episode}-{scene_counts[scene_episode]}",
+            str(scene.get("heading") or ""),
+            count=1,
+        )
+        for key in ("_episodeOrder", "_sceneOrder", "_inputOrder"):
+            scene.pop(key, None)
     used_characters: list[str] = []
     for scene in scenes:
         for character in scene.get("characters", []):
@@ -1161,6 +1252,8 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     scene_task_warnings = 0
     continuity_warnings = 0
     action_structure_warnings = 0
+    compound_action_warnings = 0
+    editorial_warnings = 0
     reaction_warnings = 0
     summary_generated_warnings = 0
     prop_continuity_warnings = 0
@@ -1218,6 +1311,9 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 vo_classification_warnings += 1
                 add_issue("OS/VO混淆", "P1", f"第 {scene_index} 场第 {block_index} 条声音来源不明确。", scene_index, block_index)
             elif block_type == "action":
+                if is_editorial_artifact(text, "action"):
+                    editorial_warnings += 1
+                    add_issue("正文混入校对备注", "P0", f"第 {scene_index} 场第 {block_index} 个动作疑似是校对说明，不是视频画面。", scene_index, block_index)
                 has_explicit_subject = action_has_subject(text)
                 if known_characters and not has_explicit_subject:
                     action_subject_warnings += 1
@@ -1239,6 +1335,10 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 if _ABSTRACT_ACTION_RE.search(text) or not _ACTION_VERB_RE.search(text):
                     action_structure_warnings += 1
                     add_issue("动作概括", "P1", f"第 {scene_index} 场第 {block_index} 个动作可能停留在抽象结论，需补主体、动作、对象和结果。", scene_index, block_index)
+                mentioned = [name for name in known_characters if name and name in text]
+                if len(set(mentioned)) > 1 or len(text) > 180:
+                    compound_action_warnings += 1
+                    add_issue("连续动作未拆分", "P1", f"第 {scene_index} 场第 {block_index} 个动作包含多个主体或过长，建议按视频顺序拆成独立动作块。", scene_index, block_index)
 
                 if block.get("inferred") or block.get("evidence") is False:
                     evidence_warnings += 1
@@ -1276,9 +1376,32 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
                 add_issue("情绪变化丢失", "P1", f"第 {scene_index} 场第 {block_index + 1} 个块情绪强度跨级变化，但没有记录变化节点。", scene_index, block_index + 1)
             previous_intensity = intensity
 
-    # Appearance profiles and hook/continuity notes are internal metadata, not
-    # required sections of the 剧拆拆-style screenplay.
+    # Appearance profiles are internal metadata, but the first visible action
+    # must still carry the identifying details so the exported screenplay can be
+    # used without a separate character table.
     character_introduction_warnings = 0
+    for profile in (script.get("characterProfiles") or []):
+        if not isinstance(profile, dict):
+            continue
+        name = str(profile.get("name") or "").strip()
+        details = [str(profile.get(key) or "").strip() for key in ("appearance", "clothing")]
+        details = [detail for detail in details if detail and detail not in {"不明", "未知", "待核对"}]
+        if not name or not details:
+            continue
+        first_action = next(
+            (
+                block
+                for scene in scenes
+                for block in (scene.get("blocks") or [])
+                if isinstance(block, dict)
+                and block.get("type") == "action"
+                and name in str(block.get("text") or "")
+            ),
+            None,
+        )
+        if first_action is None or not any(detail in str(first_action.get("text") or "") for detail in details):
+            character_introduction_warnings += 1
+            add_issue("人物外形缺失", "P1", f"人物{name}首次动作没有带出可见发型/服装描述。")
 
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
@@ -1297,6 +1420,8 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         "actionSubjectWarnings": action_subject_warnings,
         "actionDetailWarnings": action_detail_warnings,
         "actionStructureWarnings": action_structure_warnings,
+        "compoundActionWarnings": compound_action_warnings,
+        "editorialWarnings": editorial_warnings,
         "dialogueIntegrityWarnings": dialogue_integrity_warnings,
         "dialogueMixedSpeakerWarnings": dialogue_mixed_speaker_warnings,
         "voClassificationWarnings": vo_classification_warnings,

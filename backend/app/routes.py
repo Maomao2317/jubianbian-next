@@ -137,6 +137,31 @@ def _queue_summary(connection: sqlite3.Connection, additional_minutes: int = 0) 
     }
 
 
+def _charge_user(
+    connection: sqlite3.Connection,
+    user_id: str,
+    minutes: int,
+) -> tuple[int, int] | None:
+    """Atomically reserve points and return the resulting balance.
+
+    The conditional UPDATE prevents two concurrent uploads from spending the
+    same balance.  Callers run this inside their task transaction so a later
+    insert/update failure rolls the charge back together with the task.
+    """
+    charge_points = max(0, int(minutes)) * POINTS_PER_MINUTE
+    row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row or charge_points > int(row["credits"] or 0):
+        return None
+    changed = connection.execute(
+        "UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?",
+        (charge_points, user_id, charge_points),
+    ).rowcount
+    if changed != 1:
+        return None
+    balance_after = int(connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()["credits"])
+    return charge_points, balance_after
+
+
 def _allocate_batch_billing_minutes(prepared: list[dict[str, Any]], total_minutes: int) -> None:
     """Distribute one batch bill across its task rows without rounding twice.
 
@@ -537,11 +562,36 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
 async def admin_retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
     admin = _require_admin(request)
     row = task_row(task_id)
+    user_id = str(row["user_id"]) if row else ""
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在")
     if not Path(row["stored_path"]).exists():
         raise HTTPException(status_code=409, detail="原始视频不存在")
-    update_task(task_id, status="queued", stage="queued", progress_percent=4, error=None, completed_at=None)
+    if row["status"] != "failed":
+        raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+    retry_minutes = max(1, int(row["estimated_minutes"] or 1))
+    with db() as connection:
+        charged = _charge_user(connection, user_id, retry_minutes)
+        if charged is None:
+            current = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
+            available = int(current["credits"] or 0) if current else 0
+            raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
+        connection.execute(
+            """
+            UPDATE tasks
+            SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
+                error = NULL, result_json = NULL, quality_json = NULL, provider = NULL,
+                model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
+                api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
+            WHERE id = ? AND user_id = ? AND status = 'failed'
+            """,
+            (retry_minutes, now_iso(), task_id, user_id),
+        )
+        _, balance = charged
+        connection.execute(
+            "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, -retry_minutes * POINTS_PER_MINUTE, balance, "consume", "admin task retry", now_iso()),
+        )
     record_task_event(task_id, "admin_retry", "管理员重新排队", status="queued", stage="queued", progress_percent=4)
     _admin_audit(admin["id"], "task_retry", "task", task_id)
     background.add_task(process_task, task_id)
@@ -647,11 +697,11 @@ async def create_task(
                 created,
             ),
         )
-        charge_points = estimated * POINTS_PER_MINUTE
-        if charge_points > int(user["credits"]):
+        charged = _charge_user(connection, user["id"], estimated)
+        if charged is None:
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {user['credits']} 积分")
-        balance_after = int(user["credits"]) - charge_points
+        charge_points, balance_after = charged
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance_after, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -charge_points, balance_after, "consume", "视频识别消耗", created))
     record_task_event(task_id, "created", "任务已创建", status="queued", stage="queued", progress_percent=4)
@@ -721,9 +771,16 @@ async def create_tasks_batch(
     batch_title = title.strip() or f"短剧批次 {created[:16].replace('T', ' ')}"
     prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item.get("input_index") or 0)))
     with db() as connection:
+        charged = _charge_user(connection, user["id"], total_minutes)
+        if charged is None:
+            for item in prepared:
+                item["target"].unlink(missing_ok=True)
+            current = connection.execute("SELECT credits FROM users WHERE id = ?", (user["id"],)).fetchone()
+            available = int(current["credits"] or 0) if current else 0
+            raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
         for index, item in enumerate(prepared, start=1):
             connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["billing_minutes"], created, created, batch_id, batch_title, index, len(prepared)))
-        balance = int(user["credits"]) - total_points
+        _, balance = charged
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))
     result = []
@@ -736,11 +793,35 @@ async def create_tasks_batch(
 async def retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
     user_id = current_user(request)["id"]
     row = task_row(task_id, user_id)
+    if row and row["status"] != "failed":
+        raise HTTPException(status_code=409, detail="只有失败任务可以重试")
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在")
     if not Path(row["stored_path"]).exists():
         raise HTTPException(status_code=409, detail="原始视频已不存在，无法重试")
-    update_task(task_id, status="queued", stage="queued", progress_percent=4, error=None, completed_at=None)
+    retry_minutes = max(1, int(row["estimated_minutes"] or 1))
+    with db() as connection:
+        charged = _charge_user(connection, user_id, retry_minutes)
+        if charged is None:
+            current = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
+            available = int(current["credits"] or 0) if current else 0
+            raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
+        connection.execute(
+            """
+            UPDATE tasks
+            SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
+                error = NULL, result_json = NULL, quality_json = NULL, provider = NULL,
+                model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
+                api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
+            WHERE id = ? AND user_id = ? AND status = 'failed'
+            """,
+            (retry_minutes, now_iso(), task_id, user_id),
+        )
+        _, balance = charged
+        connection.execute(
+            "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, -retry_minutes * POINTS_PER_MINUTE, balance, "consume", "failed task retry", now_iso()),
+        )
     record_task_event(task_id, "retry", "任务已重新排队", status="queued", stage="queued", progress_percent=4)
     logger.info("task_retry task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     background.add_task(process_task, task_id)

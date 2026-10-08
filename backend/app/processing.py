@@ -96,6 +96,28 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
     }
 
 
+def _refund_task_once(task_id: str, user_id: str, charged_minutes: int) -> bool:
+    """Refund a failed task exactly once, including the ledger entry."""
+    refund_points = max(0, int(charged_minutes)) * POINTS_PER_MINUTE
+    with db() as connection:
+        claimed = connection.execute(
+            "UPDATE tasks SET credits_used = 0, updated_at = ? WHERE id = ? AND credits_used > 0",
+            (now_iso(), task_id),
+        ).rowcount
+        if claimed != 1 or refund_points <= 0:
+            return True
+        user_row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user_row:
+            return True
+        balance_after = int(user_row["credits"] or 0) + refund_points
+        connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance_after, user_id))
+        connection.execute(
+            "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, refund_points, balance_after, "refund", "task recognition failed", now_iso()),
+        )
+    return True
+
+
 async def process_task(task_id: str) -> None:
     row = task_row(task_id)
     if not row:
@@ -158,13 +180,7 @@ async def process_task(task_id: str) -> None:
         # Return the pre-charged minutes exactly once when a recognition fails.
         charged = int(row["credits_used"] or 0)
         if row["user_id"] and charged > 0:
-            with db() as connection:
-                refund_points = charged * POINTS_PER_MINUTE
-                user_row = connection.execute("SELECT credits FROM users WHERE id = ?", (row["user_id"],)).fetchone()
-                balance_after = int(user_row["credits"] or 0) + refund_points if user_row else refund_points
-                connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance_after, row["user_id"]))
-                connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (row["user_id"], refund_points, balance_after, "refund", "识别失败退回", now_iso()))
-            update_task(task_id, credits_used=0)
+            _refund_task_once(task_id, row["user_id"], charged)
         update_task(
             task_id,
             status="failed",

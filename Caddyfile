@@ -4,7 +4,7 @@
 jubianbian.com, www.jubianbian.com {
     encode gzip
     request_body {
-        max_size 500MB
+        max_size 5GB
     }
     reverse_proxy app:8000
 }
@@ -12,7 +12,7 @@ jubianbian.com, www.jubianbian.com {
 test.jubianbian.com {
     encode gzip
     request_body {
-        max_size 500MB
+        max_size 5GB
     }
     reverse_proxy host.docker.internal:18000
 }
