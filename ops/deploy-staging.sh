@@ -37,6 +37,10 @@ if [[ "$target_commit" == "$deployed_commit" ]]; then
   exit 0
 fi
 
+# Surface the exact deployed Git revision through /api/health and keep the
+# container health check auditable without exposing any server-only secrets.
+export JBB_BUILD_VERSION="$target_commit"
+
 git_without_proxy -C "$REPO_DIR" reset --hard "$target_commit"
 
 # Keep the server-only fangzhou.env, .env files, uploads, SQLite data and logs.

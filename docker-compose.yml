@@ -9,6 +9,7 @@ services:
       - "8000"
     environment:
       JBB_ENVIRONMENT: ${JBB_ENVIRONMENT:-production}
+      JBB_BUILD_VERSION: ${JBB_BUILD_VERSION:-unknown}
       JBB_DATA_DIR: /app/data
       JBB_ADMIN_EMAILS: ${JBB_ADMIN_EMAILS:-}
       JBB_MAX_UPLOAD_MB: ${JBB_MAX_UPLOAD_MB:-500}

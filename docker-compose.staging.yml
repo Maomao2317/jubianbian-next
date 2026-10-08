@@ -9,6 +9,7 @@ services:
       - "8000"
     environment:
       JBB_ENVIRONMENT: staging
+      JBB_BUILD_VERSION: ${JBB_BUILD_VERSION:-unknown}
       JBB_DATA_DIR: /app/data
       JBB_MAX_UPLOAD_MB: ${JBB_MAX_UPLOAD_MB:-500}
       JBB_MAX_DURATION_MINUTES: ${JBB_MAX_DURATION_MINUTES:-6}
