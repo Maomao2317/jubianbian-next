@@ -1,6 +1,8 @@
 import unittest
+from pathlib import Path
 
-from app.script import clean_action_text, episode_from_text, normalize_script
+from app.evidence import collect_evidence, evidence_summary, transcript_from_evidence
+from app.script import clean_action_text, episode_from_text, normalize_script, quality_gate, script_quality, script_to_markdown
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
@@ -54,6 +56,80 @@ class ScriptQualityRegressionTests(unittest.TestCase):
 
     def test_micro_action_is_not_lost(self):
         self.assertIn("指尖发白", clean_action_text("指尖发白。"))
+
+    def test_uncertain_evidence_is_explicit_in_export(self):
+        script = normalize_script(
+            {
+                "characters": [],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [
+                        {"type": "dialogue", "speaker": "未知说话人", "text": "你来了", "uncertain": True},
+                        {"type": "screen_text", "text": "模糊字幕", "uncertain": True},
+                        {"type": "action", "text": "未知人物拿起文件", "uncertain": True, "object": "文件", "result": "文件离开桌面"},
+                    ],
+                }],
+            },
+            "测试",
+        )
+        markdown = script_to_markdown({"title": "测试", "result": script})
+        self.assertIn("【需核对·说话人】", markdown)
+        self.assertIn("【需核对·字幕】", markdown)
+        self.assertIn("【需核对·画面】", markdown)
+
+    def test_quality_gate_blocks_unresolved_p0_but_allows_clean_script(self):
+        uncertain = normalize_script(
+            {
+                "characters": [],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "dialogue", "speaker": "未知说话人", "text": "听不清", "uncertain": True}],
+                }],
+            },
+            "测试",
+        )
+        blocked = script_quality(uncertain, "test")
+        approved, issues = quality_gate(blocked)
+        self.assertFalse(approved)
+        self.assertTrue(any(item["severity"] == "P0" for item in issues))
+
+        clean = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "characters": ["甲"],
+                    "blocks": [{"type": "action", "text": "甲走向窗边", "object": "窗边", "result": "甲到达窗边"}],
+                }],
+            },
+            "测试",
+        )
+        approved_quality = script_quality(clean, "test")
+        self.assertIn(approved_quality["complexityBand"], {"simple", "standard", "complex"})
+        self.assertEqual(approved_quality["reviewRecommendation"], "lite_only")
+        approved, issues = quality_gate(approved_quality)
+        self.assertTrue(approved)
+        self.assertEqual(issues, [])
+
+    def test_evidence_layer_preserves_transcript_and_marks_missing_sources(self):
+        evidence = collect_evidence(
+            Path("missing.mp4"),
+            "demo",
+            12,
+            transcribe=lambda _: "原始对白，不得改写",
+        )
+        self.assertEqual(transcript_from_evidence(evidence), "原始对白，不得改写")
+        self.assertIn("audio", evidence["availableSources"])
+        self.assertIn("ocr: unavailable", evidence_summary({"sources": [{"kind": "ocr", "status": "unavailable", "reason": "缺少工具"}]}))
+
+    def test_evidence_layer_never_fakes_transcript_when_provider_is_empty(self):
+        evidence = collect_evidence(Path("missing.mp4"), "demo", 0, transcribe=lambda _: "")
+        self.assertEqual(transcript_from_evidence(evidence), "")
+        audio = next(source for source in evidence["sources"] if source["kind"] == "audio")
+        self.assertEqual(audio["status"], "unavailable")
 
 
 if __name__ == "__main__":

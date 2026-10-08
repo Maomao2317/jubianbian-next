@@ -31,6 +31,8 @@ def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
     else:
         task["result"] = None
     task["quality"] = json.loads(task.pop("quality_json")) if task.get("quality_json") else None
+    raw_evidence = task.pop("evidence_json", None)
+    task["evidence"] = json.loads(raw_evidence) if raw_evidence else None
     task["fileName"] = file_name
     task["episodeNumber"] = episode_from_filename(file_name)
     task["fileSize"] = task.pop("file_size")

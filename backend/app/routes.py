@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import mimetypes
 import re
@@ -405,7 +406,7 @@ def admin_overview(request: Request) -> dict[str, Any]:
     billing_cost = fetch_monthly_ark_cost(now_iso()[:7])
     return {
         "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
-        "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
+        "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "review": statuses.get("review", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
         "creditsUsed": int(usage["used"] or 0),
         "apiCostRmb": billing_cost if billing_cost is not None else round(float(usage["api_cost"] or 0), 2),
         "recentTasks": [dict(row) for row in recent],
@@ -542,21 +543,71 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
         key = item.get("batch_id") or item["id"]
         group = groups.get(key)
         if not group:
-            group = {**item, "id": item["id"], "title": item.get("batch_title") or item["title"], "file_name": "", "task_count": 0, "done_count": 0, "failed_count": 0, "credits_used": 0, "estimated_minutes": 0, "progress_percent": 0}
+            group = {**item, "id": item["id"], "title": item.get("batch_title") or item["title"], "file_name": "", "task_count": 0, "done_count": 0, "review_count": 0, "review_task_ids": [], "failed_count": 0, "credits_used": 0, "estimated_minutes": 0, "progress_percent": 0}
             groups[key] = group
         group["task_count"] += 1
-        group["done_count"] += int(item["status"] in {"done", "review"})
+        group["done_count"] += int(item["status"] == "done")
+        if item["status"] == "review":
+            group["review_count"] += 1
+            group["review_task_ids"].append(item["id"])
         group["failed_count"] += int(item["status"] == "failed")
         group["credits_used"] += int(item.get("credits_used") or 0)
         group["estimated_minutes"] += int(item.get("estimated_minutes") or 0)
         group["progress_percent"] = round((group["progress_percent"] * (group["task_count"] - 1) + int(item.get("progress_percent") or 0)) / group["task_count"])
         if item["status"] == "failed": group["status"] = "failed"
         elif group["status"] != "failed" and item["status"] == "running": group["status"] = "running"
-        elif group["status"] not in {"failed", "running"} and item["status"] == "queued": group["status"] = "queued"
+        elif group["status"] not in {"failed", "running"} and item["status"] == "review": group["status"] = "review"
+        elif group["status"] not in {"failed", "running", "review"} and item["status"] == "queued": group["status"] = "queued"
         group["file_name"] = f"{group['task_count']} 集"
     grouped = list(groups.values())
     grouped.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return {"items": grouped[offset:offset + limit], "total": len(grouped), "limit": limit, "offset": offset}
+
+
+def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:
+    """Return a full task to an administrator for quality review.
+
+    User task details intentionally remain owner-scoped.  This separate route
+    is the only way for an administrator to inspect another user's review
+    result before approving it.
+    """
+    _require_admin(request)
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task["events"] = task_events(task_id)
+    return task
+
+
+async def admin_approve_task(request: Request, task_id: str) -> dict[str, Any]:
+    """Approve a quality-gated screenplay for download."""
+    admin = _require_admin(request)
+    row = task_row(task_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if row["status"] != "review":
+        raise HTTPException(status_code=409, detail="只有管理员复核中的任务可以确认通过")
+    approved_at = now_iso()
+    quality = {}
+    if row["quality_json"]:
+        try:
+            quality = json.loads(row["quality_json"])
+        except (TypeError, ValueError):
+            quality = {}
+    if not isinstance(quality, dict):
+        quality = {}
+    quality["deliveryStatus"] = "approved"
+    quality["approvedAt"] = approved_at
+    with db() as connection:
+        changed = connection.execute(
+            "UPDATE tasks SET status = 'done', stage = 'done', progress_percent = 100, completed_at = COALESCE(completed_at, ?), error = NULL, quality_json = ? WHERE id = ? AND status = 'review'",
+            (approved_at, json.dumps(quality, ensure_ascii=False), task_id),
+        ).rowcount
+    if changed != 1:
+        raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
+    record_task_event(task_id, "admin_approved", "管理员复核通过，剧本可以下载", status="done", stage="done", progress_percent=100)
+    _admin_audit(admin["id"], "task_approve", "task", task_id)
+    return {"id": task_id, "status": "done", "message": "管理员复核通过"}
 
 
 async def admin_retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
@@ -580,7 +631,7 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
             """
             UPDATE tasks
             SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
-                error = NULL, result_json = NULL, quality_json = NULL, provider = NULL,
+                error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                 model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                 api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
             WHERE id = ? AND user_id = ? AND status = 'failed'
@@ -810,7 +861,7 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
             """
             UPDATE tasks
             SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
-                error = NULL, result_json = NULL, quality_json = NULL, provider = NULL,
+                error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                 model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                 api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
             WHERE id = ? AND user_id = ? AND status = 'failed'

@@ -400,6 +400,8 @@
     getAdminOverview() { return this.request(this.url("/admin/overview")); },
     getAdminUsers(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/users") + (search ? "?" + search : "")); },
     getAdminTasks(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/tasks") + (search ? "?" + search : "")); },
+    getAdminTask(id) { return this.request(this.url("/admin/tasks/:id", { id })); },
+    approveAdminTask(id) { return this.request(this.url("/admin/tasks/:id/approve", { id }), { method: "POST" }); },
     getAdminRecharges(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/recharges") + (search ? "?" + search : "")); },
     adjustAdminCredits(id, payload) { return this.request(this.url("/admin/users/:id/credits", { id }), { method: "POST", body: JSON.stringify(payload) }); },
     setAdminUserStatus(id, isActive) { return this.request(this.url("/admin/users/:id/status", { id }), { method: "PATCH", body: JSON.stringify({ isActive }) }); },

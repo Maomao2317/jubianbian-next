@@ -32,6 +32,7 @@ from .config import (
     OPENAI_TRANSCRIPTION_MODEL,
 )
 from .errors import ArkError
+from .evidence import evidence_summary
 from .logging_setup import logger
 from .media import multipart_body
 from .script import normalize_script
@@ -153,7 +154,8 @@ def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
         time.sleep(ARK_FILE_POLL_SECONDS)
 
 
-def ark_prompt(title: str, duration_sec: float) -> str:
+def ark_prompt(title: str, duration_sec: float, evidence: dict[str, Any] | None = None) -> str:
+    evidence_fragment = evidence_summary(evidence)
     return (
         "你是专业的中文短剧剧本整理助手。请完整核对视频中的声音、对白、字幕和画面动作，把它按原时间顺序整理成《剧拆拆》样式的镜头化剧本。"
         "每个可辨识的连续画面动作使用一个 action block，导出时以‘▲’开头；动作要写成可读的画面文字，不要写摄影术语、拍摄角度或剪辑调度。"
@@ -199,6 +201,7 @@ def ark_prompt(title: str, duration_sec: float) -> str:
         "19. 字幕与对白双重保真：人物开口内容写 dialogue；若画面同时确实显示对应字幕，另外保留一条同时间段的 screen_text，不得用其中一种替代另一种，也不得把多条字幕合并成剧情概括。"
         "20. 场次编号先按视频/文件中明确的集数分组，再在每集内从1递增（2-1、2-2、3-1、3-2）；批量视频不能把所有场次统一改成第一集或按全局序号覆盖集数。"
         f"视频标题：{title}；视频时长：{duration_sec:.1f} 秒。"
+        f"\n{evidence_fragment}"
     )
 
 
@@ -272,7 +275,7 @@ def ark_usage(payload: Any) -> dict[str, int | float | None]:
     return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens, "api_cost_rmb": round(cost or 0, 6)}
 
 
-def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str, Any], dict[str, int | None]]:
+def ark_recognize(path: Path, title: str, duration_sec: float, evidence: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, int | None]]:
     api_key = ark_account_key()
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s duration_sec=%.1f", path.name, duration_sec)
@@ -292,7 +295,7 @@ def ark_recognize(path: Path, title: str, duration_sec: float) -> tuple[dict[str
                 "role": "user",
                 "content": [
                     {"type": "input_video", "file_id": file_id},
-                    {"type": "input_text", "text": ark_prompt(title, duration_sec)},
+                    {"type": "input_text", "text": ark_prompt(title, duration_sec, evidence)},
                 ],
             }],
         }, ensure_ascii=False).encode("utf-8"),
@@ -357,7 +360,7 @@ def openai_transcribe(path: Path) -> str:
             audio_path.unlink(missing_ok=True)
 
 
-def openai_script(title: str, duration_sec: float, transcript: str) -> dict[str, Any] | None:
+def openai_script(title: str, duration_sec: float, transcript: str, evidence: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if not OPENAI_API_KEY or not transcript:
         return None
     prompt = (
@@ -375,7 +378,8 @@ def openai_script(title: str, duration_sec: float, transcript: str) -> dict[str,
         "18. 严禁把参考文档的校对备注或操作指令写进正文，例如‘这里不需要展示’、‘缺少某人台词’、‘少某人说话’、‘画面应该是2-2’、‘这一大段不需要’、‘待补充’；这些不是视频内容。"
         "19. 同一 action 只写一个主体的一次连续可见动作；拿起—递给—接过、开门—走出—关门以及多人先后动作必须按视频顺序拆开，每一步都保留对象和结果，不能压成剧情总结。"
         "20. 人物台词写 dialogue；画面确实存在的对白字幕同时单独保留 screen_text，字幕按出现顺序逐条记录，不能漏写、合并或改写。场次先按明确集数分组，再在每集内从1递增，输出2-1、2-2、3-1、3-2这类编号。"
-        f"视频标题：{title}\n视频时长：{duration_sec:.1f} 秒\n转写：{transcript}"
+        f"视频标题：{title}\n视频时长：{duration_sec:.1f} 秒\n转写：{transcript}\n"
+        f"{evidence_summary(evidence)}"
     )
     payload = json.dumps({
         "model": OPENAI_TEXT_MODEL,

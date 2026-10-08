@@ -18,6 +18,8 @@ from .middleware import RateLimitMiddleware, RequestLogMiddleware
 from .routes import (
     admin_audit_logs,
     admin_overview,
+    admin_approve_task,
+    admin_task_detail,
     admin_recharge_ledger,
     admin_retry_task,
     admin_tasks,
@@ -103,6 +105,8 @@ app.add_api_route("/api/admin/users/{user_id}/credits", admin_user_credits, meth
 app.add_api_route("/api/admin/recharges", admin_recharge_ledger, methods=["GET"])
 app.add_api_route("/api/admin/users/{user_id}/ledger", admin_user_ledger, methods=["GET"])
 app.add_api_route("/api/admin/tasks", admin_tasks, methods=["GET"])
+app.add_api_route("/api/admin/tasks/{task_id}", admin_task_detail, methods=["GET"])
+app.add_api_route("/api/admin/tasks/{task_id}/approve", admin_approve_task, methods=["POST"])
 app.add_api_route("/api/admin/tasks/{task_id}/retry", admin_retry_task, methods=["POST"])
 app.add_api_route("/api/admin/audit-logs", admin_audit_logs, methods=["GET"])
 app.add_api_route("/api/tasks", list_tasks, methods=["GET"])

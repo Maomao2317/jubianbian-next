@@ -19,81 +19,78 @@ from .config import (
     OPENAI_TEXT_MODEL,
 )
 from .auth_store import db, now_iso
+from .evidence import collect_evidence, evidence_json, transcript_from_evidence
 from .errors import ArkError
 from .logging_setup import logger, safe_error_text
-from .media import probe_duration, sample_script
+from .media import probe_duration
 from .providers import ark_fallback_message, ark_recognize, openai_script, openai_transcribe
 from .script import normalize_script, quality_gate, script_quality
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
 # Provider selection and fallback policy live here; HTTP routes only enqueue work.
-async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Run the configured provider, degrading gracefully when a provider is unavailable.
-
-    Ark is preferred for video understanding. A provider quota/rate-limit error
-    must not strand a test task in ``failed``: use OpenAI when configured and
-    finally the deterministic local result so the upload/export loop remains
-    testable while the provider account is repaired.
-    """
+async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Collect evidence, then use Ark with an explicit OpenAI fallback."""
     path = Path(row["stored_path"])
     duration = float(row["duration_sec"] or 0)
     probed = await asyncio.to_thread(probe_duration, path)
     if probed:
         duration = probed
         update_task(row["id"], duration_sec=duration)
+    evidence = await asyncio.to_thread(collect_evidence, path, row["title"], duration)
     ark_error: ArkError | None = None
-    if not ARK_API_KEYS:
-        raise ArkError("未配置方舟 API Key，任务无法进行真实视频识别")
-    try:
-        script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration)
-        script = normalize_script(script, row["title"])
-        quality = script_quality(script, "ark")
-        approved, blocking = quality_gate(quality)
-        quality["deliveryStatus"] = "approved" if approved else "review_required"
-        quality["blockingIssues"] = blocking
-        return script, quality, usage
-    except ArkError as exc:
-        ark_error = exc
-        logger.warning(
-            "provider_failed provider=ark task_id=%s status_code=%s error=%s",
-            row["id"],
-            exc.status_code,
-            safe_error_text(exc),
-        )
-        # Never expose a synthetic screenplay as a successful result. Let the
-        # durable worker retry this task, then mark it failed after the limit.
-        raise
-
-    transcript = ""
-    script = None
-    openai_error: Exception | None = None
-    if OPENAI_API_KEY:
+    if ARK_API_KEYS:
         try:
+            script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence)
+            script = normalize_script(script, row["title"])
+            quality = script_quality(script, "ark")
+            approved, blocking = quality_gate(quality)
+            quality["deliveryStatus"] = "approved" if approved else "review_required"
+            quality["blockingIssues"] = blocking
+            quality["evidenceStatus"] = evidence.get("status")
+            quality["evidenceSources"] = {source.get("kind"): source.get("status") for source in evidence.get("sources") or [] if isinstance(source, dict)}
+            quality["evidenceSummary"] = evidence.get("summary", "")
+            return script, quality, {**usage, "provider": "ark", "model": ARK_MODEL}, evidence
+        except ArkError as exc:
+            ark_error = exc
+            logger.warning(
+                "provider_failed provider=ark task_id=%s status_code=%s error=%s",
+                row["id"],
+                exc.status_code,
+                safe_error_text(exc),
+            )
+            if not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
+                raise
+    elif not OPENAI_API_KEY:
+        raise ArkError("未配置方舟或 OpenAI API Key，任务无法进行真实视频识别")
+
+    transcript = transcript_from_evidence(evidence)
+    try:
+        if not transcript:
             transcript = await asyncio.to_thread(openai_transcribe, path)
-            script = await asyncio.to_thread(openai_script, row["title"], duration, transcript)
-        except Exception as exc:
-            openai_error = exc
-            logger.warning("provider_failed provider=openai task_id=%s error=%s", row["id"], safe_error_text(exc))
-            # A provider outage should not break the local task/export loop.
-            transcript = ""
-            script = None
-    script = script or sample_script(row["title"], duration, transcript)
-    provider = "openai" if script and OPENAI_API_KEY and transcript else "local-fallback"
+        script = await asyncio.to_thread(openai_script, row["title"], duration, transcript, evidence)
+    except Exception as exc:
+        logger.warning("provider_failed provider=openai task_id=%s error=%s", row["id"], safe_error_text(exc))
+        raise ArkError("OpenAI 备用识别失败，未生成未经证实的剧本") from exc
+    if not script:
+        raise ArkError("OpenAI 未返回可用剧本，未生成未经证实的剧本")
+    provider = "openai"
     script = normalize_script(script, row["title"])
     quality = script_quality(script, provider)
     approved, blocking = quality_gate(quality)
     quality["deliveryStatus"] = "approved" if approved else "review_required"
     quality["blockingIssues"] = blocking
+    quality["evidenceStatus"] = evidence.get("status")
+    quality["evidenceSources"] = {source.get("kind"): source.get("status") for source in evidence.get("sources") or [] if isinstance(source, dict)}
+    quality["evidenceSummary"] = evidence.get("summary", "")
     if ark_error:
         quality["warning"] = ark_fallback_message(ark_error)
-        if openai_error and provider == "local-fallback":
-            quality["warning"] += " OpenAI 备用服务也不可用，已使用本地兜底结果。"
+        quality["warning"] += " 本次结果使用了 OpenAI 备用识别链路。"
     usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None, "api_cost_rmb": 0}
     return script, quality, {
         **usage,
         "provider": provider,
-        "model": OPENAI_TEXT_MODEL if provider == "openai" else None,
-    }
+        "model": OPENAI_TEXT_MODEL,
+    }, evidence
 
 
 def _refund_task_once(task_id: str, user_id: str, charged_minutes: int) -> bool:
@@ -128,16 +125,21 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="probing", progress_percent=12, message="正在读取视频信息")
         mark_task_stage(task_id, status="running", stage="transcribing", progress_percent=34, message="正在整理语音和对白")
         mark_task_stage(task_id, status="running", stage="vision", progress_percent=62, message="正在识别画面与动作")
-        script, quality, usage = await run_recognizer(task_row(task_id))
+        script, quality, usage, evidence = await run_recognizer(task_row(task_id))
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
-        # Keep quality findings for internal inspection, but expose every
-        # generated script as completed to the user.
-        quality["deliveryStatus"] = "approved"
-        final_status = "done"
-        final_stage = "done"
-        final_message = "识别完成"
+        # A successful provider response is not automatically a deliverable
+        # screenplay.  P0/P1 findings mean that the system could not prove
+        # the result is faithful to the source video, so keep the generated
+        # script available for inspection but put the task behind the admin
+        # review gate.  Only a clean quality gate is downloadable by users.
+        approved, blocking = quality_gate(quality)
+        quality["deliveryStatus"] = "approved" if approved else "review_required"
+        quality["blockingIssues"] = blocking
+        final_status = "done" if approved else "review"
+        final_stage = "done" if approved else "review"
+        final_message = "识别完成" if approved else "识别完成，等待管理员复核"
         update_task(
             task_id,
             status=final_status,
@@ -145,6 +147,7 @@ async def process_task(task_id: str) -> None:
             progress_percent=100,
             result_json=json.dumps(script, ensure_ascii=False),
             quality_json=json.dumps(quality, ensure_ascii=False),
+            evidence_json=evidence_json(evidence),
             provider=usage.get("provider", "ark" if ARK_API_KEYS else "local-fallback"),
             model=usage.get("model", ARK_MODEL if ARK_API_KEYS else None),
             input_tokens=usage.get("input_tokens"),
@@ -155,7 +158,7 @@ async def process_task(task_id: str) -> None:
         )
         record_task_event(
             task_id,
-            "completed",
+            "completed" if approved else "review_required",
             final_message,
             status=final_status,
             stage=final_stage,

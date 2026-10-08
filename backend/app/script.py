@@ -639,6 +639,14 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         }
         for output, keys in aliases.items():
             for key in keys:
+                # ``type`` is a legacy alias for emotionType, but provider
+                # blocks also use it for their structural kind (action,
+                # dialogue, ...).  Never turn that structural value into an
+                # unsupported emotion claim.
+                if key == "type" and str(value.get("type") or "").strip().lower() in {
+                    "action", "dialogue", "vo", "sound", "screen_text", "subtitle", "caption", "transition", "emotion"
+                }:
+                    continue
                 text = normalize_text(value.get(key))
                 if text:
                     fields[output] = text
@@ -986,6 +994,17 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     block["object"] = action_object
                 if action_result:
                     block["result"] = action_result
+                block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
+                block["uncertain"] = truthy(raw_block.get("uncertain")) or block["confidence"] == "low"
+                block["inferred"] = truthy(raw_block.get("inferred"))
+                # Missing object/result fields are exactly the kind of visual
+                # gap the quality gate is meant to surface.  Keep the action
+                # text, but make the uncertainty visible in the screenplay.
+                if not action_object or not action_result:
+                    block["uncertain"] = True
+            elif block_type in {"screen_text", "transition"}:
+                block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
+                block["uncertain"] = truthy(raw_block.get("uncertain")) or block["confidence"] == "low"
             if block_type == "dialogue" and "mixed_speakers" in block.get("dialogueIssues", []):
                 blocks.extend(split_explicitly_mixed_dialogue(block))
             else:
@@ -1016,6 +1035,14 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         ]
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
         add_character_visual_descriptions(blocks, character_profiles)
+        known_for_scene = [name for name in dict.fromkeys(fallback_characters) if name]
+        if known_for_scene:
+            for block in blocks:
+                if block.get("type") != "action":
+                    continue
+                text_value = str(block.get("text") or "")
+                if not any(name in text_value for name in known_for_scene) and not text_value.startswith("未知人物"):
+                    block["uncertain"] = True
         block_text = " ".join(str(block.get("text") or "") for block in blocks)
         for name in candidate_characters:
             if name and name in block_text and name not in scene_characters:
@@ -1139,6 +1166,30 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         text = text.strip("（）() ")
         return f"（{text}）" if text else ""
 
+    def uncertainty(block: dict[str, Any], block_type: str) -> str:
+        """Render uncertainty at the exact content boundary in the export.
+
+        A generic ``待核对`` badge is easy to miss and does not tell the
+        reviewer what must be checked.  Keep the recovered text intact, then
+        label only the evidence dimension that is uncertain.
+        """
+        if block_type == "dialogue":
+            if str(block.get("speaker") or "").strip() in {"", "未知说话人", "未知男声", "未知女声"}:
+                return "【需核对·说话人】"
+        if block_type == "vo" and str(block.get("voKind") or "").strip() in {"", "unknown"}:
+            return "【需核对·声音】"
+        if not (block.get("uncertain") or block.get("inferred") or block.get("evidence") is False):
+            return ""
+        if block_type == "dialogue":
+            return "【需核对·对白】"
+        if block_type == "screen_text":
+            return "【需核对·字幕】"
+        if block_type == "vo":
+            return "【需核对·声音】"
+        if block_type == "transition":
+            return "【需核对·时间】"
+        return "【需核对·画面】"
+
     for scene in script.get("scenes", []):
         lines.extend([scene.get("heading", "未标注场景"), ""])
         cast = [str(name).strip() for name in (scene.get("characters") or []) if str(name).strip()]
@@ -1148,11 +1199,11 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         for block in scene.get("blocks", []):
             block_type = block.get("type")
             if block_type == "dialogue":
-                warning = "【需核对】" if block.get("uncertain") else ""
+                warning = uncertainty(block, "dialogue")
                 acting = parenthetical(block.get("performance"))
                 lines.append(f"{block.get('speaker', '人物')}{warning}{acting}：{quote_dialogue(block.get('text', ''))}")
             elif block_type in {"vo", "os"}:
-                inferred = "（推断）" if block.get("inferred") else ""
+                inferred = uncertainty(block, "vo")
                 speaker = block.get("speaker") or "旁白"
                 vo_kind = block.get("voKind")
                 if vo_kind == "os" or block.get("isInnerMonologue") or block_type == "os":
@@ -1162,11 +1213,11 @@ def script_to_markdown(task: dict[str, Any]) -> str:
                 lines.append(f"{label}{inferred}：{quote_dialogue(block.get('text', ''))}")
             elif block_type == "sound":
                 category = "环境音" if block.get("category") == "ambience" else "音效"
-                lines.append(f"【{category}：{block.get('text', '')}】")
+                lines.append(f"{uncertainty(block, 'sound')}【{category}：{block.get('text', '')}】")
             elif block_type == "emotion":
                 lines.append(f"【情绪：{block.get('text', '')}】")
             elif block_type == "screen_text":
-                lines.append(f"【字幕：{block.get('text', '')}】")
+                lines.append(f"{uncertainty(block, 'screen_text')}【字幕：{block.get('text', '')}】")
             elif block_type == "transition":
                 transition_type = {
                     "flashback": "闪回",
@@ -1174,9 +1225,10 @@ def script_to_markdown(task: dict[str, Any]) -> str:
                     "flash": "闪白",
                 }.get(str(block.get("transitionType") or "").strip().lower(), block.get("transitionType") or "转场")
                 text = str(block.get("text") or "").strip()
-                lines.append(f"【{transition_type}：{text}】" if text else f"【{transition_type}】")
+                marker = uncertainty(block, "transition")
+                lines.append(f"{marker}【{transition_type}：{text}】" if text else f"{marker}【{transition_type}】")
             else:
-                lines.append(f"▲ {block.get('text', '')}")
+                lines.append(f"{uncertainty(block, 'action')}▲ {block.get('text', '')}")
         lines.append("")
     return "\n".join(lines)
 
@@ -1405,6 +1457,38 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
 
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
+    unique_speakers = {
+        str(block.get("speaker") or "").strip()
+        for block in dialogue
+        if str(block.get("speaker") or "").strip() not in {"", "未知说话人", "旁白"}
+    }
+    screen_text_count = sum(
+        1
+        for scene in scenes
+        for block in (scene.get("blocks") or [])
+        if isinstance(block, dict) and block.get("type") == "screen_text"
+    )
+    transition_count = sum(
+        1
+        for scene in scenes
+        for block in (scene.get("blocks") or [])
+        if isinstance(block, dict) and block.get("type") == "transition"
+    )
+    # This is a routing hint, not a quality score.  It gives the later
+    # Lite/Turbo router a deterministic signal without pretending that model
+    # confidence is the same thing as source-video truth.
+    complexity_score = min(
+        100,
+        len(scenes) * 4
+        + len(action_blocks) * 1
+        + len(dialogue) * 2
+        + len(unique_speakers) * 4
+        + screen_text_count * 3
+        + transition_count * 5
+        + uncertain * 8,
+    )
+    complexity_band = "complex" if complexity_score >= 60 else "standard" if complexity_score >= 25 else "simple"
+    review_recommendation = "turbo_review" if complexity_band == "complex" or uncertain else "lite_only"
     issue_tags = list(dict.fromkeys(str(item["tag"]) for item in issues))
     severity_counts = {
         level: sum(1 for item in issues if item.get("severity") == level)
@@ -1417,6 +1501,9 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
         "sceneCount": len(scenes),
         "dialogueCount": len(dialogue),
         "actionCount": len(action_blocks),
+        "complexityScore": complexity_score,
+        "complexityBand": complexity_band,
+        "reviewRecommendation": review_recommendation,
         "actionSubjectWarnings": action_subject_warnings,
         "actionDetailWarnings": action_detail_warnings,
         "actionStructureWarnings": action_structure_warnings,

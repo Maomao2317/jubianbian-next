@@ -244,6 +244,13 @@ a { color: inherit; text-decoration: none; }
 .admin-status.on { color: var(--green); background: var(--green-soft); }
 .admin-status.off { color: var(--red); background: var(--red-soft); }
 .admin-status.wait { color: var(--orange); background: var(--orange-soft); }
+.admin-review-modal { width: min(900px, calc(100vw - 32px)); max-height: min(88vh, 900px); overflow: auto; }
+.admin-review-meta { display: flex; gap: 12px; align-items: baseline; margin: 12px 0; }
+.admin-review-meta span { color: var(--muted); font-size: 12px; }
+.admin-review-issues { padding: 12px 14px; border: 1px solid #f4ddb0; border-radius: 10px; background: #fffaf0; }
+.admin-review-issues p { margin: 6px 0; font-size: 13px; line-height: 1.5; }
+.admin-review-issues b { margin-right: 8px; color: #9a6700; }
+.admin-review-script { margin-top: 16px; }
 .admin-action { margin-right: 8px; padding: 5px 9px; border: 1px solid var(--line-strong); border-radius: 5px; color: #5a4a18; background: #fffdf4; font-size: 11px; }
 .admin-action:hover { border-color: var(--gold-strong); background: var(--gold-pale); }
 .admin-action:disabled { cursor: not-allowed; opacity: .45; }
@@ -555,6 +562,7 @@ a { color: inherit; text-decoration: none; }
 .badge.queued { color: #667085; background: #eff1f4; }
 .badge.running { color: var(--orange); background: var(--orange-soft); }
 .badge.running .badge-dot { animation: pulse 1.2s ease-in-out infinite; }
+.badge.review { color: #9a6700; background: #fff4cc; }
 .badge.failed { color: var(--red); background: var(--red-soft); }
 
 @keyframes pulse { 50% { opacity: 0.3; } }
@@ -724,7 +732,7 @@ a { color: inherit; text-decoration: none; }
 .action-line em { margin-right: 8px; color: #7c5a00; font-size: 12px; font-style: normal; }
 .dialogue strong { color: #111827; }
 .dialogue em { margin-left: 6px; padding: 2px 6px; border-radius: 4px; color: var(--blue); background: var(--blue-soft); font-size: 11px; font-style: normal; }
-.dialogue .uncertain { margin-left: 6px; color: #b45309; font-size: 11px; font-style: normal; }
+.uncertain { margin-left: 6px; color: #b45309; font-size: 11px; font-style: normal; }
 .os-line { color: #5e4a8a; }
 .os-line strong { margin-right: 5px; color: #5e4a8a; }
 .os-line em { margin-left: 6px; color: #7c67a7; font-size: 11px; font-style: normal; }
@@ -882,6 +890,7 @@ a { color: inherit; text-decoration: none; }
 .batch-status.done { color: #087b61; background: #e4f7f0; }
 .batch-status.pending { color: #8a6416; background: #fff3d4; }
 .batch-status.failed { color: #a52c45; background: #fde9ee; }
+.batch-status.review { color: #9a6700; background: #fff4cc; }
 .batch-children { margin-left: 24px; padding-left: 12px; border-left: 2px solid #f2d98b; }
 .batch-children .task-list { padding-left: 0; }
 .task-row { min-height: 70px; gap: 10px; }
