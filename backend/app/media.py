@@ -6,8 +6,40 @@ import re
 import shutil
 import subprocess
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+
+try:
+    DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
+except Exception:  # Windows test environments may not bundle tzdata.
+    DISPLAY_TIMEZONE = timezone(timedelta(hours=8))
+_AUTO_BATCH_TITLE_RE = re.compile(r"^短剧批次 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+
+def local_time_label(value: Any) -> str:
+    """Render stored UTC timestamps in the product's display timezone."""
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value or "").strip().replace("Z", "+00:00")
+        try:
+            moment = datetime.fromisoformat(text) if text else datetime.now(timezone.utc)
+        except ValueError:
+            moment = datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+
+
+def default_batch_title(created_at: Any) -> str:
+    return f"短剧批次 {local_time_label(created_at)}"
+
+
+def is_default_batch_title(value: Any) -> bool:
+    return bool(_AUTO_BATCH_TITLE_RE.fullmatch(str(value or "").strip()))
 
 def safe_filename(name: str) -> str:
     name = Path(name or "video.mp4").name

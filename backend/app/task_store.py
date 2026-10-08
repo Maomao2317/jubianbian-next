@@ -10,7 +10,7 @@ from .auth_store import db, now_iso
 from .config import REQUEST_ID
 from .errors import ArkError
 from .logging_setup import logger
-from .media import episode_from_filename, title_with_episode
+from .media import default_batch_title, episode_from_filename, is_default_batch_title, title_with_episode
 from .script import normalize_script
 
 # Read adapters keep the API shape independent from SQLite column names.
@@ -60,7 +60,13 @@ def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
     )
     task["apiCostRmb"] = round(float(task.pop("api_cost_rmb", 0) or 0), 6)
     task["batchId"] = task.pop("batch_id", None)
-    task["batchTitle"] = task.pop("batch_title", None)
+    batch_title = task.pop("batch_title", None)
+    # Older rows stored the UTC timestamp directly in their automatic batch
+    # title. Re-render only those generated labels; user-supplied names stay
+    # untouched.
+    if is_default_batch_title(batch_title) and task.get("created_at"):
+        batch_title = default_batch_title(task["created_at"])
+    task["batchTitle"] = batch_title
     task["batchIndex"] = task.pop("batch_index", None)
     task["batchTotal"] = task.pop("batch_total", None)
     task.pop("stored_path", None)

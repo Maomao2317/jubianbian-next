@@ -48,6 +48,21 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function localBatchTime(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "未知时间";
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(date).reduce((result, item) => ({ ...result, [item.type]: item.value }), {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+  }
+
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
   }
@@ -272,7 +287,7 @@
       const tasks = selected.map((item, index) => ({
         id: `${batchId}-${index + 1}`,
         batchId,
-        batchTitle: title || `短剧批次 ${createdAt.slice(0, 16).replace("T", " ")}`,
+        batchTitle: title || `短剧批次 ${localBatchTime(createdAt)}`,
         batchIndex: index + 1,
         batchTotal: selected.length,
         title: titleWithEpisode(title || item.name.replace(/\.[^.]+$/, ""), item.name),

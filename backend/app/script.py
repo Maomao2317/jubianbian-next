@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import re
 import unicodedata
 from typing import Any
@@ -114,6 +115,41 @@ def normalize_dialogue_text(text: Any) -> str:
     punctuation cleanup used by exports and restores a terminal mark.
     """
     return normalize_text(text, sentence=True)
+
+
+def evidence_comparison_text(text: Any) -> str:
+    """Reduce recovered speech/OCR to comparable characters only.
+
+    Punctuation and whitespace are intentionally ignored because the screenplay
+    is allowed to restore Chinese punctuation.  Words, names, digits and their
+    order remain untouched, so this cannot make a paraphrase look verbatim.
+    """
+    value = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", value)
+
+
+def ordered_script_text(script: dict[str, Any], block_types: set[str]) -> str:
+    return "".join(
+        evidence_comparison_text(block.get("text"))
+        for scene in (script.get("scenes") or [])
+        if isinstance(scene, dict)
+        for block in (scene.get("blocks") or [])
+        if isinstance(block, dict) and block.get("type") in block_types
+    )
+
+
+def matching_character_counts(reference: str, candidate: str) -> tuple[int, int, int]:
+    """Return ordered matching characters and both input sizes."""
+    if not reference or not candidate:
+        return 0, len(reference), len(candidate)
+    if reference == candidate:
+        return len(reference), len(reference), len(candidate)
+    # Keep difflib's popularity heuristic enabled.  Disabling it makes highly
+    # repetitive ASR output quadratic (a long ``啊啊啊`` clip can otherwise
+    # stall the worker), while normal Chinese speech still gets ordered matches.
+    matcher = SequenceMatcher(None, reference, candidate)
+    matched = sum(item.size for item in matcher.get_matching_blocks())
+    return matched, len(reference), len(candidate)
 
 
 def episode_from_text(value: Any) -> int | None:
@@ -900,10 +936,15 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 text = clean_action_text(canonicalize_visible_names(text))
             elif block_type == "dialogue":
                 # Never merge or paraphrase dialogue while normalizing it.
-                # `sourceText`/`verbatimText` is accepted for providers that
-                # return both the raw transcript and display text.
-                source_text = raw_block.get("sourceText") or raw_block.get("verbatimText")
-                dialogue_source = source_text if source_text else text
+                # When a provider returns both verbatim and polished fields,
+                # the verbatim one is authoritative.  The display field may
+                # only restore punctuation; it must never replace the words.
+                source_text = (
+                    raw_block.get("sourceText")
+                    or raw_block.get("verbatimText")
+                    or raw_block.get("rawText")
+                )
+                dialogue_source = source_text or raw_block.get("finalText") or text
                 text = normalize_dialogue_text(dialogue_source)
             elif block_type == "vo":
                 text = normalize_dialogue_text(text)
@@ -933,7 +974,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block_type == "dialogue":
                 speaker = str(raw_block.get("speaker") or "未知说话人").strip()
                 block["speaker"] = alias_map.get(speaker.casefold(), speaker)
-                block["rawText"] = str(raw_block.get("rawText") or dialogue_source).strip()
+                block["rawText"] = str(source_text or dialogue_source).strip()
                 block["finalText"] = text
                 if source_text:
                     block["sourceText"] = str(dialogue_source).strip()
@@ -1233,7 +1274,11 @@ def script_to_markdown(task: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
+def script_quality(
+    script: dict[str, Any],
+    provider: str,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Expose deterministic P0/P1 acceptance signals with reviewable labels."""
     scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
     dialogue = [
@@ -1455,6 +1500,72 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
             character_introduction_warnings += 1
             add_issue("人物外形缺失", "P1", f"人物{name}首次动作没有带出可见发型/服装描述。")
 
+    # Compare the final screenplay against independent evidence after all
+    # normalization. This turns dialogue coverage into a measurable signal
+    # instead of trusting the same model that produced the screenplay.
+    transcript_reference = ""
+    ocr_reference = ""
+    if isinstance(evidence, dict):
+        for source in evidence.get("sources") or []:
+            if not isinstance(source, dict) or source.get("status") != "available":
+                continue
+            # OCR samples the same subtitle over several adjacent frames. Use
+            # each distinct normalized item once so repeated sampling is not
+            # mistaken for missing screenplay text.
+            source_items: list[str] = []
+            seen_items: set[str] = set()
+            for item in source.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_text = evidence_comparison_text(item.get("text"))
+                if item_text and item_text not in seen_items:
+                    seen_items.add(item_text)
+                    source_items.append(item_text)
+            source_text = "".join(source_items)
+            if source.get("kind") == "audio":
+                transcript_reference += source_text
+            elif source.get("kind") == "ocr":
+                ocr_reference += source_text
+
+    spoken_candidate = ordered_script_text(script, {"dialogue", "vo"})
+    transcript_matched, transcript_size, spoken_size = matching_character_counts(
+        transcript_reference,
+        spoken_candidate,
+    )
+    transcript_coverage: int | None = None
+    dialogue_evidence_precision: int | None = None
+    if transcript_size >= 12:
+        transcript_coverage = round(100 * transcript_matched / transcript_size)
+        dialogue_evidence_precision = round(100 * transcript_matched / spoken_size) if spoken_size else 0
+        weakest_alignment = min(transcript_coverage, dialogue_evidence_precision)
+        if weakest_alignment < 55:
+            evidence_warnings += 1
+            add_issue(
+                "音频对白不一致",
+                "P0",
+                f"成稿台词与独立音频转写严重不一致（转写覆盖 {transcript_coverage}%、成稿吻合 {dialogue_evidence_precision}%），可能存在漏台词、改写或补写。",
+            )
+        elif weakest_alignment < 72:
+            evidence_warnings += 1
+            add_issue(
+                "音频对白需核对",
+                "P1",
+                f"成稿台词与独立音频转写部分不一致（转写覆盖 {transcript_coverage}%、成稿吻合 {dialogue_evidence_precision}%），需按原视频复核。",
+            )
+
+    screen_text_candidate = ordered_script_text(script, {"screen_text"})
+    ocr_matched, ocr_size, _ = matching_character_counts(ocr_reference, screen_text_candidate)
+    ocr_coverage: int | None = None
+    if ocr_size >= 4:
+        ocr_coverage = round(100 * ocr_matched / ocr_size)
+        if ocr_coverage < 45:
+            evidence_warnings += 1
+            add_issue(
+                "画面文字需核对",
+                "P1",
+                f"成稿仅覆盖独立 OCR 证据的 {ocr_coverage}%，可能漏掉字幕、姓名条或系统文字。",
+            )
+
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
     unique_speakers = {
@@ -1496,6 +1607,9 @@ def script_quality(script: dict[str, Any], provider: str) -> dict[str, Any]:
     }
     return {
         "dialogueCoverage": coverage,
+        "transcriptCoverage": transcript_coverage,
+        "dialogueEvidencePrecision": dialogue_evidence_precision,
+        "ocrCoverage": ocr_coverage,
         "speakerConfidence": max(0, confidence),
         "warnings": len(issues),
         "sceneCount": len(scenes),

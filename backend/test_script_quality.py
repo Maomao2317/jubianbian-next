@@ -2,8 +2,10 @@ import unittest
 from pathlib import Path
 
 from app.evidence import collect_evidence, evidence_summary, transcript_from_evidence
-from app.processing import select_ark_route
-from app.script import clean_action_text, episode_from_text, normalize_script, quality_gate, script_quality, script_to_markdown
+from app.media import default_batch_title
+from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
+from app.errors import ArkError
+from app.script import clean_action_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, script_quality, script_to_markdown
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
@@ -11,6 +13,15 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(episode_from_text("2.mp4"), 2)
         self.assertEqual(episode_from_text("episode_02_final.mp4"), 2)
         self.assertIsNone(episode_from_text("video_2026-10.mp4"))
+
+    def test_auto_batch_title_uses_shanghai_upload_time(self):
+        self.assertEqual(default_batch_title("2026-10-08T06:06:00+00:00"), "短剧批次 2026-10-08 14:06")
+
+    def test_lite_model_failure_is_non_retryable_and_detected(self):
+        error = ArkError("方舟接口请求失败（HTTP 400）：ModelNotOpen model not active", status_code=400, provider_code="ModelNotOpen")
+        self.assertTrue(_is_lite_model_unavailable(error))
+        self.assertTrue(_is_non_retryable_provider_error(error))
+        self.assertTrue(_is_non_retryable_provider_error(TimeoutError("The read operation timed out")))
 
     def test_batch_scene_order_and_editorial_notes(self):
         script = {
@@ -57,6 +68,95 @@ class ScriptQualityRegressionTests(unittest.TestCase):
 
     def test_micro_action_is_not_lost(self):
         self.assertIn("指尖发白", clean_action_text("指尖发白。"))
+
+    def test_evidence_matching_handles_repetitive_transcript_quickly(self):
+        matched, reference_size, candidate_size = matching_character_counts("啊" * 12000, "啊" * 12000)
+        self.assertEqual((matched, reference_size, candidate_size), (12000, 12000, 12000))
+
+    def test_verbatim_dialogue_wins_over_polished_text(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{
+                        "type": "dialogue",
+                        "speaker": "甲",
+                        "rawText": "我没有拿你的东西",
+                        "finalText": "我没碰过你的东西",
+                        "text": "我没碰过你的东西",
+                    }],
+                }],
+            },
+            "测试",
+        )
+        line = script["scenes"][0]["blocks"][0]
+        self.assertEqual(line["text"], "我没有拿你的东西。")
+        self.assertEqual(line["rawText"], "我没有拿你的东西")
+
+    def test_independent_audio_evidence_blocks_rewritten_dialogue(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "dialogue", "speaker": "甲", "text": "我今天一直在公司开会，没有去过你家"}],
+                }],
+            },
+            "测试",
+        )
+        matching_evidence = {
+            "sources": [{
+                "kind": "audio",
+                "status": "available",
+                "items": [{"type": "transcript", "text": "我今天一直在公司开会，没有去过你家。"}],
+            }],
+        }
+        clean_quality = script_quality(script, "test", matching_evidence)
+        self.assertEqual(clean_quality["transcriptCoverage"], 100)
+        self.assertEqual(clean_quality["dialogueEvidencePrecision"], 100)
+        self.assertTrue(quality_gate(clean_quality)[0])
+
+        conflicting_evidence = {
+            "sources": [{
+                "kind": "audio",
+                "status": "available",
+                "items": [{"type": "transcript", "text": "你昨晚明明来到我家，还从桌上拿走了那份文件。"}],
+            }],
+        }
+        conflicting_quality = script_quality(script, "test", conflicting_evidence)
+        approved, issues = quality_gate(conflicting_quality)
+        self.assertFalse(approved)
+        self.assertTrue(any(item["tag"] == "音频对白不一致" for item in issues))
+
+    def test_repeated_ocr_frames_do_not_count_as_missing_subtitles(self):
+        script = normalize_script(
+            {
+                "characters": [],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "screen_text", "text": "你今天来了。", "startSec": 1, "endSec": 3}],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [{
+                "kind": "ocr",
+                "status": "available",
+                "items": [
+                    {"type": "screen_text", "text": "你今天来了", "startSec": 1},
+                    {"type": "screen_text", "text": "你今天来了", "startSec": 2},
+                    {"type": "screen_text", "text": "你今天来了", "startSec": 3},
+                ],
+            }],
+        }
+        quality = script_quality(script, "test", evidence)
+        self.assertEqual(quality["ocrCoverage"], 100)
+        self.assertTrue(quality_gate(quality)[0])
 
     def test_uncertain_evidence_is_explicit_in_export(self):
         script = normalize_script(

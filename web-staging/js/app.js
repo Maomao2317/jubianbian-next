@@ -81,8 +81,17 @@
 
   function formatDate(iso) {
     const date = new Date(iso);
-    const pad = (value) => String(value).padStart(2, "0");
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    if (Number.isNaN(date.getTime())) return "时间未知";
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(date).reduce((result, item) => ({ ...result, [item.type]: item.value }), {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
   }
 
   function timeAgo(iso) {
@@ -512,7 +521,10 @@
         </div>
         <div class="aside-section quality-section">
           <span class="aside-label">识别概况</span>
-          <div class="quality-row"><span>台词覆盖</span><strong>${metric(quality.dialogueCoverage)}%</strong></div>
+          <div class="quality-row"><span>台词标点完整</span><strong>${metric(quality.dialogueCoverage)}%</strong></div>
+          <div class="quality-row"><span>音频转写覆盖</span><strong>${quality.transcriptCoverage === null || quality.transcriptCoverage === undefined ? "未校验" : `${metric(quality.transcriptCoverage)}%`}</strong></div>
+          <div class="quality-row"><span>成稿台词吻合</span><strong>${quality.dialogueEvidencePrecision === null || quality.dialogueEvidencePrecision === undefined ? "未校验" : `${metric(quality.dialogueEvidencePrecision)}%`}</strong></div>
+          <div class="quality-row"><span>画面文字覆盖</span><strong>${quality.ocrCoverage === null || quality.ocrCoverage === undefined ? "未校验" : `${metric(quality.ocrCoverage)}%`}</strong></div>
           <div class="quality-row"><span>人物区分</span><strong>${metric(quality.speakerConfidence)}%</strong></div>
           <div class="quality-row"><span>待核对问题</span><strong>${metric(quality.warnings)}</strong></div>
           <div class="quality-row"><span>视频复杂度</span><strong>${escapeHtml(quality.complexityBand || "未评估")}</strong></div>

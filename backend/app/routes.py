@@ -57,11 +57,13 @@ from .config import (
 from .billing import fetch_monthly_ark_cost
 from .logging_setup import _email_log_id, logger, safe_error_text
 from .media import (
+    default_batch_title,
     episode_sort_key,
     probe_duration,
     safe_filename,
     title_from_filename,
     title_with_episode,
+    is_default_batch_title,
 )
 from .processing import process_task
 from .script import script_to_markdown
@@ -540,6 +542,8 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
     groups: dict[str, dict[str, Any]] = {}
     for row in rows:
         item = dict(row)
+        if is_default_batch_title(item.get("batch_title")) and item.get("created_at"):
+            item["batch_title"] = default_batch_title(item["created_at"])
         key = item.get("batch_id") or item["id"]
         group = groups.get(key)
         if not group:
@@ -819,7 +823,7 @@ async def create_tasks_batch(
         raise HTTPException(status_code=429, detail=f"当前任务排队预计超过 {QUEUE_MAX_WAIT_MINUTES // 60} 小时，请稍后再上传", headers={"Retry-After": "600"})
     created = now_iso()
     batch_id = f"batch-{uuid.uuid4().hex}"
-    batch_title = title.strip() or f"短剧批次 {created[:16].replace('T', ' ')}"
+    batch_title = title.strip() or default_batch_title(created)
     prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item.get("input_index") or 0)))
     with db() as connection:
         charged = _charge_user(connection, user["id"], total_minutes)
@@ -930,7 +934,12 @@ def download_batch(request: Request, batch_id: str, fmt: str = Query("md", patte
         markdown = script_to_markdown(row_to_task(row))
         parts.append(markdown if fmt == "md" else re.sub(r"^#{1,6}\s+", "", markdown, flags=re.MULTILINE))
     content = "\n\n---\n\n".join(parts)
-    title = safe_filename(rows[0]["batch_title"] or "批次剧本")
+    raw_title = rows[0]["batch_title"]
+    title = safe_filename(
+        default_batch_title(rows[0]["created_at"])
+        if is_default_batch_title(raw_title)
+        else (raw_title or "批次剧本")
+    )
     encoded_filename = quote(f"{title}.{fmt}")
     return Response(content=content, media_type="text/markdown" if fmt == "md" else "text/plain", headers={"X-Filename": encoded_filename, "Content-Disposition": f"attachment; filename=batch-scripts.{fmt}; filename*=UTF-8''{encoded_filename}"})
 

@@ -86,6 +86,31 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
     }
 
 
+def _is_lite_model_unavailable(error: ArkError) -> bool:
+    text = f"{error} {error.provider_code}".casefold()
+    return error.status_code in {400, 404} and any(
+        marker in text
+        for marker in ("modelnotopen", "model_not_open", "not active", "not found", "未激活", "未找到")
+    )
+
+
+def _is_non_retryable_provider_error(error: BaseException) -> bool:
+    text = str(error).casefold()
+    return any(
+        marker in text
+        for marker in ("read operation timed out", "modelnotopen", "model_not_open", "not active", "未激活")
+    )
+
+
+def _task_error_message(error: BaseException) -> str:
+    if _is_non_retryable_provider_error(error):
+        text = str(error).casefold()
+        if "modelnotopen" in text or "model_not_open" in text or "未激活" in text:
+            return "当前 Lite 模型未启用，已停止重复重试；请启用该模型或改用 Turbo 后再识别。"
+        return "方舟识别响应超时，已停止重复重试；请稍后重新识别。"
+    return safe_error_text(error)
+
+
 # Provider selection and fallback policy live here; HTTP routes only enqueue work.
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Collect evidence, then use Ark with an explicit OpenAI fallback."""
@@ -99,10 +124,43 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
     route = select_ark_route(duration, evidence)
     ark_error: ArkError | None = None
     if ARK_API_KEYS:
+        ark_script: dict[str, Any] | None = None
+        ark_usage_data: dict[str, Any] | None = None
         try:
-            script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence, route["model"])
-            script = normalize_script(script, row["title"])
-            quality = script_quality(script, "ark")
+            ark_script, ark_usage_data = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence, route["model"])
+        except ArkError as exc:
+            ark_error = exc
+            turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
+            if route["model"] == ARK_LITE_MODEL.strip() and turbo_model and turbo_model != route["model"] and _is_lite_model_unavailable(exc):
+                logger.warning(
+                    "provider_fallback provider=ark reason=lite_model_unavailable task_id=%s from_model=%s to_model=%s",
+                    row["id"],
+                    route["model"],
+                    turbo_model,
+                )
+                try:
+                    ark_script, ark_usage_data = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence, turbo_model)
+                    route = {
+                        **route,
+                        "model": turbo_model,
+                        "band": "turbo_fallback",
+                        "reasons": [*route["reasons"], "lite_model_unavailable_fallback_turbo"],
+                    }
+                    ark_error = None
+                except ArkError as turbo_exc:
+                    ark_error = turbo_exc
+            if ark_script is None:
+                logger.warning(
+                    "provider_failed provider=ark task_id=%s status_code=%s error=%s",
+                    row["id"],
+                    ark_error.status_code if ark_error else None,
+                    safe_error_text(ark_error) if ark_error else "unknown",
+                )
+                if not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
+                    raise ark_error or exc
+        if ark_script is not None and ark_usage_data is not None:
+            script = normalize_script(ark_script, row["title"])
+            quality = script_quality(script, "ark", evidence)
             approved, blocking = quality_gate(quality)
             quality["deliveryStatus"] = "approved" if approved else "review_required"
             quality["blockingIssues"] = blocking
@@ -112,17 +170,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             quality["modelRoute"] = route["band"]
             quality["routingScore"] = route["score"]
             quality["routingReasons"] = route["reasons"]
-            return script, quality, {**usage, "provider": "ark", "model": route["model"]}, evidence
-        except ArkError as exc:
-            ark_error = exc
-            logger.warning(
-                "provider_failed provider=ark task_id=%s status_code=%s error=%s",
-                row["id"],
-                exc.status_code,
-                safe_error_text(exc),
-            )
-            if not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
-                raise
+            return script, quality, {**ark_usage_data, "provider": "ark", "model": route["model"]}, evidence
     elif not OPENAI_API_KEY:
         raise ArkError("未配置方舟或 OpenAI API Key，任务无法进行真实视频识别")
 
@@ -138,7 +186,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         raise ArkError("OpenAI 未返回可用剧本，未生成未经证实的剧本")
     provider = "openai"
     script = normalize_script(script, row["title"])
-    quality = script_quality(script, provider)
+    quality = script_quality(script, provider, evidence)
     approved, blocking = quality_gate(quality)
     quality["deliveryStatus"] = "approved" if approved else "review_required"
     quality["blockingIssues"] = blocking
@@ -240,12 +288,12 @@ async def process_task(task_id: str) -> None:
         )
     except Exception as exc:  # pragma: no cover - defensive boundary for background work
         attempts = int(row["attempts"] or 0) + 1
-        if attempts <= 2:
-            update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试：{safe_error_text(exc)}")
+        if attempts <= 2 and not _is_non_retryable_provider_error(exc):
+            update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试：{_task_error_message(exc)}")
             record_task_event(task_id, "retry", "处理失败，任务已自动重新排队", status="queued", stage="queued", progress_percent=4)
             logger.warning("task_retry_auto task_id=%s attempt=%s error=%s", task_id, attempts, safe_error_text(exc))
             return
-        message = f"处理失败：{safe_error_text(exc)}"
+        message = f"处理失败：{_task_error_message(exc)}"
         # Return the pre-charged minutes exactly once when a recognition fails.
         charged = int(row["credits_used"] or 0)
         if row["user_id"] and charged > 0:

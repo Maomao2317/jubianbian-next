@@ -22,6 +22,8 @@ from .config import (
     ARK_FILE_POLL_SECONDS,
     ARK_FILE_POLL_TIMEOUT_SECONDS,
     ARK_MODEL,
+    ARK_RESPONSE_TIMEOUT_SECONDS,
+    ARK_UPLOAD_TIMEOUT_SECONDS,
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_VIDEO_FPS,
@@ -66,7 +68,15 @@ def ark_account_key() -> str:
         return min(ARK_API_KEYS, key=lambda value: _ark_cooldowns.get(value, 0))
 
 
-def ark_http(method: str, path: str, data: bytes | None = None, content_type: str = "application/json", *, api_key: str | None = None) -> Any:
+def ark_http(
+    method: str,
+    path: str,
+    data: bytes | None = None,
+    content_type: str = "application/json",
+    *,
+    api_key: str | None = None,
+    timeout: float | None = None,
+) -> Any:
     api_key = api_key or ARK_API_KEY
     if not api_key:
         raise ArkError("未配置方舟 API Key，请在 fangzhou.env 中填写 ARK_API_KEY")
@@ -80,7 +90,7 @@ def ark_http(method: str, path: str, data: bytes | None = None, content_type: st
         method=method,
     )
     try:
-        with urlopen(request, timeout=300) as response:
+        with urlopen(request, timeout=timeout or ARK_RESPONSE_TIMEOUT_SECONDS) as response:
             raw = response.read()
     except HTTPError as exc:
         detail = ""
@@ -129,7 +139,14 @@ def ark_upload_video(path: Path, api_key: str | None = None) -> str:
         path.read_bytes(),
         "video/mp4",
     )
-    payload = ark_http("POST", "/files", body, f"multipart/form-data; boundary={boundary}", api_key=api_key)
+    payload = ark_http(
+        "POST",
+        "/files",
+        body,
+        f"multipart/form-data; boundary={boundary}",
+        api_key=api_key,
+        timeout=ARK_UPLOAD_TIMEOUT_SECONDS,
+    )
     file_id = None
     if isinstance(payload, dict):
         file_id = payload.get("id") or payload.get("file_id")
@@ -307,6 +324,7 @@ def ark_recognize(
             }],
         }, ensure_ascii=False).encode("utf-8"),
         api_key=api_key,
+        timeout=ARK_RESPONSE_TIMEOUT_SECONDS,
     )
     logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
     text = ark_response_text(payload)
