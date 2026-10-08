@@ -30,6 +30,9 @@ services:
       ARK_API_KEY: ${ARK_API_KEY:-}
       ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
       ARK_MODEL: ${ARK_MODEL:-doubao-seed-2-1-turbo-260628}
+      ARK_LITE_MODEL: ${ARK_LITE_MODEL:-doubao-seed-2-1-lite-260915}
+      ARK_TURBO_MODEL: ${ARK_TURBO_MODEL:-doubao-seed-2-1-turbo-260628}
+      ARK_ROUTING_MODE: ${ARK_ROUTING_MODE:-complexity}
       ARK_VIDEO_FPS: ${ARK_VIDEO_FPS:-0.5}
       ARK_FILE_POLL_SECONDS: ${ARK_FILE_POLL_SECONDS:-1}
       ARK_FALLBACK_ON_ERROR: ${ARK_FALLBACK_ON_ERROR:-1}

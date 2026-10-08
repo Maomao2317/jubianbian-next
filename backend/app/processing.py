@@ -14,7 +14,10 @@ from .config import (
     ARK_API_KEY,
     ARK_API_KEYS,
     ARK_FALLBACK_ON_ERROR,
+    ARK_LITE_MODEL,
     ARK_MODEL,
+    ARK_ROUTING_MODE,
+    ARK_TURBO_MODEL,
     OPENAI_API_KEY,
     OPENAI_TEXT_MODEL,
 )
@@ -27,6 +30,62 @@ from .providers import ark_fallback_message, ark_recognize, openai_script, opena
 from .script import normalize_script, quality_gate, script_quality
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
+
+def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> dict[str, Any]:
+    """Choose Lite/Turbo before the video call using only deterministic signals.
+
+    The route is deliberately conservative: missing audio or visual anchors
+    increases the score because the model has less independent evidence to
+    work with.  The result is stored with the task so cost and quality can be
+    compared later without inferring the chosen model from environment state.
+    """
+    duration = max(0.0, float(duration_sec or 0))
+    score = 0
+    reasons: list[str] = []
+    if duration >= 90:
+        score += 1
+        reasons.append("duration>=90s")
+    if duration >= 180:
+        score += 1
+        reasons.append("duration>=180s")
+    sources = evidence.get("sources") if isinstance(evidence, dict) else []
+    sources = [source for source in sources or [] if isinstance(source, dict)]
+    audio = next((source for source in sources if source.get("kind") == "audio"), None)
+    ocr = next((source for source in sources if source.get("kind") == "ocr"), None)
+    keyframes = next((source for source in sources if source.get("kind") == "keyframes"), None)
+    transcript_chars = sum(len(str(item.get("text") or "")) for item in (audio or {}).get("items", []) if isinstance(item, dict))
+    ocr_items = len((ocr or {}).get("items") or [])
+    if transcript_chars >= 800:
+        score += 1
+        reasons.append("transcript>=800chars")
+    if ocr_items >= 3:
+        score += 1
+        reasons.append("ocr>=3items")
+    if not audio or audio.get("status") != "available":
+        score += 1
+        reasons.append("audio_unavailable")
+    if not keyframes or keyframes.get("status") != "available":
+        score += 1
+        reasons.append("keyframes_unavailable")
+    mode = ARK_ROUTING_MODE
+    if mode in {"turbo", "turbo_only"}:
+        use_turbo = True
+        reasons.append("routing_mode=turbo")
+    elif mode in {"lite", "lite_only"}:
+        use_turbo = False
+        reasons.append("routing_mode=lite")
+    else:
+        use_turbo = score >= 2
+    selected_model = (ARK_TURBO_MODEL if use_turbo else ARK_LITE_MODEL).strip() or ARK_MODEL
+    return {
+        "model": selected_model,
+        "band": "complex" if use_turbo else "simple",
+        "score": score,
+        "reasons": reasons,
+        "mode": mode,
+    }
+
+
 # Provider selection and fallback policy live here; HTTP routes only enqueue work.
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Collect evidence, then use Ark with an explicit OpenAI fallback."""
@@ -37,10 +96,11 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         duration = probed
         update_task(row["id"], duration_sec=duration)
     evidence = await asyncio.to_thread(collect_evidence, path, row["title"], duration)
+    route = select_ark_route(duration, evidence)
     ark_error: ArkError | None = None
     if ARK_API_KEYS:
         try:
-            script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence)
+            script, usage = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence, route["model"])
             script = normalize_script(script, row["title"])
             quality = script_quality(script, "ark")
             approved, blocking = quality_gate(quality)
@@ -49,7 +109,10 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             quality["evidenceStatus"] = evidence.get("status")
             quality["evidenceSources"] = {source.get("kind"): source.get("status") for source in evidence.get("sources") or [] if isinstance(source, dict)}
             quality["evidenceSummary"] = evidence.get("summary", "")
-            return script, quality, {**usage, "provider": "ark", "model": ARK_MODEL}, evidence
+            quality["modelRoute"] = route["band"]
+            quality["routingScore"] = route["score"]
+            quality["routingReasons"] = route["reasons"]
+            return script, quality, {**usage, "provider": "ark", "model": route["model"]}, evidence
         except ArkError as exc:
             ark_error = exc
             logger.warning(
@@ -82,6 +145,9 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
     quality["evidenceStatus"] = evidence.get("status")
     quality["evidenceSources"] = {source.get("kind"): source.get("status") for source in evidence.get("sources") or [] if isinstance(source, dict)}
     quality["evidenceSummary"] = evidence.get("summary", "")
+    quality["modelRoute"] = route["band"]
+    quality["routingScore"] = route["score"]
+    quality["routingReasons"] = route["reasons"]
     if ark_error:
         quality["warning"] = ark_fallback_message(ark_error)
         quality["warning"] += " 本次结果使用了 OpenAI 备用识别链路。"

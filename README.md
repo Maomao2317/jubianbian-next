@@ -18,6 +18,9 @@ python -m uvicorn app.main:app --port 8000
 ARK_API_KEY=你的方舟APIKey
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_MODEL=doubao-seed-2-1-turbo-260628
+ARK_LITE_MODEL=doubao-seed-2-1-lite-260915
+ARK_TURBO_MODEL=doubao-seed-2-1-turbo-260628
+ARK_ROUTING_MODE=complexity
 ARK_VIDEO_FPS=0.5
 ARK_FILE_POLL_SECONDS=1
 ARK_FALLBACK_ON_ERROR=1
@@ -69,3 +72,5 @@ sudo /opt/jubianbian-staging/ops/install-staging-automation.sh
 保留 `JBB_AUTH_ALLOW_DEV_CODE=1`，接口会返回开发验证码用于联调，正式环境请设为 `0`。
 
 配置 `ARK_API_KEY` 后，任务会优先走“上传视频 → 方舟 Responses API → 结构化剧本 → Markdown/TXT 导出”的真实链路。方舟返回限流、额度耗尽或暂时不可用时，默认（`ARK_FALLBACK_ON_ERROR=1`）自动尝试 OpenAI；备用识别也失败时任务进入重试/失败流程，不生成未经证实的本地伪剧本，并在识别概况中显示降级提示；需要严格暴露方舟故障时可将该开关设为 `0`。
+
+`ARK_ROUTING_MODE=complexity` 时，系统会在调用方舟前根据视频时长、独立转写/OCR证据和关键帧可用性选择 Lite 或 Turbo，并把实际模型与路由原因写入任务质量记录；设为 `lite_only` 或 `turbo_only` 可用于对照测试。

@@ -516,6 +516,7 @@
           <div class="quality-row"><span>人物区分</span><strong>${metric(quality.speakerConfidence)}%</strong></div>
           <div class="quality-row"><span>待核对问题</span><strong>${metric(quality.warnings)}</strong></div>
           <div class="quality-row"><span>视频复杂度</span><strong>${escapeHtml(quality.complexityBand || "未评估")}</strong></div>
+          <div class="quality-row"><span>识别路由</span><strong>${escapeHtml(quality.modelRoute || "未记录")}</strong></div>
           <div class="quality-row"><span>独立证据</span><strong>${escapeHtml(evidenceSources)}</strong></div>
           <p class="quality-severity"><span>P0 ${metric(severity.P0 || 0)}</span><span>P1 ${metric(severity.P1 || 0)}</span><span>P2 ${metric(severity.P2 || 0)}</span></p>
           <p class="quality-note">结果由 AI 生成，建议导出前快速核对人名与专有名词。</p>

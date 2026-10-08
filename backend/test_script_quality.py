@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from app.evidence import collect_evidence, evidence_summary, transcript_from_evidence
+from app.processing import select_ark_route
 from app.script import clean_action_text, episode_from_text, normalize_script, quality_gate, script_quality, script_to_markdown
 
 
@@ -130,6 +131,31 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(transcript_from_evidence(evidence), "")
         audio = next(source for source in evidence["sources"] if source["kind"] == "audio")
         self.assertEqual(audio["status"], "unavailable")
+
+    def test_ark_route_uses_turbo_for_complex_or_evidence_poor_video(self):
+        simple = select_ark_route(
+            30,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "available", "items": [{"text": "你好"}]},
+                    {"kind": "ocr", "status": "available", "items": []},
+                    {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+                ]
+            },
+        )
+        complex_route = select_ark_route(
+            210,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "unavailable", "items": []},
+                    {"kind": "ocr", "status": "unavailable", "items": []},
+                    {"kind": "keyframes", "status": "unavailable", "items": []},
+                ]
+            },
+        )
+        self.assertEqual(simple["band"], "simple")
+        self.assertEqual(complex_route["band"], "complex")
+        self.assertIn("duration>=180s", complex_route["reasons"])
 
 
 if __name__ == "__main__":

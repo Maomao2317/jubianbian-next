@@ -275,10 +275,17 @@ def ark_usage(payload: Any) -> dict[str, int | float | None]:
     return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens, "api_cost_rmb": round(cost or 0, 6)}
 
 
-def ark_recognize(path: Path, title: str, duration_sec: float, evidence: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, int | None]]:
+def ark_recognize(
+    path: Path,
+    title: str,
+    duration_sec: float,
+    evidence: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> tuple[dict[str, Any], dict[str, int | None]]:
     api_key = ark_account_key()
+    selected_model = (model or ARK_MODEL).strip() or ARK_MODEL
     started = time.perf_counter()
-    logger.info("provider_start provider=ark operation=video_recognize file=%s duration_sec=%.1f", path.name, duration_sec)
+    logger.info("provider_start provider=ark operation=video_recognize file=%s model=%s duration_sec=%.1f", path.name, selected_model, duration_sec)
     upload_started = time.perf_counter()
     file_id = ark_upload_video(path, api_key)
     logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name, (time.perf_counter() - upload_started) * 1000)
@@ -290,7 +297,7 @@ def ark_recognize(path: Path, title: str, duration_sec: float, evidence: dict[st
         "POST",
         "/responses",
         json.dumps({
-            "model": ARK_MODEL,
+            "model": selected_model,
             "input": [{
                 "role": "user",
                 "content": [
@@ -317,8 +324,9 @@ def ark_recognize(path: Path, title: str, duration_sec: float, evidence: dict[st
         raise ArkError("方舟返回的剧本不是合法 JSON") from exc
     script = normalize_script(raw_script, title)
     logger.info(
-        "provider_done provider=ark operation=video_recognize file=%s duration_ms=%.1f scenes=%s",
+        "provider_done provider=ark operation=video_recognize file=%s model=%s duration_ms=%.1f scenes=%s",
         path.name,
+        selected_model,
         (time.perf_counter() - started) * 1000,
         len(script.get("scenes") or []),
     )
