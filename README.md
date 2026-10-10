@@ -16,9 +16,10 @@ python -m uvicorn app.main:app --port 8000
 
 ```env
 ARK_API_KEY=你的方舟APIKey
+ARK_API_KEY_2=你的第二个方舟APIKey（可选）
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_MODEL=doubao-seed-2-1-turbo-260628
-ARK_LITE_MODEL=doubao-seed-2-1-lite-260915
+ARK_LITE_MODEL=doubao-seed-2-0-lite-260428
 ARK_TURBO_MODEL=doubao-seed-2-1-turbo-260628
 ARK_ROUTING_MODE=complexity
 ARK_VIDEO_FPS=0.5

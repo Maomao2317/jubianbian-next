@@ -66,13 +66,14 @@ ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "40
 ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "32k").strip() or "32k"
 ARK_UPLOAD_PROXY_PRESET = os.getenv("ARK_UPLOAD_PROXY_PRESET", "veryfast").strip() or "veryfast"
 ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_TIMEOUT_SECONDS", "180")))
-# Uploads can be slow on a small cloud instance, but an inference response
-# should not hold a worker for five minutes before the task can fail over.
+# Uploads can be slow on a small cloud instance, but the upload itself should
+# still have a bounded wait before the task can fail over.
 ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "240")))
 # Real successful Ark responses in staging take roughly 190-290 seconds for
-# 1-2 minute clips.  Keep the timeout above that range so a slow response is
-# not reported as a false model failure after the upload already succeeded.
-ARK_RESPONSE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_RESPONSE_TIMEOUT_SECONDS", "300")))
+# 1-2 minute clips.  A slower Turbo response has crossed 300 seconds in the
+# live container, so keep a 2-minute safety margin above the observed range.
+# This remains configurable per deployment through the environment.
+ARK_RESPONSE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_RESPONSE_TIMEOUT_SECONDS", "420")))
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Optional Ark billing fallback.  The Ark response is preferred when it
 # contains a billed amount; these rates let staging calculate a cost from the
