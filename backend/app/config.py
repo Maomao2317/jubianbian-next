@@ -74,6 +74,12 @@ ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECON
 # live container, so keep a 2-minute safety margin above the observed range.
 # This remains configurable per deployment through the environment.
 ARK_RESPONSE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_RESPONSE_TIMEOUT_SECONDS", "420")))
+ARK_RESPONSE_POLL_SECONDS = max(1.0, float(os.getenv("ARK_RESPONSE_POLL_SECONDS", "5")))
+ARK_RESPONSE_POLL_TIMEOUT_SECONDS = max(
+    ARK_RESPONSE_TIMEOUT_SECONDS,
+    float(os.getenv("ARK_RESPONSE_POLL_TIMEOUT_SECONDS", "900")),
+)
+ARK_THINKING_TYPE = os.getenv("ARK_THINKING_TYPE", "disabled").strip().lower() or "disabled"
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Optional Ark billing fallback.  The Ark response is preferred when it
 # contains a billed amount; these rates let staging calculate a cost from the

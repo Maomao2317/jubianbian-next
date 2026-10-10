@@ -18,6 +18,64 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(upload_path, source)
         self.assertIsNone(proxy_dir)
 
+    def test_ark_proxy_profile_caps_long_video_near_target_size(self):
+        with (
+            patch.object(providers, "ARK_UPLOAD_PROXY_MAX_MB", 4),
+            patch.object(providers, "ARK_UPLOAD_PROXY_VIDEO_BITRATE", "400k"),
+            patch.object(providers, "ARK_UPLOAD_PROXY_AUDIO_BITRATE", "32k"),
+            patch.object(providers, "ARK_UPLOAD_PROXY_MAX_HEIGHT", 540),
+        ):
+            bitrate, height = providers._ark_proxy_profile(180)
+        self.assertLess(int(bitrate.removesuffix("k")), 180)
+        self.assertEqual(height, 360)
+
+    def test_ark_stream_response_returns_completed_payload(self):
+        completed = {
+            "id": "resp-test",
+            "status": "completed",
+            "output": [{"content": [{"text": "OK"}]}],
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                events = [
+                    {"type": "response.created", "response": {"id": "resp-test", "status": "in_progress"}},
+                    {"type": "response.completed", "response": completed},
+                ]
+                return iter([f"data: {providers.json.dumps(event)}\n".encode() for event in events])
+
+        with patch.object(providers, "urlopen", return_value=FakeResponse()):
+            payload = providers.ark_stream_response({"model": "test", "input": "hello"}, "key")
+        self.assertEqual(payload, completed)
+
+    def test_ark_stream_response_polls_after_disconnect(self):
+        completed = {"id": "resp-test", "status": "completed", "output": [{"content": [{"text": "OK"}]}]}
+
+        class DisconnectingResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                yield b'data: {"type":"response.created","response":{"id":"resp-test","status":"in_progress"}}\n'
+                raise TimeoutError("read operation timed out")
+
+        with (
+            patch.object(providers, "urlopen", return_value=DisconnectingResponse()),
+            patch.object(providers, "_ark_poll_response", return_value=completed) as poll,
+        ):
+            payload = providers.ark_stream_response({"model": "test", "input": "hello"}, "key")
+        poll.assert_called_once_with("resp-test", "key")
+        self.assertEqual(payload, completed)
+
     def test_episode_markers_in_upload_names(self):
         self.assertEqual(episode_from_text("2.mp4"), 2)
         self.assertEqual(episode_from_text("episode_02_final.mp4"), 2)

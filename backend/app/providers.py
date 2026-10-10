@@ -22,6 +22,8 @@ from .config import (
     ARK_FILE_POLL_SECONDS,
     ARK_FILE_POLL_TIMEOUT_SECONDS,
     ARK_MODEL,
+    ARK_RESPONSE_POLL_SECONDS,
+    ARK_RESPONSE_POLL_TIMEOUT_SECONDS,
     ARK_UPLOAD_PROXY_AUDIO_BITRATE,
     ARK_UPLOAD_PROXY_MAX_HEIGHT,
     ARK_UPLOAD_PROXY_MAX_MB,
@@ -29,6 +31,7 @@ from .config import (
     ARK_UPLOAD_PROXY_TIMEOUT_SECONDS,
     ARK_UPLOAD_PROXY_VIDEO_BITRATE,
     ARK_RESPONSE_TIMEOUT_SECONDS,
+    ARK_THINKING_TYPE,
     ARK_UPLOAD_TIMEOUT_SECONDS,
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
@@ -42,7 +45,7 @@ from .config import (
 from .errors import ArkError
 from .evidence import evidence_summary
 from .logging_setup import logger, safe_error_text
-from .media import multipart_body
+from .media import multipart_body, probe_duration
 from .script import normalize_script
 
 # Ark is the preferred video-understanding provider.  OpenAI remains an
@@ -74,6 +77,29 @@ def ark_account_key() -> str:
         return min(ARK_API_KEYS, key=lambda value: _ark_cooldowns.get(value, 0))
 
 
+def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
+    detail = ""
+    provider_code = ""
+    try:
+        payload = json.loads(exc.read().decode("utf-8", errors="replace"))
+        detail = str(payload.get("message") or payload.get("error") or payload.get("detail") or "")
+        provider_code = str(payload.get("code") or "") if isinstance(payload, dict) else ""
+    except (OSError, ValueError):
+        pass
+    if exc.code == 429:
+        with _ark_pool_lock:
+            _ark_cooldowns[api_key] = time.monotonic() + 30
+        # Provider 429 bodies may contain account identifiers and internal
+        # quota text. Keep the actionable cause without echoing that data.
+        detail = "模型当前达到推理限额或已暂停，请在方舟模型激活页调整限额或关闭 Safe Experience Mode"
+    suffix = f"：{detail[:300]}" if detail else ""
+    return ArkError(
+        f"方舟接口请求失败（HTTP {exc.code}）{suffix}",
+        status_code=exc.code,
+        provider_code=provider_code,
+    )
+
+
 def ark_http(
     method: str,
     path: str,
@@ -99,26 +125,7 @@ def ark_http(
         with urlopen(request, timeout=timeout or ARK_RESPONSE_TIMEOUT_SECONDS) as response:
             raw = response.read()
     except HTTPError as exc:
-        detail = ""
-        provider_code = ""
-        try:
-            payload = json.loads(exc.read().decode("utf-8", errors="replace"))
-            detail = str(payload.get("message") or payload.get("error") or payload.get("detail") or "")
-            provider_code = str(payload.get("code") or "") if isinstance(payload, dict) else ""
-        except (OSError, ValueError):
-            pass
-        if exc.code == 429:
-            with _ark_pool_lock:
-                _ark_cooldowns[api_key] = time.monotonic() + 30
-            # Provider 429 bodies may contain account identifiers and internal
-            # quota text. Keep the actionable cause without echoing that data.
-            detail = "模型当前达到推理限额或已暂停，请在方舟模型激活页调整限额或关闭 Safe Experience Mode"
-        suffix = f"：{detail[:300]}" if detail else ""
-        raise ArkError(
-            f"方舟接口请求失败（HTTP {exc.code}）{suffix}",
-            status_code=exc.code,
-            provider_code=provider_code,
-        ) from exc
+        raise _ark_http_error(exc, api_key) from exc
     except URLError as exc:
         raise ArkError(f"无法连接方舟接口：{exc.reason}") from exc
     except OSError as exc:
@@ -131,7 +138,112 @@ def ark_http(
         raise ArkError("方舟接口返回了无法解析的响应") from exc
 
 
-def _ark_upload_proxy(path: Path) -> tuple[Path, Path | None]:
+def _ark_poll_response(response_id: str, api_key: str) -> Any:
+    """Recover a stored streamed response after the original socket closes."""
+    deadline = time.monotonic() + ARK_RESPONSE_POLL_TIMEOUT_SECONDS
+    encoded_id = quote(response_id, safe="")
+    while True:
+        try:
+            payload = ark_http(
+                "GET",
+                f"/responses/{encoded_id}",
+                api_key=api_key,
+                timeout=min(60.0, ARK_RESPONSE_TIMEOUT_SECONDS),
+            )
+        except ArkError as exc:
+            # Ark documents that querying an in-progress response returns an
+            # error. The response ID came from response.created, so these
+            # transient states are safe to poll until the bounded deadline.
+            if exc.status_code in {400, 404, 409, 425} and time.monotonic() < deadline:
+                time.sleep(ARK_RESPONSE_POLL_SECONDS)
+                continue
+            raise
+        status = str(payload.get("status") or "").strip().lower() if isinstance(payload, dict) else ""
+        if status == "completed" or (not status and ark_response_text(payload)):
+            return payload
+        if status in {"failed", "incomplete", "cancelled", "canceled"}:
+            detail = payload.get("error") or payload.get("incomplete_details") or status
+            raise ArkError(f"方舟识别未完成：{detail}")
+        if time.monotonic() >= deadline:
+            raise ArkError("方舟识别处理超时，已超过后台等待上限")
+        time.sleep(ARK_RESPONSE_POLL_SECONDS)
+
+
+def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
+    """Create a stored response over SSE and recover it by ID if disconnected."""
+    request_payload = {**payload, "stream": True, "store": True}
+    request = UrlRequest(
+        f"{ARK_BASE_URL}/responses",
+        data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    response_id = ""
+    try:
+        with urlopen(request, timeout=ARK_RESPONSE_TIMEOUT_SECONDS) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                response_payload = event.get("response") if isinstance(event, dict) else None
+                if not isinstance(response_payload, dict):
+                    continue
+                response_id = str(response_payload.get("id") or response_id)
+                event_type = str(event.get("type") or "")
+                status = str(response_payload.get("status") or "").lower()
+                if event_type == "response.completed" or status == "completed":
+                    return response_payload
+                if event_type in {"response.failed", "response.incomplete"} or status in {"failed", "incomplete"}:
+                    detail = response_payload.get("error") or response_payload.get("incomplete_details") or status
+                    raise ArkError(f"方舟识别未完成：{detail}")
+    except HTTPError as exc:
+        raise _ark_http_error(exc, api_key) from exc
+    except (URLError, OSError) as exc:
+        if not response_id:
+            raise ArkError(f"方舟接口网络错误：{getattr(exc, 'reason', exc)}") from exc
+        logger.warning(
+            "provider_step provider=ark operation=response_stream_recover response_id=%s error=%s",
+            response_id,
+            safe_error_text(exc),
+        )
+    if not response_id:
+        raise ArkError("方舟流式响应结束但没有返回 response_id")
+    return _ark_poll_response(response_id, api_key)
+
+
+def _bitrate_bps(value: str) -> int:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM]?)\s*", str(value or ""))
+    if not match:
+        return 0
+    multiplier = {"": 1, "k": 1000, "m": 1_000_000}[match.group(2).lower()]
+    return int(float(match.group(1)) * multiplier)
+
+
+def _ark_proxy_profile(duration_sec: float) -> tuple[str, int]:
+    """Fit the proxy near the configured MB ceiling without crushing short clips."""
+    configured_video_bps = _bitrate_bps(ARK_UPLOAD_PROXY_VIDEO_BITRATE) or 400_000
+    audio_bps = _bitrate_bps(ARK_UPLOAD_PROXY_AUDIO_BITRATE) or 32_000
+    if duration_sec <= 0 or ARK_UPLOAD_PROXY_MAX_MB <= 0:
+        return ARK_UPLOAD_PROXY_VIDEO_BITRATE, ARK_UPLOAD_PROXY_MAX_HEIGHT
+    target_total_bps = int(ARK_UPLOAD_PROXY_MAX_MB * 1024 * 1024 * 8 * 0.92 / duration_sec)
+    target_video_bps = max(96_000, target_total_bps - audio_bps - 16_000)
+    video_bps = min(configured_video_bps, target_video_bps)
+    max_height = ARK_UPLOAD_PROXY_MAX_HEIGHT
+    if video_bps < 180_000:
+        max_height = min(max_height, 360)
+    elif video_bps < 300_000:
+        max_height = min(max_height, 480)
+    return f"{max(1, video_bps // 1000)}k", max_height
+
+
+def _ark_upload_proxy(path: Path, duration_sec: float = 0) -> tuple[Path, Path | None]:
     """Create a temporary smaller MP4 when the source is expensive to upload.
 
     The original file remains untouched.  If ffmpeg is unavailable or the
@@ -153,6 +265,8 @@ def _ark_upload_proxy(path: Path) -> tuple[Path, Path | None]:
     proxy_dir = Path(tempfile.mkdtemp(prefix="jbb-ark-upload-", dir=DATA_DIR))
     proxy_path = proxy_dir / f"{path.stem}.ark.mp4"
     started = time.perf_counter()
+    duration = duration_sec or probe_duration(path)
+    video_bitrate, max_height = _ark_proxy_profile(duration)
     command = [
         ffmpeg,
         "-hide_banner",
@@ -161,17 +275,17 @@ def _ark_upload_proxy(path: Path) -> tuple[Path, Path | None]:
         "-i",
         str(path),
         "-vf",
-        f"scale='min({ARK_UPLOAD_PROXY_MAX_HEIGHT},iw)':-2",
+        f"scale='min({max_height},iw)':-2",
         "-c:v",
         "libx264",
         "-preset",
         ARK_UPLOAD_PROXY_PRESET,
         "-b:v",
-        ARK_UPLOAD_PROXY_VIDEO_BITRATE,
+        video_bitrate,
         "-maxrate",
-        ARK_UPLOAD_PROXY_VIDEO_BITRATE,
+        video_bitrate,
         "-bufsize",
-        ARK_UPLOAD_PROXY_VIDEO_BITRATE,
+        video_bitrate,
         "-c:a",
         "aac",
         "-b:a",
@@ -192,10 +306,12 @@ def _ark_upload_proxy(path: Path) -> tuple[Path, Path | None]:
         if proxy_size <= 0 or proxy_size >= source_size:
             raise OSError("proxy_not_smaller")
         logger.info(
-            "provider_step provider=ark operation=proxy file=%s source_bytes=%s proxy_bytes=%s duration_ms=%.1f",
+            "provider_step provider=ark operation=proxy file=%s source_bytes=%s proxy_bytes=%s bitrate=%s height=%s duration_ms=%.1f",
             path.name,
             source_size,
             proxy_size,
+            video_bitrate,
+            max_height,
             (time.perf_counter() - started) * 1000,
         )
         return proxy_path, proxy_dir
@@ -209,10 +325,10 @@ def _ark_upload_proxy(path: Path) -> tuple[Path, Path | None]:
         return path, None
 
 
-def ark_upload_video(path: Path, api_key: str | None = None) -> str:
+def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0) -> str:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
-    upload_path, proxy_dir = _ark_upload_proxy(path)
+    upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec)
     try:
         fields = {
             "purpose": "user_data",
@@ -393,16 +509,13 @@ def ark_recognize(
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s model=%s duration_sec=%.1f", path.name, selected_model, duration_sec)
     upload_started = time.perf_counter()
-    file_id = ark_upload_video(path, api_key)
+    file_id = ark_upload_video(path, api_key, duration_sec)
     logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name, (time.perf_counter() - upload_started) * 1000)
     wait_started = time.perf_counter()
     ark_wait_for_file(file_id, api_key)
     logger.info("provider_step provider=ark operation=file_ready file=%s duration_ms=%.1f", path.name, (time.perf_counter() - wait_started) * 1000)
     response_started = time.perf_counter()
-    payload = ark_http(
-        "POST",
-        "/responses",
-        json.dumps({
+    response_payload: dict[str, Any] = {
             "model": selected_model,
             "input": [{
                 "role": "user",
@@ -411,10 +524,10 @@ def ark_recognize(
                     {"type": "input_text", "text": ark_prompt(title, duration_sec, evidence)},
                 ],
             }],
-        }, ensure_ascii=False).encode("utf-8"),
-        api_key=api_key,
-        timeout=ARK_RESPONSE_TIMEOUT_SECONDS,
-    )
+        }
+    if ARK_THINKING_TYPE in {"enabled", "disabled", "auto"}:
+        response_payload["thinking"] = {"type": ARK_THINKING_TYPE}
+    payload = ark_stream_response(response_payload, api_key)
     logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
     text = ark_response_text(payload)
     if not text:
