@@ -27,6 +27,7 @@ from .errors import ArkError
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
 from .providers import ark_fallback_message, ark_recognize, openai_script, openai_transcribe
+from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import normalize_script, quality_gate, script_quality
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
@@ -390,9 +391,20 @@ async def process_task(task_id: str) -> None:
         approved, blocking = quality_gate(quality)
         quality["deliveryStatus"] = "approved" if approved else "review_required"
         quality["blockingIssues"] = blocking
-        final_status = "done" if approved else "review"
-        final_stage = "done" if approved else "review"
-        final_message = "识别完成" if approved else "识别完成，等待管理员复核"
+        completed_recheck = has_pending_recheck(task_id)
+        if completed_recheck:
+            # Even a clean automatic gate cannot replace a version that was
+            # already delivered. An administrator must compare the candidate
+            # with the preserved snapshot and explicitly accept it.
+            quality["deliveryStatus"] = "review_required"
+            quality["recheck"] = {
+                "previousVersionPreserved": True,
+                "adminApprovalRequired": True,
+            }
+        can_deliver = approved and not completed_recheck
+        final_status = "done" if can_deliver else "review"
+        final_stage = "done" if can_deliver else "review"
+        final_message = "识别完成" if can_deliver else "识别完成，等待管理员复核"
         update_task(
             task_id,
             status=final_status,
@@ -411,7 +423,7 @@ async def process_task(task_id: str) -> None:
         )
         record_task_event(
             task_id,
-            "completed" if approved else "review_required",
+            "completed" if can_deliver else "review_required",
             final_message,
             status=final_status,
             stage=final_stage,
@@ -434,6 +446,31 @@ async def process_task(task_id: str) -> None:
             return
         message = f"处理失败：{_task_error_message(exc)}"
         # Return the pre-charged minutes exactly once when a recognition fails.
+        if has_pending_recheck(task_id):
+            # A failed recheck must not replace or refund the already
+            # delivered task. Restore the preserved version automatically.
+            restored = restore_recheck_snapshot(
+                task_id,
+                resolution="failed_restored",
+                allowed_statuses=("queued", "running", "review", "failed"),
+            )
+            if restored:
+                record_task_event(
+                    task_id,
+                    "admin_recheck_failed_restored",
+                    "复核重试失败，已自动恢复上次完成版本",
+                    status="done",
+                    stage="done",
+                    progress_percent=100,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
+                logger.error(
+                    "task_recheck_failed_restored task_id=%s duration_ms=%.1f error=%s",
+                    task_id,
+                    (time.perf_counter() - started) * 1000,
+                    safe_error_text(exc),
+                )
+                return
         charged = int(row["credits_used"] or 0)
         if row["user_id"] and charged > 0:
             _refund_task_once(task_id, row["user_id"], charged)

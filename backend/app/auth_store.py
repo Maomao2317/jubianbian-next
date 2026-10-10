@@ -414,6 +414,27 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_admin_created ON tasks(created_at DESC, id DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_admin_status_created ON tasks(status, created_at DESC, id DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_batch_created ON tasks(batch_id, created_at DESC, id DESC)")
+        # A completed task may be sent through the quality pipeline again by
+        # an administrator. Keep the delivered version outside ``tasks`` so a
+        # candidate result can never destroy it.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_recheck_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_recheck_snapshots_task ON task_recheck_snapshots(task_id, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_recheck_snapshots_pending ON task_recheck_snapshots(task_id, state, id DESC)"
+        )
         # ``review`` is a durable delivery state: the screenplay may be
         # inspected by its owner, but it must not be downloadable until an
         # administrator has confirmed it.  Do not silently migrate legacy

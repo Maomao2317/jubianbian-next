@@ -67,6 +67,12 @@ from .media import (
     is_default_batch_title,
 )
 from .processing import process_task
+from .rechecks import (
+    create_recheck_snapshot,
+    mark_recheck_resolved,
+    pending_recheck_snapshot,
+    restore_recheck_snapshot,
+)
 from .script import script_to_markdown
 from .task_store import (
     get_task,
@@ -619,6 +625,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             SUM(CASE WHEN t.status = 'review' THEN 1 ELSE 0 END) AS review_count,
             SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
             GROUP_CONCAT(CASE WHEN t.status = 'review' THEN t.id END) AS review_task_ids,
+            GROUP_CONCAT(CASE WHEN t.status = 'done' THEN t.id END) AS done_task_ids,
             MAX(CASE WHEN t.status = 'failed' THEN t.id END) AS failed_task_id
         FROM tasks t
         LEFT JOIN users u ON u.id = t.user_id
@@ -635,11 +642,13 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
     for row in rows:
         item = dict(row)
         review_ids = [value for value in str(item.pop("review_task_ids") or "").split(",") if value]
+        done_ids = [value for value in str(item.pop("done_task_ids") or "").split(",") if value]
         failed_task_id = item.pop("failed_task_id")
         item.pop("group_id", None)
         if failed_task_id:
             item["id"] = failed_task_id
         item["review_task_ids"] = review_ids
+        item["done_task_ids"] = done_ids
         item["file_name"] = f"{int(item.get('task_count') or 0)} 集"
         if is_default_batch_title(item.get("batch_title")) and item.get("created_at"):
             item["batch_title"] = default_batch_title(item["created_at"])
@@ -661,6 +670,11 @@ def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     task["events"] = task_events(task_id)
+    snapshot = pending_recheck_snapshot(task_id)
+    task["recheck"] = {
+        "pending": bool(snapshot),
+        "snapshotCreatedAt": snapshot["created_at"] if snapshot else None,
+    }
     return task
 
 
@@ -688,6 +702,8 @@ async def admin_approve_task(request: Request, task_id: str) -> dict[str, Any]:
             "UPDATE tasks SET status = 'done', stage = 'done', progress_percent = 100, completed_at = COALESCE(completed_at, ?), error = NULL, quality_json = ? WHERE id = ? AND status = 'review'",
             (approved_at, json.dumps(quality, ensure_ascii=False), task_id),
         ).rowcount
+        if changed == 1:
+            mark_recheck_resolved(connection, task_id, "approved")
     if changed != 1:
         raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
     record_task_event(task_id, "admin_approved", "管理员复核通过，剧本可以下载", status="done", stage="done", progress_percent=100)
@@ -704,17 +720,24 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
     if not Path(row["stored_path"]).exists():
         raise HTTPException(status_code=409, detail="原始视频不存在")
     task_status = str(row["status"] or "")
-    if task_status not in {"failed", "review"}:
-        raise HTTPException(status_code=409, detail="只有失败或待复核任务可以重试")
+    if task_status not in {"failed", "review", "done"}:
+        raise HTTPException(status_code=409, detail="只有失败、待复核或已完成任务可以重试")
 
-    # A review retry repairs a quality-gated result that was already charged as
-    # part of the original recognition. It must preserve that charge and must
-    # not create a second credit-ledger entry. Failed-task retries retain the
-    # historical behavior and are charged again after the original failure was
-    # refunded.
+    # Review retries and completed-task rechecks repair a result that was
+    # already charged. They must not create a second credit-ledger entry; the
+    # completed path also snapshots the delivered version first. Ordinary
+    # failed-task retries retain the historical behavior and are charged again
+    # after the original failure was refunded.
     retry_minutes = max(1, int(row["estimated_minutes"] or 1))
-    if task_status == "review":
+    pending_snapshot = pending_recheck_snapshot(task_id)
+    free_recheck = task_status in {"review", "done"} or pending_snapshot is not None
+    if free_recheck:
         with db() as connection:
+            if task_status == "done":
+                current = connection.execute("SELECT * FROM tasks WHERE id = ? AND status = 'done'", (task_id,)).fetchone()
+                if not current:
+                    raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
+                create_recheck_snapshot(connection, current)
             changed = connection.execute(
                 """
                 UPDATE tasks
@@ -722,16 +745,25 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
                     error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                     model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                     api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
-                WHERE id = ? AND user_id = ? AND status = 'review'
+                WHERE id = ? AND status = ?
                 """,
-                (now_iso(), task_id, user_id),
+                (now_iso(), task_id, task_status),
             ).rowcount
-        if changed != 1:
-            raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
-        record_task_event(task_id, "admin_review_retry", "管理员退回复核问题，免费重新识别", status="queued", stage="queued", progress_percent=4)
-        _admin_audit(admin["id"], "task_review_retry", "task", task_id, "quality review retry without additional user charge")
+            if changed != 1:
+                raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
+        event_type = "admin_done_recheck" if task_status == "done" else "admin_review_retry"
+        message = "管理员发起已完成任务免费复核，原版本已保留" if task_status == "done" else "管理员退回复核问题，免费重新识别"
+        record_task_event(task_id, event_type, message, status="queued", stage="queued", progress_percent=4)
+        audit_action = "task_done_recheck" if task_status == "done" else "task_review_retry"
+        _admin_audit(admin["id"], audit_action, "task", task_id, "quality recheck without additional user charge")
         background.add_task(process_task, task_id)
-        return {"id": task_id, "status": "queued", "charged": False, "message": "已退回复核并免费重新识别"}
+        return {
+            "id": task_id,
+            "status": "queued",
+            "charged": False,
+            "previousVersionPreserved": task_status == "done" or pending_snapshot is not None,
+            "message": "已免费重新复核，原完成版本已保留" if task_status == "done" else "已退回复核并免费重新识别",
+        }
 
     with db() as connection:
         charged = _charge_user(connection, user_id, retry_minutes)
@@ -759,6 +791,28 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
     _admin_audit(admin["id"], "task_retry", "task", task_id)
     background.add_task(process_task, task_id)
     return {"id": task_id, "status": "queued", "charged": True}
+
+
+async def admin_restore_task_recheck(request: Request, task_id: str) -> dict[str, Any]:
+    """Restore the delivered version saved before a completed-task recheck."""
+    admin = _require_admin(request)
+    row = task_row(task_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if row["status"] not in {"review", "failed"}:
+        raise HTTPException(status_code=409, detail="只有复核中或复核失败的任务可以恢复旧版本")
+    if not restore_recheck_snapshot(task_id):
+        raise HTTPException(status_code=409, detail="没有可恢复的已完成版本")
+    record_task_event(
+        task_id,
+        "admin_recheck_restored",
+        "管理员恢复上次已完成版本",
+        status="done",
+        stage="done",
+        progress_percent=100,
+    )
+    _admin_audit(admin["id"], "task_recheck_restore", "task", task_id)
+    return {"id": task_id, "status": "done", "message": "已恢复上次已完成版本"}
 
 
 def admin_audit_logs(request: Request, limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
@@ -1007,6 +1061,7 @@ def delete_task(request: Request, task_id: str) -> Response:
     with db() as connection:
         connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+        connection.execute("DELETE FROM task_recheck_snapshots WHERE task_id = ?", (task_id,))
     logger.info("task_deleted task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     return Response(status_code=204)
 

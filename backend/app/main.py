@@ -19,6 +19,7 @@ from .routes import (
     admin_audit_logs,
     admin_overview,
     admin_approve_task,
+    admin_restore_task_recheck,
     admin_task_detail,
     admin_recharge_ledger,
     admin_retry_task,
@@ -108,6 +109,7 @@ app.add_api_route("/api/admin/tasks", admin_tasks, methods=["GET"])
 app.add_api_route("/api/admin/tasks/{task_id}", admin_task_detail, methods=["GET"])
 app.add_api_route("/api/admin/tasks/{task_id}/approve", admin_approve_task, methods=["POST"])
 app.add_api_route("/api/admin/tasks/{task_id}/retry", admin_retry_task, methods=["POST"])
+app.add_api_route("/api/admin/tasks/{task_id}/restore-recheck", admin_restore_task_recheck, methods=["POST"])
 app.add_api_route("/api/admin/audit-logs", admin_audit_logs, methods=["GET"])
 app.add_api_route("/api/tasks", list_tasks, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}", task_detail, methods=["GET"])
