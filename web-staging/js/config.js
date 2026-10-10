@@ -11,6 +11,7 @@ window.APP_CONFIG = {
     name: "剧编编",
     mark: "编",
     logo: "./assets/logo.svg",
+    adminLogo: "./assets/admin-console.svg",
     slogan: "上传短视频，自动整理台词、人物、情绪与画面信息。",
   },
 

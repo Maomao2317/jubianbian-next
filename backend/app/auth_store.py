@@ -304,6 +304,7 @@ def init_db() -> None:
             if name not in columns:
                 connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role, created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_users_created ON users(created_at DESC, id)")
         if ADMIN_EMAILS:
             placeholders = ",".join("?" for _ in ADMIN_EMAILS)
             connection.execute(
@@ -410,6 +411,9 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id, created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_status_created ON tasks(user_id, status, created_at DESC, id DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_admin_created ON tasks(created_at DESC, id DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_admin_status_created ON tasks(status, created_at DESC, id DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_batch_created ON tasks(batch_id, created_at DESC, id DESC)")
         # ``review`` is a durable delivery state: the screenplay may be
         # inspected by its owner, but it must not be downloadable until an
         # administrator has confirmed it.  Do not silently migrate legacy
@@ -429,6 +433,7 @@ def init_db() -> None:
             """
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_created ON credit_ledger(created_at DESC, id DESC)")
         # Backfill the visible signup grant for accounts created before the
         # ledger entry was introduced. This only records history; it never
         # changes the user's existing balance.

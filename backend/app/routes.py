@@ -8,6 +8,7 @@ import math
 import mimetypes
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -393,6 +394,48 @@ def _admin_audit(admin_id: str, action: str, target_type: str = "", target_id: s
         )
 
 
+_ADMIN_BILLING_CACHE: dict[str, dict[str, Any]] = {}
+_ADMIN_BILLING_LOCK = threading.Lock()
+_ADMIN_BILLING_TTL_SECONDS = 300
+
+
+def _refresh_admin_billing_cost(month: str) -> None:
+    """Refresh provider billing outside the request path.
+
+    The provider billing endpoint can take several seconds (or time out). The
+    admin console should still open from the local usage totals immediately.
+    """
+    try:
+        value = fetch_monthly_ark_cost(month)
+    except Exception as exc:  # pragma: no cover - defensive provider boundary
+        logger.warning("admin_billing_refresh_failed month=%s error=%s", month, str(exc)[:300])
+        value = None
+    with _ADMIN_BILLING_LOCK:
+        entry = _ADMIN_BILLING_CACHE.setdefault(month, {})
+        entry["value"] = value
+        entry["updated_at"] = time.monotonic()
+        entry["loading"] = False
+
+
+def _admin_billing_cost(month: str) -> float | None:
+    """Return a cached billing value and refresh stale values in the background."""
+    now = time.monotonic()
+    with _ADMIN_BILLING_LOCK:
+        entry = _ADMIN_BILLING_CACHE.get(month)
+        if entry and now - float(entry.get("updated_at", 0)) < _ADMIN_BILLING_TTL_SECONDS:
+            return entry.get("value")
+        if entry and entry.get("loading"):
+            return entry.get("value")
+        previous = entry.get("value") if entry else None
+        _ADMIN_BILLING_CACHE[month] = {
+            "value": previous,
+            "updated_at": float(entry.get("updated_at", 0)) if entry else 0,
+            "loading": True,
+        }
+    threading.Thread(target=_refresh_admin_billing_cost, args=(month,), name="admin-billing-refresh", daemon=True).start()
+    return previous
+
+
 def admin_overview(request: Request) -> dict[str, Any]:
     _require_admin(request)
     with db() as connection:
@@ -405,7 +448,7 @@ def admin_overview(request: Request) -> dict[str, Any]:
     statuses = {row["status"]: int(row["count"]) for row in task_status}
     # Provider billing is delayed and may be temporarily unavailable; retain
     # the locally recorded amount as a safe fallback in that case.
-    billing_cost = fetch_monthly_ark_cost(now_iso()[:7])
+    billing_cost = _admin_billing_cost(now_iso()[:7])
     return {
         "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
         "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "review": statuses.get("review", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
@@ -433,7 +476,7 @@ def admin_users(request: Request, keyword: str = "", status: str = "all", limit:
     with db() as connection:
         total = connection.execute(f"SELECT COUNT(*) AS count FROM users u {where}", params).fetchone()["count"]
         rows = connection.execute(
-            f"SELECT u.id, u.email, u.name, u.role, u.is_active, u.credits, u.plan, u.created_at, u.last_login_at, COUNT(t.id) AS task_count, COALESCE(SUM(CASE WHEN t.status = 'done' THEN t.credits_used ELSE 0 END), 0) AS total_used FROM users u LEFT JOIN tasks t ON t.user_id = u.id {where} GROUP BY u.id ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT u.id, u.email, u.name, u.role, u.is_active, u.credits, u.plan, u.created_at, u.last_login_at, (SELECT COUNT(*) FROM tasks t WHERE t.user_id = u.id) AS task_count, (SELECT COALESCE(SUM(t.credits_used), 0) FROM tasks t WHERE t.user_id = u.id AND t.status = 'done') AS total_used FROM users u {where} ORDER BY u.created_at DESC, u.id LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
     return {"items": [{**dict(row), "isActive": bool(row["is_active"]), "createdAt": row["created_at"], "lastLoginAt": row["last_login_at"], "taskCount": int(row["task_count"]), "totalUsed": int(row["total_used"])} for row in rows], "total": int(total), "limit": limit, "offset": offset}
@@ -489,7 +532,7 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
     params: list[Any] = []
     if keyword.strip():
         value = f"%{keyword.strip()}%"
-        clauses.append("(u.email LIKE ? OR u.name LIKE ? OR reason LIKE ?)")
+        clauses.append("(email LIKE ? OR name LIKE ? OR reason LIKE ?)")
         params.extend([value, value, value])
     if date_from:
         clauses.append("created_at >= ?")
@@ -497,20 +540,27 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
     if date_to:
         clauses.append("created_at <= ?")
         params.append(f"{date_to}T23:59:59")
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    ledger_cte = """
+        WITH ledger AS (
+            SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after,
+                   r.reason, r.created_at, u.email, u.name, 'recharge' AS entry_type
+            FROM admin_recharge_ledger r
+            LEFT JOIN users u ON u.id = r.user_id
+            UNION ALL
+            SELECT c.id, c.user_id, 0 AS rmb_amount, c.amount AS points_amount,
+                   c.balance_after, c.reason, c.created_at, u.email, u.name, c.entry_type
+            FROM credit_ledger c
+            LEFT JOIN users u ON u.id = c.user_id
+        )
+    """
     with db() as connection:
-        recharge = connection.execute("SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after, r.reason, r.created_at, u.email, u.name, 'recharge' AS entry_type FROM admin_recharge_ledger r LEFT JOIN users u ON u.id = r.user_id").fetchall()
-        credit = connection.execute("SELECT c.id, c.user_id, 0 AS rmb_amount, c.amount AS points_amount, c.balance_after, c.reason, c.created_at, u.email, u.name, c.entry_type FROM credit_ledger c LEFT JOIN users u ON u.id = c.user_id").fetchall()
-    combined = [dict(row) for row in (*recharge, *credit)]
-    if clauses:
-        def matches(item: dict[str, Any]) -> bool:
-            if keyword.strip() and keyword.strip().lower() not in " ".join(str(item.get(key) or "") for key in ("email", "name", "reason")).lower(): return False
-            if date_from and str(item.get("created_at") or "") < f"{date_from}T00:00:00": return False
-            if date_to and str(item.get("created_at") or "") > f"{date_to}T23:59:59": return False
-            return True
-        combined = [item for item in combined if matches(item)]
-    combined.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-    return {"total": len(combined), "items": combined[offset:offset + limit]}
+        total = connection.execute(f"{ledger_cte} SELECT COUNT(*) AS count FROM ledger{where}", params).fetchone()["count"]
+        rows = connection.execute(
+            f"{ledger_cte} SELECT id, user_id, rmb_amount, points_amount, balance_after, reason, created_at, email, name, entry_type FROM ledger{where} ORDER BY created_at DESC, id DESC, entry_type DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    return {"total": int(total), "items": [dict(row) for row in rows], "limit": limit, "offset": offset}
 
 
 def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
@@ -537,35 +587,66 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
     if date_to.strip():
         clauses.append("t.created_at < ?"); params.append(date_to.strip() + "T23:59:59.999999+00:00")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    group_key = "COALESCE(t.batch_id, t.id)"
+    grouped_select = f"""
+        SELECT
+            {group_key} AS group_id,
+            MAX(t.id) AS id,
+            MAX(t.user_id) AS user_id,
+            COALESCE(NULLIF(MAX(t.batch_title), ''), MAX(t.title)) AS title,
+            MAX(t.batch_title) AS batch_title,
+            CASE
+                WHEN SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) > 0 THEN 'failed'
+                WHEN SUM(CASE WHEN t.status = 'running' THEN 1 ELSE 0 END) > 0 THEN 'running'
+                WHEN SUM(CASE WHEN t.status = 'review' THEN 1 ELSE 0 END) > 0 THEN 'review'
+                WHEN SUM(CASE WHEN t.status = 'queued' THEN 1 ELSE 0 END) > 0 THEN 'queued'
+                ELSE 'done'
+            END AS status,
+            MAX(t.stage) AS stage,
+            CAST(ROUND(AVG(COALESCE(t.progress_percent, 0))) AS INTEGER) AS progress_percent,
+            SUM(COALESCE(t.estimated_minutes, 0)) AS estimated_minutes,
+            SUM(COALESCE(t.credits_used, 0)) AS credits_used,
+            MAX(t.error) AS error,
+            MAX(t.created_at) AS created_at,
+            MAX(t.updated_at) AS updated_at,
+            MAX(t.batch_id) AS batch_id,
+            MAX(t.batch_index) AS batch_index,
+            MAX(t.batch_total) AS batch_total,
+            COALESCE(MAX(u.email), MAX(t.user_id), '-') AS email,
+            MAX(u.name) AS name,
+            COUNT(*) AS task_count,
+            SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN t.status = 'review' THEN 1 ELSE 0 END) AS review_count,
+            SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            GROUP_CONCAT(CASE WHEN t.status = 'review' THEN t.id END) AS review_task_ids,
+            MAX(CASE WHEN t.status = 'failed' THEN t.id END) AS failed_task_id
+        FROM tasks t
+        LEFT JOIN users u ON u.id = t.user_id
+        {where}
+        GROUP BY {group_key}
+    """
     with db() as connection:
-        rows = connection.execute(f"SELECT t.id, t.user_id, t.title, t.file_name, t.status, t.stage, t.progress_percent, t.estimated_minutes, t.credits_used, t.error, t.created_at, t.updated_at, t.batch_id, t.batch_title, t.batch_index, t.batch_total, COALESCE(u.email, t.user_id, '-') AS email, u.name FROM tasks t LEFT JOIN users u ON u.id=t.user_id {where} ORDER BY t.created_at DESC", params).fetchall()
-    groups: dict[str, dict[str, Any]] = {}
+        total = connection.execute(f"SELECT COUNT(*) AS count FROM ({grouped_select}) grouped", params).fetchone()["count"]
+        rows = connection.execute(
+            f"SELECT * FROM ({grouped_select}) grouped ORDER BY created_at DESC, group_id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    grouped: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
+        review_ids = [value for value in str(item.pop("review_task_ids") or "").split(",") if value]
+        failed_task_id = item.pop("failed_task_id")
+        item.pop("group_id", None)
+        if failed_task_id:
+            item["id"] = failed_task_id
+        item["review_task_ids"] = review_ids
+        item["file_name"] = f"{int(item.get('task_count') or 0)} 集"
         if is_default_batch_title(item.get("batch_title")) and item.get("created_at"):
             item["batch_title"] = default_batch_title(item["created_at"])
-        key = item.get("batch_id") or item["id"]
-        group = groups.get(key)
-        if not group:
-            group = {**item, "id": item["id"], "title": item.get("batch_title") or item["title"], "file_name": "", "task_count": 0, "done_count": 0, "review_count": 0, "review_task_ids": [], "failed_count": 0, "credits_used": 0, "estimated_minutes": 0, "progress_percent": 0}
-            groups[key] = group
-        group["task_count"] += 1
-        group["done_count"] += int(item["status"] == "done")
-        if item["status"] == "review":
-            group["review_count"] += 1
-            group["review_task_ids"].append(item["id"])
-        group["failed_count"] += int(item["status"] == "failed")
-        group["credits_used"] += int(item.get("credits_used") or 0)
-        group["estimated_minutes"] += int(item.get("estimated_minutes") or 0)
-        group["progress_percent"] = round((group["progress_percent"] * (group["task_count"] - 1) + int(item.get("progress_percent") or 0)) / group["task_count"])
-        if item["status"] == "failed": group["status"] = "failed"
-        elif group["status"] != "failed" and item["status"] == "running": group["status"] = "running"
-        elif group["status"] not in {"failed", "running"} and item["status"] == "review": group["status"] = "review"
-        elif group["status"] not in {"failed", "running", "review"} and item["status"] == "queued": group["status"] = "queued"
-        group["file_name"] = f"{group['task_count']} 集"
-    grouped = list(groups.values())
-    grouped.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-    return {"items": grouped[offset:offset + limit], "total": len(grouped), "limit": limit, "offset": offset}
+            if not item.get("title") or is_default_batch_title(item.get("title")):
+                item["title"] = item["batch_title"]
+        grouped.append(item)
+    return {"items": grouped, "total": int(total), "limit": limit, "offset": offset}
 
 
 def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:

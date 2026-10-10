@@ -51,6 +51,11 @@
     listLoading: false,
     groupedTasksSource: null,
     groupedTasksCache: null,
+    adminRequestId: 0,
+    adminOverviewCache: null,
+    adminOverviewCachedAt: 0,
+    adminTaskUsersCache: null,
+    adminTaskUsersCachedAt: 0,
   };
 
   function escapeHtml(value) {
@@ -151,7 +156,7 @@
             <span class="credit-label">剩余积分</span>
             <strong>${credits}</strong><span>积分</span>
           </button>
-          ${state.profile && state.profile.role === "admin" ? `<a class="text-btn admin-link" href="#/admin"><span class="nav-icon">⌘</span>管理后台</a>` : ""}
+          ${state.profile && state.profile.role === "admin" ? `<a class="text-btn admin-link" href="#/admin"><img class="nav-icon admin-nav-logo" src="${cfg.brand.adminLogo || cfg.brand.logo}" alt="" />管理后台</a>` : ""}
           <button class="text-btn recharge-btn" type="button" data-action="recharge"><span class="nav-icon">＋</span>充值</button>
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
@@ -177,40 +182,75 @@
 
   async function renderAdmin() {
     if (!state.profile || state.profile.role !== "admin") { go("tasks"); return; }
+    const requestId = ++state.adminRequestId;
+    document.querySelector(".admin-page")?.setAttribute("aria-busy", "true");
     try {
       const tabs = [{id:"overview",label:"概览"},{id:"users",label:"用户"},{id:"credits",label:"充值"},{id:"tasks",label:"任务"},{id:"usage",label:"用量"},{id:"analytics",label:"分析（后续）"},{id:"funnel",label:"转化漏斗（后续）"},{id:"retention",label:"留存（后续）"},{id:"codes",label:"码管理（后续）"}];
-      const overview = await api.getAdminOverview();
       const tab = state.adminTab;
+      const overviewPromise = state.adminOverviewCache && Date.now() - state.adminOverviewCachedAt < 15000
+        ? Promise.resolve(state.adminOverviewCache)
+        : api.getAdminOverview().then((overview) => {
+          state.adminOverviewCache = overview;
+          state.adminOverviewCachedAt = Date.now();
+          return overview;
+        });
+      let users = null;
+      let rechargePage = null;
+      let taskUsers = null;
+      let tasks = null;
+      const panelPromises = [];
+      if (tab === "users" || tab === "credits") {
+        const userPageSize = 20;
+        panelPromises.push(api.getAdminUsers({ limit: userPageSize, offset: state.adminUserPage * userPageSize, keyword: state.adminUserKeyword, status: state.adminUserStatus }).then((value) => { users = value; }));
+        if (tab === "credits") {
+          const rechargePageSize = 10;
+          panelPromises.push(api.getAdminRecharges({ limit: rechargePageSize, offset: state.adminRechargePage * rechargePageSize, keyword: state.adminRechargeKeyword, date_from: state.adminRechargeFrom, date_to: state.adminRechargeTo }).then((value) => { rechargePage = value; }));
+        }
+      } else if (tab === "tasks" || tab === "usage") {
+        const pageSize = 20;
+        const taskUsersPromise = state.adminTaskUsersCache && Date.now() - state.adminTaskUsersCachedAt < 30000
+          ? Promise.resolve(state.adminTaskUsersCache)
+          : api.getAdminUsers({ limit: 200 }).then((value) => {
+            state.adminTaskUsersCache = value;
+            state.adminTaskUsersCachedAt = Date.now();
+            return value;
+          });
+        panelPromises.push(taskUsersPromise.then((value) => { taskUsers = value; }));
+        panelPromises.push(api.getAdminTasks({ limit: pageSize, offset: state.adminTaskPage * pageSize, keyword: state.adminTaskKeyword, status: state.adminTaskStatus, user_id: state.adminTaskUser, date_from: state.adminTaskFrom, date_to: state.adminTaskTo }).then((value) => { tasks = value; }));
+      }
+      const overview = await overviewPromise;
+      await Promise.all(panelPromises);
+      if (requestId !== state.adminRequestId || state.view !== "admin") return;
       const nav = tabs.map(item => `<button class="admin-tab ${tab === item.id ? "active" : ""}" data-action="admin-tab" data-tab="${item.id}" ${["analytics","funnel","retention","codes"].includes(item.id) ? "disabled" : ""}>${item.label}</button>`).join("");
       let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total}</strong><small>活跃 ${overview.users.active}</small></article><article><span>剩余积分</span><strong>${Number(overview.users.credits || 0).toFixed(1)}</strong><small>积分</small></article><article><span>任务总数</span><strong>${overview.tasks.total}</strong><small>完成 ${overview.tasks.done} · 待复核 ${overview.tasks.review || 0} · 失败 ${overview.tasks.failed}</small></article><article><span>API 使用成本</span><strong>¥ ${Number(overview.apiCostRmb || 0).toFixed(2)}</strong><small>人民币</small></article></div>`;
       if (tab === "users" || tab === "credits") {
         const userPageSize = 20;
-        const users = await api.getAdminUsers({ limit: userPageSize, offset: state.adminUserPage * userPageSize, keyword: state.adminUserKeyword, status: state.adminUserStatus });
         const userPageCount = Math.max(1, Math.ceil(users.total / userPageSize));
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>启用、停用账号并调整分钟额度</p></div><span>${users.total} 个账号</span></div><div class="admin-toolbar"><input id="adminUserKeyword" value="${escapeHtml(state.adminUserKeyword)}" placeholder="搜索邮箱或姓名" /><select id="adminUserStatus"><option value="all" ${state.adminUserStatus === "all" ? "selected" : ""}>全部用户</option><option value="active" ${state.adminUserStatus === "active" ? "selected" : ""}>正常</option><option value="disabled" ${state.adminUserStatus === "disabled" ? "selected" : ""}>已停用</option></select><button class="admin-action admin-search-btn" data-action="admin-user-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>剩余额度</th><th>任务/消耗</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td><strong>${escapeHtml(user.name || "未命名")}</strong><small>${escapeHtml(user.email)}</small></td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${user.credits}</strong> 分钟</td><td>${user.taskCount} / ${user.totalUsed} 分钟</td><td><button class="admin-action" data-action="admin-credit" data-id="${user.id}">调整额度</button><button class="admin-action" data-action="admin-status" data-id="${user.id}" data-active="${user.isActive ? "0" : "1"}">${user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无用户</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-user-page" data-page="${Math.max(0, state.adminUserPage - 1)}" ${state.adminUserPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminUserPage + 1} / ${userPageCount} 页</span><button class="admin-action" data-action="admin-user-page" data-page="${Math.min(userPageCount - 1, state.adminUserPage + 1)}" ${state.adminUserPage >= userPageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
         if (tab === "credits") {
           const rechargePageSize = 10;
-          const rechargePage = await api.getAdminRecharges({ limit: rechargePageSize, offset: state.adminRechargePage * rechargePageSize, keyword: state.adminRechargeKeyword, date_from: state.adminRechargeFrom, date_to: state.adminRechargeTo });
           const rechargePageCount = Math.max(1, Math.ceil(rechargePage.total / rechargePageSize));
           state.adminRechargePage = Math.min(state.adminRechargePage, rechargePageCount - 1);
           body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>人民币充值流水</h2><p>每笔充值按 1 元 = 13.8 积分记录</p></div><span>${rechargePage.total} 笔充值</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户账号或备注" /><input id="adminRechargeFrom" type="date" value="${state.adminRechargeFrom}" /><input id="adminRechargeTo" type="date" value="${state.adminRechargeTo}" /><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户账号</th><th>人民币</th><th>增加积分</th><th>充值后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(item => `<tr><td><strong>${escapeHtml(item.name || item.email || item.user_id)}</strong><small>${escapeHtml(item.email || "")}</small></td><td>¥ ${Number(item.rmb_amount).toFixed(2)}</td><td class="points-positive">+${Number(item.points_amount).toFixed(1)} 积分</td><td>${Number(item.balance_after).toFixed(1)} 积分</td><td>${escapeHtml(item.reason || "-")}</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="6">暂无匹配的充值流水</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-recharge-page" data-page="${Math.max(0, state.adminRechargePage - 1)}" ${state.adminRechargePage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminRechargePage + 1} / ${rechargePageCount} 页</span><button class="admin-action" data-action="admin-recharge-page" data-page="${Math.min(rechargePageCount - 1, state.adminRechargePage + 1)}" ${state.adminRechargePage >= rechargePageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
         }
       } else if (tab === "tasks" || tab === "usage") {
         const pageSize = 20;
-        const users = await api.getAdminUsers({ limit: 200 });
-        const tasks = await api.getAdminTasks({ limit: pageSize, offset: state.adminTaskPage * pageSize, keyword: state.adminTaskKeyword, status: state.adminTaskStatus, userId: state.adminTaskUser, date_from: state.adminTaskFrom, date_to: state.adminTaskTo });
         const pageCount = Math.max(1, Math.ceil(tasks.total / pageSize));
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按用户、状态和时间筛选全平台任务</p></div><span>${tasks.total} 条任务</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务或账号" /><select id="adminTaskUser"><option value="">全部用户</option>${users.items.map(user => `<option value="${user.id}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>管理员复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><input id="adminTaskFrom" type="date" value="${state.adminTaskFrom}" title="开始日期" /><input id="adminTaskTo" type="date" value="${state.adminTaskTo}" title="结束日期" /><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户账号</th><th>状态</th><th>消耗</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => { const reviewIds = Array.isArray(item.review_task_ids) ? item.review_task_ids : []; const actions = item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${item.id}">重试</button>` : item.status === "review" ? reviewIds.map(reviewId => `<button class="admin-action" data-action="admin-review" data-id="${reviewId}">查看并确认</button>`).join("") || `<button class="admin-action" data-action="admin-review" data-id="${item.id}">查看并确认</button>` : "-"; const label = item.status === "done" ? "成功" : item.status === "review" ? "管理员复核" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td><strong>${escapeHtml(item.title || item.id)}</strong><small>${escapeHtml(item.file_name || "")}</small></td><td>${escapeHtml(item.email || item.user_id || "-")}</td><td><span class="admin-status ${item.status === "done" ? "on" : item.status === "failed" ? "off" : item.status === "review" ? "wait" : "wait"}">${label}</span></td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td><td>${actions}</td></tr>`; }).join("") || `<tr><td colspan="6">暂无任务</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-page" data-page="${Math.max(0, state.adminTaskPage - 1)}" ${state.adminTaskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminTaskPage + 1} / ${pageCount} 页</span><button class="admin-action" data-action="admin-page" data-page="${Math.min(pageCount - 1, state.adminTaskPage + 1)}" ${state.adminTaskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按用户、状态和时间筛选全平台任务</p></div><span>${tasks.total} 条任务</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务或账号" /><select id="adminTaskUser"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${user.id}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>管理员复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><input id="adminTaskFrom" type="date" value="${state.adminTaskFrom}" title="开始日期" /><input id="adminTaskTo" type="date" value="${state.adminTaskTo}" title="结束日期" /><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户账号</th><th>状态</th><th>消耗</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => { const reviewIds = Array.isArray(item.review_task_ids) ? item.review_task_ids : []; const actions = item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${item.id}">重试</button>` : item.status === "review" ? reviewIds.map(reviewId => `<button class="admin-action" data-action="admin-review" data-id="${reviewId}">查看并确认</button>`).join("") || `<button class="admin-action" data-action="admin-review" data-id="${item.id}">查看并确认</button>` : "-"; const label = item.status === "done" ? "成功" : item.status === "review" ? "管理员复核" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td><strong>${escapeHtml(item.title || item.id)}</strong><small>${escapeHtml(item.file_name || "")}</small></td><td>${escapeHtml(item.email || item.user_id || "-")}</td><td><span class="admin-status ${item.status === "done" ? "on" : item.status === "failed" ? "off" : item.status === "review" ? "wait" : "wait"}">${label}</span></td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td><td>${actions}</td></tr>`; }).join("") || `<tr><td colspan="6">暂无任务</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-page" data-page="${Math.max(0, state.adminTaskPage - 1)}" ${state.adminTaskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminTaskPage + 1} / ${pageCount} 页</span><button class="admin-action" data-action="admin-page" data-page="${Math.min(pageCount - 1, state.adminTaskPage + 1)}" ${state.adminTaskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近任务</h2><p>平台实时处理概况</p></div><span>实时数据</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => { const label = item.status === "review" ? "管理员复核" : item.status === "done" ? "成功" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td>${escapeHtml(item.title || item.id)}</td><td>${escapeHtml(item.email || item.user_id || item.name || "-")}</td><td>${label}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`; }).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div>`;
       }
-      $("#main").innerHTML = `<section class="admin-page"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户额度和任务处理</p></div><a class="secondary-btn admin-back-btn" href="#/tasks"><span aria-hidden="true">←</span>返回工作台</a></div><div class="admin-nav">${nav}</div>${body}<p class="admin-note">分析、转化漏斗、留存、Eval、码管理暂保留入口，后续版本开放。</p></section>`;
+      $("#main").innerHTML = `<section class="admin-page" aria-busy="false"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户额度和任务处理</p></div><a class="secondary-btn admin-back-btn" href="#/tasks"><span aria-hidden="true">←</span>返回工作台</a></div><div class="admin-nav">${nav}</div>${body}<p class="admin-note">分析、转化漏斗、留存、Eval、码管理暂保留入口，后续版本开放。</p></section>`;
       const taskPanel = document.querySelector("#adminTaskKeyword")?.closest(".admin-panel");
       taskPanel?.querySelectorAll("tbody tr td:nth-child(4)").forEach((cell) => {
         const value = Number.parseFloat(cell.textContent || "");
         if (Number.isFinite(value)) cell.textContent = `${(value * POINTS_PER_MINUTE).toFixed(1)} 积分`;
       });
-    } catch (error) { toast(error.message || "后台数据加载失败", "error"); }
+    } catch (error) {
+      if (requestId !== state.adminRequestId) return;
+      document.querySelector(".admin-page")?.setAttribute("aria-busy", "false");
+      toast(error.message || "后台数据加载失败", "error");
+    }
   }
 
   function restoreAuthFormState(snapshot) {
@@ -1078,7 +1118,12 @@
 
     const action = actionElement.dataset.action;
     const id = actionElement.dataset.id;
-    if (action === "admin-tab") { state.adminTab = actionElement.dataset.tab; await renderAdmin(); return; }
+    if (action === "admin-tab") {
+      state.adminTab = actionElement.dataset.tab;
+      document.querySelectorAll(".admin-tab").forEach((button) => button.classList.toggle("active", button === actionElement));
+      await renderAdmin();
+      return;
+    }
     if (action === "admin-search") { state.adminTaskKeyword = $("#adminTaskKeyword")?.value.trim() || ""; state.adminTaskStatus = $("#adminTaskStatus")?.value || "all"; state.adminTaskUser = $("#adminTaskUser")?.value || ""; state.adminTaskFrom = $("#adminTaskFrom")?.value || ""; state.adminTaskTo = $("#adminTaskTo")?.value || ""; state.adminTaskPage = 0; await renderAdmin(); return; }
     if (action === "admin-page") { state.adminTaskPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
     if (action === "admin-user-search") { state.adminUserKeyword = $("#adminUserKeyword")?.value.trim() || ""; state.adminUserStatus = $("#adminUserStatus")?.value || "all"; state.adminUserPage = 0; await renderAdmin(); return; }
@@ -1094,7 +1139,7 @@
       const pointsAmount = (rmbAmount * 13.8).toFixed(1);
       const rechargeReason = window.prompt(`本次将增加 ${pointsAmount} 积分，填写充值备注`, "管理员人民币充值");
       if (rechargeReason === null) return;
-      try { await api.adjustAdminCredits(id, { rmb_amount: rmbAmount, reason: rechargeReason }); toast(`充值成功，已增加 ${pointsAmount} 积分`); await renderAdmin(); } catch (error) { toast(error.message || "充值失败", "error"); }
+      try { await api.adjustAdminCredits(id, { rmb_amount: rmbAmount, reason: rechargeReason }); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; state.adminTaskUsersCache = null; toast(`充值成功，已增加 ${pointsAmount} 积分`); await renderAdmin(); } catch (error) { toast(error.message || "充值失败", "error"); }
       return;
       /* legacy minute adjustment flow retained for compatibility */
       const amountText = window.prompt("输入调整分钟数（充值填正数，扣减填负数）", "100");
@@ -1106,11 +1151,11 @@
       return;
     }
     if (action === "admin-status") {
-      try { await api.setAdminUserStatus(id, actionElement.dataset.active === "1"); toast("账号状态已更新"); await renderAdmin(); } catch (error) { toast(error.message || "状态更新失败", "error"); }
+      try { await api.setAdminUserStatus(id, actionElement.dataset.active === "1"); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; state.adminTaskUsersCache = null; toast("账号状态已更新"); await renderAdmin(); } catch (error) { toast(error.message || "状态更新失败", "error"); }
       return;
     }
     if (action === "admin-retry") {
-      try { await api.retryAdminTask(id); toast("任务已重新排队"); await renderAdmin(); } catch (error) { toast(error.message || "任务重试失败", "error"); }
+      try { await api.retryAdminTask(id); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; toast("任务已重新排队"); await renderAdmin(); } catch (error) { toast(error.message || "任务重试失败", "error"); }
       return;
     }
     if (action === "admin-review") {
@@ -1131,7 +1176,7 @@
       return;
     }
     if (action === "admin-approve") {
-      try { await api.approveAdminTask(id); $("#modalRoot").innerHTML = ""; toast("已确认通过，用户现在可以下载"); await renderAdmin(); } catch (error) { toast(error.message || "复核通过失败", "error"); }
+      try { await api.approveAdminTask(id); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; $("#modalRoot").innerHTML = ""; toast("已确认通过，用户现在可以下载"); await renderAdmin(); } catch (error) { toast(error.message || "复核通过失败", "error"); }
       return;
     }
     if (action === "toggle-password") {
