@@ -67,6 +67,11 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  function taskSummary(task) {
+    const { result: _result, quality: _quality, evidence: _evidence, ...summary } = task;
+    return clone(summary);
+  }
+
   function episodeFromFileName(name) {
     const stem = String(name || "").replace(/\.[^.]+$/, "");
     if (/^(?:19|20)\d{6}(?:$|[\s_.-])/.test(stem)) return null;
@@ -241,7 +246,7 @@
       await delay(120);
       mockStore.tasks.forEach(syncTask);
       const query = keyword.toLocaleLowerCase();
-      return clone(mockStore.tasks.filter((task) => {
+      return mockStore.tasks.filter((task) => {
         const haystack = `${task.title} ${task.fileName || ""}`.toLocaleLowerCase();
         return (!query || haystack.includes(query)) && matchStatus(task, status);
       }).sort((a, b) => {
@@ -250,7 +255,7 @@
         if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return bt - at;
         if (Number.isFinite(at) !== Number.isFinite(bt)) return Number.isFinite(bt) ? 1 : -1;
         return String(b.id || "").localeCompare(String(a.id || ""));
-      }));
+      }).map(taskSummary);
     },
 
     async getQueueSummary() {

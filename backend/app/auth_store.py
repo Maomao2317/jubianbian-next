@@ -409,6 +409,7 @@ def init_db() -> None:
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id, created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_status_created ON tasks(user_id, status, created_at DESC, id DESC)")
         # ``review`` is a durable delivery state: the screenplay may be
         # inspected by its owner, but it must not be downloadable until an
         # administrator has confirmed it.  Do not silently migrate legacy

@@ -47,6 +47,10 @@
     pointsType: "all",
     pointsFrom: "",
     pointsTo: "",
+    listRequestId: 0,
+    listLoading: false,
+    groupedTasksSource: null,
+    groupedTasksCache: null,
   };
 
   function escapeHtml(value) {
@@ -299,7 +303,7 @@
       : task.status === "failed"
         ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>`
         : "";
-    return `<article class="task-row" data-open="${task.id}">
+    return `<article class="task-row" data-open="${task.id}" data-scroll-key="task:${escapeHtml(task.id)}">
       <div class="file-mark" aria-hidden="true"><span></span></div>
       <div class="task-main">
         <div class="task-title-line"><div class="task-title">${escapeHtml(task.title)}</div><div class="task-inline-actions">${statusBadge(task)}${quickAction}</div></div>
@@ -315,16 +319,13 @@
   }
 
   function groupedTaskItems(tasks) {
-    const orderedTasks = tasks.slice().sort((a, b) => {
-      const at = Date.parse(String(a.createdAt || ""));
-      const bt = Date.parse(String(b.createdAt || ""));
-      if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return bt - at;
-      if (Number.isFinite(at) !== Number.isFinite(bt)) return Number.isFinite(bt) ? 1 : -1;
-      return String(b.id || "").localeCompare(String(a.id || ""));
-    });
+    if (state.groupedTasksSource === tasks && state.groupedTasksCache) return state.groupedTasksCache;
     const groups = new Map();
     const items = [];
-    orderedTasks.forEach((task) => {
+    // The API already returns tasks in recency order. Avoid sorting the full
+    // history again on every render; only the visible batch children are
+    // sorted by episode number in batchRow().
+    tasks.forEach((task) => {
       if (!task.batchId) { items.push({ type: "task", task }); return; }
       let group = groups.get(task.batchId);
       if (!group) {
@@ -334,6 +335,8 @@
       }
       group.tasks.push(task);
     });
+    state.groupedTasksSource = tasks;
+    state.groupedTasksCache = items;
     return items;
   }
 
@@ -368,16 +371,88 @@
     const status = failed ? "部分失败" : review ? "管理员复核" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     const downloads = done ? `<span class="batch-downloads"><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button></span>` : "";
     const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
-    return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${review ? ` · 待管理员复核 ${review} 集` : ""}${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : review ? "review" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
+    return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${review ? ` · 待管理员复核 ${review} 集` : ""}${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : review ? "review" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
-  function renderList() {
+  function captureListViewport() {
+    if (!$(`.workspace-panel`)) return null;
+    const headerBottom = $("#header")?.getBoundingClientRect().bottom || 0;
+    const items = [...document.querySelectorAll("[data-scroll-key]")];
+    const anchor = items.find((item) => item.getBoundingClientRect().top >= headerBottom + 8)
+      || items.find((item) => item.getBoundingClientRect().bottom > headerBottom + 8);
+    const active = document.activeElement?.id === "keyword" ? document.activeElement : null;
+    return {
+      scrollY: window.scrollY,
+      key: anchor?.dataset.scrollKey || "",
+      top: anchor?.getBoundingClientRect().top || 0,
+      searchFocused: Boolean(active),
+      selectionStart: active?.selectionStart,
+      selectionEnd: active?.selectionEnd,
+    };
+  }
+
+  function restoreListViewport(snapshot) {
+    if (!snapshot) return;
+    const anchor = [...document.querySelectorAll("[data-scroll-key]")]
+      .find((item) => item.dataset.scrollKey === snapshot.key);
+    if (anchor) {
+      window.scrollBy(0, anchor.getBoundingClientRect().top - snapshot.top);
+    } else {
+      window.scrollTo({ top: snapshot.scrollY, behavior: "auto" });
+    }
+    if (snapshot.searchFocused) {
+      const search = $("#keyword");
+      search?.focus({ preventScroll: true });
+      if (Number.isInteger(snapshot.selectionStart) && Number.isInteger(snapshot.selectionEnd)) {
+        search?.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+      }
+    }
+  }
+
+  function setListLoading(loading) {
+    state.listLoading = loading;
+    const panel = $(".workspace-panel");
+    panel?.classList.toggle("is-loading", loading);
+    panel?.setAttribute("aria-busy", String(loading));
+  }
+
+  function updateActiveFilter() {
+    document.querySelectorAll("[data-filter]").forEach((button) => {
+      const active = button.dataset.filter === state.status;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+
+  function listDataSignature(tasks, queue) {
+    const first = tasks[0];
+    const last = tasks[tasks.length - 1];
+    const active = [];
+    tasks.forEach((task) => {
+      if (task.status === "queued" || task.status === "running") {
+        active.push(`${task.id}:${task.status}:${task.stage || ""}:${task.progressPercent || 0}:${task.updatedAt || ""}:${task.error || ""}`);
+      }
+    });
+    return [
+      tasks.length,
+      first?.id || "", first?.createdAt || "",
+      last?.id || "", last?.createdAt || "",
+      active.join(","),
+      queue?.waitMinutes || 0, queue?.blocked ? 1 : 0, queue?.workerConcurrency || 0,
+    ].join("|");
+  }
+
+  function renderList({ preserveViewport = false, stabilizeHeight = false } = {}) {
+    const viewport = preserveViewport ? captureListViewport() : null;
+    const previousListHeight = stabilizeHeight ? $(".task-list")?.getBoundingClientRect().height || 0 : 0;
     const filters = cfg.statusFilters.map((item) => `
-      <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}">${item.label}</button>`).join("");
+      <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}" aria-pressed="${state.status === item.id}">${item.label}</button>`).join("");
     const pageSize = 10;
     const grouped = groupedTaskItems(state.tasks);
     const pageCount = Math.max(1, Math.ceil(grouped.length / pageSize));
-    const pageTasks = grouped.slice(state.taskPage * pageSize, (state.taskPage + 1) * pageSize);
+    const page = Math.min(state.taskPage, pageCount - 1);
+    if (page !== state.taskPage) state.taskPage = page;
+    const pageTasks = grouped.slice(page * pageSize, (page + 1) * pageSize);
     const rows = state.tasks.length
       ? pageTasks.map((item) => item.type === "batch" ? batchRow(item) : taskRow(item.task)).join("")
       : `<div class="empty">
@@ -396,7 +471,7 @@
           </div>
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
-        <div class="workspace-panel">
+        <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
           <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
           ${state.queue.blocked ? `<div class="queue-blocked-notice">当前排队预计超过 10 小时，暂时不能继续上传，请稍后再试。</div>` : state.queue.waitMinutes ? `<div class="queue-summary">当前预计排队 ${formatEta(state.queue.waitMinutes)} · 可同时处理 ${state.queue.workerConcurrency || 8} 个视频</div>` : ""}
           <div class="toolbar">
@@ -408,11 +483,13 @@
             <div class="task-count">${state.tasks.length} 个任务</div>
           </div>
           <div class="task-list">${rows}</div>
-          <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, state.taskPage - 1)}" ${state.taskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.taskPage + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, state.taskPage + 1)}" ${state.taskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
+          <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, page - 1)}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, page + 1)}" ${page >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
         </div>
       </section>`;
     const batchActions = document.querySelector(".batch-download-actions");
     if (batchActions) [...batchActions.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).forEach((node) => node.remove());
+    if (previousListHeight) $(".task-list").style.minHeight = `${Math.ceil(previousListHeight)}px`;
+    restoreListViewport(viewport);
   }
 
   function pipeline(task) {
@@ -755,16 +832,38 @@
     rerenderCreateModal(titleValue);
   }
 
-  async function refreshList() {
-    const [tasks, queue] = await Promise.all([api.listTasks({ keyword: state.keyword, status: state.status }), api.getQueueSummary().catch(() => state.queue)]);
-    state.tasks = tasks.map(normalizeUserTask);
-    state.queue = queue || state.queue;
-    state.taskPage = Math.min(state.taskPage, Math.max(0, Math.ceil(groupedTaskItems(state.tasks).length / 10) - 1));
-    const limited = state.tasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
-    if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
-    if (!limited) state.rateLimitNotified = false;
-    renderList();
-    schedulePoll(state.tasks.some((task) => task.status === "queued" || task.status === "running"));
+  async function refreshList({ source = "user" } = {}) {
+    const requestId = ++state.listRequestId;
+    const query = { keyword: state.keyword, status: state.status };
+    const previousSignature = listDataSignature(state.tasks, state.queue);
+    if (source !== "poll") setListLoading(true);
+    try {
+      const [tasks, queue] = await Promise.all([
+        api.listTasks(query),
+        source === "filter" ? Promise.resolve(state.queue) : api.getQueueSummary().catch(() => state.queue),
+      ]);
+      if (requestId !== state.listRequestId || state.view !== "list" || query.keyword !== state.keyword || query.status !== state.status) return;
+      state.tasks = tasks;
+      state.queue = queue || state.queue;
+      const rateLimitTasks = source === "poll" ? state.tasks.slice(0, 50) : state.tasks;
+      const limited = rateLimitTasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
+      if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
+      if (!limited) state.rateLimitNotified = false;
+      const dataChanged = listDataSignature(state.tasks, state.queue) !== previousSignature;
+      if (source !== "poll" || dataChanged || !$(".workspace-panel")) {
+        renderList({
+          preserveViewport: Boolean($(".workspace-panel")),
+          stabilizeHeight: source === "poll",
+        });
+      }
+    } catch (error) {
+      if (requestId === state.listRequestId) toast(error.message || "任务列表加载失败", "error");
+    } finally {
+      if (requestId === state.listRequestId) {
+        setListLoading(false);
+        schedulePoll(state.tasks.some((task) => task.status === "queued" || task.status === "running"));
+      }
+    }
   }
 
   async function refreshDetail() {
@@ -785,7 +884,7 @@
     if (!enabled) return;
     state.pollTimer = setTimeout(() => {
       if (state.view === "detail") refreshDetail();
-      else refreshList();
+      else refreshList({ source: "poll" });
     }, 2500);
   }
 
@@ -956,8 +1055,13 @@
     const filter = event.target.closest("[data-filter]");
 
     if (filter) {
-      state.status = filter.dataset.filter;
-      await refreshList();
+      const nextStatus = filter.dataset.filter;
+      if (nextStatus === state.status) return;
+      state.status = nextStatus;
+      state.taskPage = 0;
+      updateActiveFilter();
+      setListLoading(true);
+      await refreshList({ source: "filter" });
       return;
     }
     if (row && !actionElement) {

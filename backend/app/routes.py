@@ -675,12 +675,20 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         clauses.append("status = ?")
         params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    # The workspace only needs metadata.  Do not read/parse result_json here:
+    # completed screenplays can be large, and their full payload is fetched by
+    # the detail endpoint only when the user opens a task.
+    list_columns = """
+        id, title, file_name, duration_sec, estimated_minutes, credits_used,
+        status, stage, progress_percent, error, created_at, updated_at,
+        completed_at, batch_id, batch_title, batch_index, batch_total
+    """
     with db() as connection:
         # The workspace is a recency-based task inbox: the most recently
         # created task must be visible first. Keep the id as a deterministic
         # tie-breaker for tasks created in the same timestamp tick.
-        rows = connection.execute(f"SELECT * FROM tasks {where} ORDER BY created_at DESC, id DESC", params).fetchall()
-    return [row_to_task(row) for row in rows]
+        rows = connection.execute(f"SELECT {list_columns} FROM tasks {where} ORDER BY created_at DESC, id DESC", params).fetchall()
+    return [row_to_task(row, include_result=False) for row in rows]
 
 
 def task_detail(request: Request, task_id: str) -> dict[str, Any]:

@@ -14,36 +14,38 @@ from .media import default_batch_title, episode_from_filename, is_default_batch_
 from .script import normalize_script
 
 # Read adapters keep the API shape independent from SQLite column names.
-def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, Any]:
     task = dict(row)
-    file_name = str(task.pop("file_name") or "")
+    file_name = str(task.pop("file_name", "") or "")
     display_title = title_with_episode(str(task.get("title") or "未命名视频"), file_name)
     task["title"] = display_title
-    raw_result = json.loads(task.pop("result_json")) if task.get("result_json") else None
+    raw_result_json = task.pop("result_json", None)
+    raw_result = json.loads(raw_result_json) if include_result and raw_result_json else None
     # Normalize on read as well as on generation so older tasks immediately
     # benefit from the same punctuation, VO, scene-granularity and micro-detail
     # rules without rewriting their stored source response.
-    if raw_result:
+    if include_result and raw_result:
         try:
             task["result"] = normalize_script(raw_result, display_title)
         except (ArkError, TypeError, ValueError, KeyError):
             task["result"] = raw_result
     else:
         task["result"] = None
-    task["quality"] = json.loads(task.pop("quality_json")) if task.get("quality_json") else None
+    quality_json = task.pop("quality_json", None)
+    task["quality"] = json.loads(quality_json) if include_result and quality_json else None
     raw_evidence = task.pop("evidence_json", None)
-    task["evidence"] = json.loads(raw_evidence) if raw_evidence else None
+    task["evidence"] = json.loads(raw_evidence) if include_result and raw_evidence else None
     task["fileName"] = file_name
     task["episodeNumber"] = episode_from_filename(file_name)
-    task["fileSize"] = task.pop("file_size")
-    task["mimeType"] = task.pop("mime_type")
-    task["durationSec"] = task.pop("duration_sec")
-    task["estimatedMinutes"] = task.pop("estimated_minutes")
-    task["creditsUsed"] = task.pop("credits_used")
-    task["progressPercent"] = task.pop("progress_percent")
-    task["createdAt"] = task.pop("created_at")
-    task["updatedAt"] = task.pop("updated_at")
-    task["completedAt"] = task.pop("completed_at")
+    task["fileSize"] = task.pop("file_size", 0)
+    task["mimeType"] = task.pop("mime_type", "video/mp4")
+    task["durationSec"] = task.pop("duration_sec", 0)
+    task["estimatedMinutes"] = task.pop("estimated_minutes", 0)
+    task["creditsUsed"] = task.pop("credits_used", 0)
+    task["progressPercent"] = task.pop("progress_percent", 0)
+    task["createdAt"] = task.pop("created_at", None)
+    task["updatedAt"] = task.pop("updated_at", None)
+    task["completedAt"] = task.pop("completed_at", None)
     task["provider"] = task.pop("provider", None)
     task["model"] = task.pop("model", None)
     input_tokens = task.pop("input_tokens", None)
