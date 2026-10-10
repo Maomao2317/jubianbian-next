@@ -48,7 +48,9 @@ ARK_API_KEY_2 = os.getenv("ARK_API_KEY_2", "").strip()
 ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2) if key))
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
-ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-1-lite-260915").strip()
+# The staging Ark accounts have the 2.0 Lite service enabled.  The newer 2.1
+# Lite ID exists in the catalog but is not activated for these accounts.
+ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-0-lite-260428").strip()
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
 ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() or "complexity"
 ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
