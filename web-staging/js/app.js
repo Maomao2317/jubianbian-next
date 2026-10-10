@@ -1171,12 +1171,16 @@
         const transcriptItem = audioSource && Array.isArray(audioSource.items) ? audioSource.items.find((item) => item.type === "transcript") : null;
         const evidenceLabel = `独立证据来源：${evidenceSources}${transcriptItem && transcriptItem.text ? `；音频转写：${String(transcriptItem.text).slice(0, 280)}` : ""}`;
         const issues = [{ severity: "证据", description: evidenceLabel }, ...rawIssues];
-        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">质量门禁</span><h2>管理员复核</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><p class="quality-note quality-warning">普通用户不能自行通过。请根据原视频和问题定位确认剧本是否可交付。</p><div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong><span>${escapeHtml(task.fileName || "")}</span></div><div class="admin-review-issues">${issues.length ? issues.map(issue => `<p><b>${escapeHtml(issue.severity || "提示")}</b>${escapeHtml(issue.description || issue.tag || "请核对该项")}</p>`).join("") : "<p>没有结构化问题记录，请直接回看原视频确认。</p>"}</div><div class="admin-review-script">${scriptPreview(task.result)}</div><div class="modal-actions"><button class="primary-btn" type="button" data-action="admin-approve" data-id="${task.id}">确认通过并开放下载</button><button class="cancel-btn" type="button" data-action="close-modal">暂不通过</button></div></div></div>`;
+        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">质量门禁</span><h2>管理员复核</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><p class="quality-note quality-warning">普通用户不能自行通过。请根据原视频和问题定位确认剧本是否可交付。</p><div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong><span>${escapeHtml(task.fileName || "")}</span></div><div class="admin-review-issues">${issues.length ? issues.map(issue => `<p><b>${escapeHtml(issue.severity || "提示")}</b>${escapeHtml(issue.description || issue.tag || "请核对该项")}</p>`).join("") : "<p>没有结构化问题记录，请直接回看原视频确认。</p>"}</div><div class="quality-note">退回重试不会再次扣除用户额度，系统会重新读取原视频并再次进入质量复核。</div><div class="admin-review-script">${scriptPreview(task.result)}</div><div class="modal-actions"><button class="primary-btn" type="button" data-action="admin-approve" data-id="${task.id}">确认通过并开放下载</button><button class="secondary-btn" type="button" data-action="admin-review-retry" data-id="${task.id}">退回并免费重试</button><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
       } catch (error) { toast(error.message || "复核内容加载失败", "error"); }
       return;
     }
     if (action === "admin-approve") {
       try { await api.approveAdminTask(id); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; $("#modalRoot").innerHTML = ""; toast("已确认通过，用户现在可以下载"); await renderAdmin(); } catch (error) { toast(error.message || "复核通过失败", "error"); }
+      return;
+    }
+    if (action === "admin-review-retry") {
+      try { await api.retryAdminTask(id); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; $("#modalRoot").innerHTML = ""; toast("已退回复核，免费重新识别"); await renderAdmin(); } catch (error) { toast(error.message || "重新识别失败", "error"); }
       return;
     }
     if (action === "toggle-password") {

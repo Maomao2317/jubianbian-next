@@ -703,9 +703,36 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
         raise HTTPException(status_code=404, detail="任务不存在")
     if not Path(row["stored_path"]).exists():
         raise HTTPException(status_code=409, detail="原始视频不存在")
-    if row["status"] != "failed":
-        raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+    task_status = str(row["status"] or "")
+    if task_status not in {"failed", "review"}:
+        raise HTTPException(status_code=409, detail="只有失败或待复核任务可以重试")
+
+    # A review retry repairs a quality-gated result that was already charged as
+    # part of the original recognition. It must preserve that charge and must
+    # not create a second credit-ledger entry. Failed-task retries retain the
+    # historical behavior and are charged again after the original failure was
+    # refunded.
     retry_minutes = max(1, int(row["estimated_minutes"] or 1))
+    if task_status == "review":
+        with db() as connection:
+            changed = connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'queued', stage = 'queued', progress_percent = 4,
+                    error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
+                    model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
+                    api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
+                WHERE id = ? AND user_id = ? AND status = 'review'
+                """,
+                (now_iso(), task_id, user_id),
+            ).rowcount
+        if changed != 1:
+            raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
+        record_task_event(task_id, "admin_review_retry", "管理员退回复核问题，免费重新识别", status="queued", stage="queued", progress_percent=4)
+        _admin_audit(admin["id"], "task_review_retry", "task", task_id, "quality review retry without additional user charge")
+        background.add_task(process_task, task_id)
+        return {"id": task_id, "status": "queued", "charged": False, "message": "已退回复核并免费重新识别"}
+
     with db() as connection:
         charged = _charge_user(connection, user_id, retry_minutes)
         if charged is None:
@@ -731,7 +758,7 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
     record_task_event(task_id, "admin_retry", "管理员重新排队", status="queued", stage="queued", progress_percent=4)
     _admin_audit(admin["id"], "task_retry", "task", task_id)
     background.add_task(process_task, task_id)
-    return {"id": task_id, "status": "queued"}
+    return {"id": task_id, "status": "queued", "charged": True}
 
 
 def admin_audit_logs(request: Request, limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
