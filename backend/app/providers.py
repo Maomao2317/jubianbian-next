@@ -22,6 +22,12 @@ from .config import (
     ARK_FILE_POLL_SECONDS,
     ARK_FILE_POLL_TIMEOUT_SECONDS,
     ARK_MODEL,
+    ARK_UPLOAD_PROXY_AUDIO_BITRATE,
+    ARK_UPLOAD_PROXY_MAX_HEIGHT,
+    ARK_UPLOAD_PROXY_MAX_MB,
+    ARK_UPLOAD_PROXY_PRESET,
+    ARK_UPLOAD_PROXY_TIMEOUT_SECONDS,
+    ARK_UPLOAD_PROXY_VIDEO_BITRATE,
     ARK_RESPONSE_TIMEOUT_SECONDS,
     ARK_UPLOAD_TIMEOUT_SECONDS,
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
@@ -35,7 +41,7 @@ from .config import (
 )
 from .errors import ArkError
 from .evidence import evidence_summary
-from .logging_setup import logger
+from .logging_setup import logger, safe_error_text
 from .media import multipart_body
 from .script import normalize_script
 
@@ -125,34 +131,117 @@ def ark_http(
         raise ArkError("方舟接口返回了无法解析的响应") from exc
 
 
+def _ark_upload_proxy(path: Path) -> tuple[Path, Path | None]:
+    """Create a temporary smaller MP4 when the source is expensive to upload.
+
+    The original file remains untouched.  If ffmpeg is unavailable or the
+    proxy cannot be produced, callers fall back to the source transparently.
+    """
+    if ARK_UPLOAD_PROXY_MAX_MB <= 0:
+        return path, None
+    try:
+        source_size = path.stat().st_size
+    except OSError:
+        return path, None
+    if source_size <= ARK_UPLOAD_PROXY_MAX_MB * 1024 * 1024:
+        return path, None
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        logger.warning("provider_step provider=ark operation=proxy_unavailable file=%s reason=ffmpeg_missing", path.name)
+        return path, None
+
+    proxy_dir = Path(tempfile.mkdtemp(prefix="jbb-ark-upload-", dir=DATA_DIR))
+    proxy_path = proxy_dir / f"{path.stem}.ark.mp4"
+    started = time.perf_counter()
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(path),
+        "-vf",
+        f"scale='min({ARK_UPLOAD_PROXY_MAX_HEIGHT},iw)':-2",
+        "-c:v",
+        "libx264",
+        "-preset",
+        ARK_UPLOAD_PROXY_PRESET,
+        "-b:v",
+        ARK_UPLOAD_PROXY_VIDEO_BITRATE,
+        "-maxrate",
+        ARK_UPLOAD_PROXY_VIDEO_BITRATE,
+        "-bufsize",
+        ARK_UPLOAD_PROXY_VIDEO_BITRATE,
+        "-c:a",
+        "aac",
+        "-b:a",
+        ARK_UPLOAD_PROXY_AUDIO_BITRATE,
+        "-movflags",
+        "+faststart",
+        "-y",
+        str(proxy_path),
+    ]
+    try:
+        subprocess.run(
+            command,
+            capture_output=True,
+            timeout=ARK_UPLOAD_PROXY_TIMEOUT_SECONDS,
+            check=True,
+        )
+        proxy_size = proxy_path.stat().st_size
+        if proxy_size <= 0 or proxy_size >= source_size:
+            raise OSError("proxy_not_smaller")
+        logger.info(
+            "provider_step provider=ark operation=proxy file=%s source_bytes=%s proxy_bytes=%s duration_ms=%.1f",
+            path.name,
+            source_size,
+            proxy_size,
+            (time.perf_counter() - started) * 1000,
+        )
+        return proxy_path, proxy_dir
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "provider_step provider=ark operation=proxy_failed file=%s error=%s",
+            path.name,
+            safe_error_text(exc),
+        )
+        shutil.rmtree(proxy_dir, ignore_errors=True)
+        return path, None
+
+
 def ark_upload_video(path: Path, api_key: str | None = None) -> str:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
-    fields = {
-        "purpose": "user_data",
-        "preprocess_configs": json.dumps({"video": {"fps": ARK_VIDEO_FPS}}, separators=(",", ":")),
-    }
-    body, boundary = multipart_body(
-        fields,
-        "file",
-        path.name,
-        path.read_bytes(),
-        "video/mp4",
-    )
-    payload = ark_http(
-        "POST",
-        "/files",
-        body,
-        f"multipart/form-data; boundary={boundary}",
-        api_key=api_key,
-        timeout=ARK_UPLOAD_TIMEOUT_SECONDS,
-    )
-    file_id = None
-    if isinstance(payload, dict):
-        file_id = payload.get("id") or payload.get("file_id")
-    if not file_id:
-        raise ArkError("方舟上传成功但没有返回 file_id")
-    return str(file_id)
+    upload_path, proxy_dir = _ark_upload_proxy(path)
+    try:
+        fields = {
+            "purpose": "user_data",
+            "preprocess_configs": json.dumps({"video": {"fps": ARK_VIDEO_FPS}}, separators=(",", ":")),
+        }
+        body, boundary = multipart_body(
+            fields,
+            "file",
+            upload_path.name,
+            upload_path.read_bytes(),
+            "video/mp4",
+        )
+        payload = ark_http(
+            "POST",
+            "/files",
+            body,
+            f"multipart/form-data; boundary={boundary}",
+            api_key=api_key,
+            timeout=ARK_UPLOAD_TIMEOUT_SECONDS,
+        )
+        file_id = None
+        if isinstance(payload, dict):
+            file_id = payload.get("id") or payload.get("file_id")
+        if not file_id:
+            raise ArkError("方舟上传成功但没有返回 file_id")
+        return str(file_id)
+    finally:
+        if proxy_dir is not None:
+            shutil.rmtree(proxy_dir, ignore_errors=True)
 
 
 def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:

@@ -56,10 +56,23 @@ ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() o
 ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
+# The Ark Files endpoint is reached from the app container.  On the staging
+# host an 80+ MB source can spend more than a minute in transit before the
+# actual model request even starts.  Large files get a temporary, visually
+# faithful proxy for upload; the original remains untouched on disk.
+ARK_UPLOAD_PROXY_MAX_MB = max(0.0, float(os.getenv("ARK_UPLOAD_PROXY_MAX_MB", "32")))
+ARK_UPLOAD_PROXY_MAX_HEIGHT = max(360, int(os.getenv("ARK_UPLOAD_PROXY_MAX_HEIGHT", "720")))
+ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "1600k").strip() or "1600k"
+ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "64k").strip() or "64k"
+ARK_UPLOAD_PROXY_PRESET = os.getenv("ARK_UPLOAD_PROXY_PRESET", "veryfast").strip() or "veryfast"
+ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_TIMEOUT_SECONDS", "180")))
 # Uploads can be slow on a small cloud instance, but an inference response
 # should not hold a worker for five minutes before the task can fail over.
 ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "240")))
-ARK_RESPONSE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_RESPONSE_TIMEOUT_SECONDS", "120")))
+# Real successful Ark responses in staging take roughly 190-290 seconds for
+# 1-2 minute clips.  Keep the timeout above that range so a slow response is
+# not reported as a false model failure after the upload already succeeded.
+ARK_RESPONSE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_RESPONSE_TIMEOUT_SECONDS", "300")))
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Optional Ark billing fallback.  The Ark response is preferred when it
 # contains a billed amount; these rates let staging calculate a cost from the

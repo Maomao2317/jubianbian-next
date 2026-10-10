@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from app import providers
 from app.evidence import collect_evidence, evidence_summary, transcript_from_evidence
 from app.media import default_batch_title
 from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
@@ -9,6 +11,13 @@ from app.script import clean_action_text, episode_from_text, matching_character_
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
+    def test_ark_upload_proxy_leaves_small_source_untouched(self):
+        source = Path(__file__)
+        with patch.object(providers, "ARK_UPLOAD_PROXY_MAX_MB", 32):
+            upload_path, proxy_dir = providers._ark_upload_proxy(source)
+        self.assertEqual(upload_path, source)
+        self.assertIsNone(proxy_dir)
+
     def test_episode_markers_in_upload_names(self):
         self.assertEqual(episode_from_text("2.mp4"), 2)
         self.assertEqual(episode_from_text("episode_02_final.mp4"), 2)
