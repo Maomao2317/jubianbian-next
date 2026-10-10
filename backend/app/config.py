@@ -43,6 +43,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "whisper-1")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+# Independent local ASR is the default evidence source.  It deliberately runs
+# outside the video-understanding model so dialogue omissions can be measured
+# instead of asking the same model to check its own answer.  Set the model to
+# an empty value to disable it and use the optional OpenAI transcription path.
+LOCAL_ASR_MODEL = os.getenv("JBB_LOCAL_ASR_MODEL", "small").strip()
+LOCAL_ASR_DEVICE = os.getenv("JBB_LOCAL_ASR_DEVICE", "cpu").strip() or "cpu"
+LOCAL_ASR_COMPUTE_TYPE = os.getenv("JBB_LOCAL_ASR_COMPUTE_TYPE", "int8").strip() or "int8"
+LOCAL_ASR_LANGUAGE = os.getenv("JBB_LOCAL_ASR_LANGUAGE", "zh").strip()
+LOCAL_ASR_BEAM_SIZE = max(1, min(10, int(os.getenv("JBB_LOCAL_ASR_BEAM_SIZE", "5"))))
+OCR_LANG = os.getenv("JBB_OCR_LANG", "chi_sim+eng").strip() or "chi_sim+eng"
+OCR_SAMPLE_INTERVAL_SECONDS = max(0.5, float(os.getenv("JBB_OCR_SAMPLE_INTERVAL_SECONDS", "1.0")))
+OCR_MAX_FRAMES = max(12, min(360, int(os.getenv("JBB_OCR_MAX_FRAMES", "180"))))
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_API_KEY_2 = os.getenv("ARK_API_KEY_2", "").strip()
 ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2) if key))
@@ -53,7 +65,7 @@ ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
 ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-0-lite-260428").strip()
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
 ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() or "complexity"
-ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
+ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "1.0"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 # The Ark Files endpoint is reached from the app container.  On the staging

@@ -1,8 +1,9 @@
+import asyncio
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import providers
+from app import processing, providers
 from app.evidence import collect_evidence, evidence_summary, transcript_from_evidence
 from app.media import default_batch_title
 from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
@@ -28,6 +29,12 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             bitrate, height = providers._ark_proxy_profile(180)
         self.assertLess(int(bitrate.removesuffix("k")), 180)
         self.assertEqual(height, 360)
+
+    def test_ark_sampling_is_denser_for_short_fast_video(self):
+        with patch.object(providers, "ARK_VIDEO_FPS", 0.5):
+            self.assertEqual(providers.ark_sampling_fps(60), 2.0)
+            self.assertEqual(providers.ark_sampling_fps(150), 1.0)
+            self.assertEqual(providers.ark_sampling_fps(240), 0.5)
 
     def test_ark_stream_response_returns_completed_payload(self):
         completed = {
@@ -198,6 +205,64 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertTrue(any(item["tag"] == "音频对白不一致" for item in issues))
 
+    def test_time_anchored_asr_finds_one_missing_line_inside_longer_transcript(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [
+                        {"type": "dialogue", "speaker": "甲", "text": "第一句话完整保留"},
+                        {"type": "dialogue", "speaker": "甲", "text": "第三句话也完整保留"},
+                    ],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [{
+                "kind": "audio",
+                "status": "available",
+                "items": [
+                    {"type": "transcript_segment", "text": "第一句话完整保留", "startSec": 1, "endSec": 2},
+                    {"type": "transcript_segment", "text": "中间这一句被漏掉了", "startSec": 3, "endSec": 4},
+                    {"type": "transcript_segment", "text": "第三句话也完整保留", "startSec": 5, "endSec": 6},
+                ],
+            }],
+        }
+        quality = script_quality(script, "test", evidence)
+        missing = next(issue for issue in quality["issues"] if issue["tag"] == "疑似漏台词片段")
+        self.assertEqual((missing["startSec"], missing["endSec"]), (3, 4))
+        self.assertEqual(quality["evidenceProblemRanges"][0]["kind"], "audio")
+        self.assertFalse(quality_gate(quality)[0])
+
+    def test_repeated_asr_line_is_not_deduplicated_before_coverage(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "dialogue", "speaker": "甲", "text": "你快回来这里"}],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [{
+                "kind": "audio",
+                "status": "available",
+                "items": [
+                    {"type": "transcript_segment", "text": "你快回来这里", "startSec": 1, "endSec": 2},
+                    {"type": "transcript_segment", "text": "你快回来这里", "startSec": 3, "endSec": 4},
+                ],
+            }],
+        }
+        quality = script_quality(script, "test", evidence)
+        self.assertLess(quality["transcriptCoverage"], 72)
+        self.assertFalse(quality_gate(quality)[0])
+
     def test_repeated_ocr_frames_do_not_count_as_missing_subtitles(self):
         script = normalize_script(
             {
@@ -299,6 +364,30 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         audio = next(source for source in evidence["sources"] if source["kind"] == "audio")
         self.assertEqual(audio["status"], "unavailable")
 
+    def test_missing_independent_transcript_is_explicit_and_never_a_percentage(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "dialogue", "speaker": "甲", "text": "我今天一直在公司开会"}],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [
+                {"kind": "audio", "status": "unavailable", "reason": "测试环境没有 ASR", "items": []},
+                {"kind": "ocr", "status": "available", "items": []},
+            ]
+        }
+        quality = script_quality(script, "test", evidence)
+        self.assertIsNone(quality["transcriptCoverage"])
+        self.assertIsNone(quality["dialogueEvidencePrecision"])
+        self.assertTrue(any(issue["tag"] == "独立音频转写缺失" for issue in quality["issues"]))
+        self.assertFalse(quality_gate(quality)[0])
+
     def test_ark_route_uses_turbo_for_complex_or_evidence_poor_video(self):
         simple = select_ark_route(
             30,
@@ -323,6 +412,127 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(simple["band"], "simple")
         self.assertEqual(complex_route["band"], "complex")
         self.assertIn("duration>=180s", complex_route["reasons"])
+
+        short_without_independent_evidence = select_ark_route(
+            30,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "unavailable", "items": []},
+                    {"kind": "ocr", "status": "unavailable", "items": []},
+                    {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+                ]
+            },
+        )
+        self.assertEqual(short_without_independent_evidence["band"], "complex")
+        self.assertIn("independent_audio_and_ocr_unavailable", short_without_independent_evidence["reasons"])
+
+        short_without_audio = select_ark_route(
+            30,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "unavailable", "items": []},
+                    {"kind": "ocr", "status": "available", "items": [{"text": "画面字幕"}]},
+                    {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+                ]
+            },
+        )
+        self.assertEqual(short_without_audio["band"], "complex")
+
+    def test_lite_blocking_result_gets_one_turbo_review_and_can_finish(self):
+        evidence = {
+            "status": "available",
+            "summary": "test",
+            "sources": [
+                {"kind": "audio", "status": "available", "items": [{"type": "transcript", "text": "你好"}]},
+                {"kind": "ocr", "status": "available", "items": []},
+                {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+            ],
+        }
+        bad = {
+            "characters": ["甲"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [{"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True, "startSec": 1, "endSec": 2}],
+            }],
+        }
+        repaired = {
+            "characters": ["甲"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [{"type": "dialogue", "speaker": "甲", "text": "你好", "startSec": 1, "endSec": 2}],
+            }],
+        }
+        row = {"id": "task-1", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30}
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_LITE_MODEL", "lite"),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "ARK_MODEL", "turbo"),
+            patch.object(processing, "ARK_ROUTING_MODE", "complexity"),
+            patch.object(processing, "probe_duration", return_value=30),
+            patch.object(processing, "collect_evidence", return_value=evidence),
+            patch.object(processing, "update_task"),
+            patch.object(
+                processing,
+                "ark_recognize",
+                side_effect=[
+                    (bad, {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "api_cost_rmb": 0.1}),
+                    (repaired, {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28, "api_cost_rmb": 0.2}),
+                ],
+            ) as recognize,
+        ):
+            script, quality, usage, _ = asyncio.run(processing.run_recognizer(row))
+        self.assertEqual(recognize.call_count, 2)
+        self.assertEqual(script["scenes"][0]["blocks"][0]["speaker"], "甲")
+        self.assertTrue(quality_gate(quality)[0])
+        self.assertEqual(quality["modelRoute"], "turbo_review")
+        self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
+        self.assertEqual(usage["model"], "turbo")
+        self.assertEqual(usage["total_tokens"], 43)
+
+    def test_turbo_review_is_not_recursive_when_issues_remain(self):
+        evidence = {
+            "status": "available",
+            "summary": "test",
+            "sources": [
+                {"kind": "audio", "status": "available", "items": [{"type": "transcript", "text": "你好"}]},
+                {"kind": "ocr", "status": "available", "items": []},
+                {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+            ],
+        }
+        unresolved = {
+            "characters": ["甲"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [{"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True}],
+            }],
+        }
+        row = {"id": "task-2", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30}
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_LITE_MODEL", "lite"),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "ARK_MODEL", "turbo"),
+            patch.object(processing, "ARK_ROUTING_MODE", "complexity"),
+            patch.object(processing, "probe_duration", return_value=30),
+            patch.object(processing, "collect_evidence", return_value=evidence),
+            patch.object(processing, "update_task"),
+            patch.object(
+                processing,
+                "ark_recognize",
+                side_effect=[
+                    (unresolved, {"total_tokens": 10, "api_cost_rmb": 0}),
+                    (unresolved, {"total_tokens": 12, "api_cost_rmb": 0}),
+                ],
+            ) as recognize,
+        ):
+            _script, quality, _usage, _ = asyncio.run(processing.run_recognizer(row))
+        self.assertEqual(recognize.call_count, 2)
+        self.assertFalse(quality_gate(quality)[0])
+        self.assertTrue(quality["automatedReview"]["unresolvedIssues"])
 
 
 if __name__ == "__main__":

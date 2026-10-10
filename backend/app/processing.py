@@ -62,8 +62,13 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
         score += 1
         reasons.append("ocr>=3items")
     if not audio or audio.get("status") != "available":
-        score += 1
+        score += 2
         reasons.append("audio_unavailable")
+    if not ocr or ocr.get("status") != "available":
+        score += 2
+        reasons.append("ocr_unavailable")
+    if (not audio or audio.get("status") != "available") and (not ocr or ocr.get("status") != "available"):
+        reasons.append("independent_audio_and_ocr_unavailable")
     if not keyframes or keyframes.get("status") != "available":
         score += 1
         reasons.append("keyframes_unavailable")
@@ -83,6 +88,72 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
         "score": score,
         "reasons": reasons,
         "mode": mode,
+    }
+
+
+def _evaluate_quality(
+    script: dict[str, Any],
+    provider: str,
+    evidence: dict[str, Any],
+    route: dict[str, Any],
+) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    quality = script_quality(script, provider, evidence)
+    approved, blocking = quality_gate(quality)
+    quality["deliveryStatus"] = "approved" if approved else "review_required"
+    quality["blockingIssues"] = blocking
+    quality["evidenceStatus"] = evidence.get("status")
+    quality["evidenceSources"] = {
+        source.get("kind"): source.get("status")
+        for source in evidence.get("sources") or []
+        if isinstance(source, dict)
+    }
+    quality["evidenceSummary"] = evidence.get("summary", "")
+    quality["modelRoute"] = route["band"]
+    quality["routingScore"] = route["score"]
+    quality["routingReasons"] = route["reasons"]
+    return quality, approved, blocking
+
+
+def _merge_usage(*records: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        values = [record.get(key) for record in records if isinstance(record.get(key), (int, float))]
+        result[key] = int(sum(values)) if values else None
+    result["api_cost_rmb"] = round(
+        sum(float(record.get("api_cost_rmb") or 0) for record in records),
+        6,
+    )
+    return result
+
+
+def _issue_identity(issue: dict[str, Any]) -> str:
+    return "|".join(
+        str(issue.get(key) or "")
+        for key in ("severity", "tag", "scene", "block", "description")
+    )
+
+
+def _automated_review_context(
+    script: dict[str, Any],
+    blocking: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ranges = []
+    for issue in blocking:
+        start = issue.get("startSec")
+        end = issue.get("endSec")
+        if start is None and end is None:
+            continue
+        ranges.append({
+            "startSec": start,
+            "endSec": end,
+            "tag": issue.get("tag"),
+            "severity": issue.get("severity"),
+        })
+    return {
+        "scope": "full_video_with_issue_ranges",
+        "issues": blocking[:40],
+        "ranges": ranges[:40],
+        "draft": script,
     }
 
 
@@ -169,17 +240,85 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
                     raise ark_error or exc
         if ark_script is not None and ark_usage_data is not None:
             script = normalize_script(ark_script, row["title"])
-            quality = script_quality(script, "ark", evidence)
-            approved, blocking = quality_gate(quality)
-            quality["deliveryStatus"] = "approved" if approved else "review_required"
-            quality["blockingIssues"] = blocking
-            quality["evidenceStatus"] = evidence.get("status")
-            quality["evidenceSources"] = {source.get("kind"): source.get("status") for source in evidence.get("sources") or [] if isinstance(source, dict)}
-            quality["evidenceSummary"] = evidence.get("summary", "")
-            quality["modelRoute"] = route["band"]
-            quality["routingScore"] = route["score"]
-            quality["routingReasons"] = route["reasons"]
-            return script, quality, {**ark_usage_data, "provider": "ark", "model": route["model"]}, evidence
+            quality, approved, blocking = _evaluate_quality(script, "ark", evidence, route)
+            initial_model = route["model"]
+            final_model = initial_model
+            final_usage = dict(ark_usage_data)
+            review_metadata: dict[str, Any] = {
+                "initialModel": initial_model,
+                "reviewModel": None,
+                "attemptCount": 1,
+                "triggeringIssues": blocking,
+                "resolvedIssues": [],
+                "unresolvedIssues": blocking,
+                "reviewScope": None,
+            }
+
+            turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
+            may_auto_review = (
+                not approved
+                and route.get("band") == "simple"
+                and route.get("mode") not in {"lite", "lite_only"}
+                and bool(turbo_model)
+                and turbo_model != initial_model
+            )
+            if may_auto_review:
+                context = _automated_review_context(script, blocking)
+                review_metadata.update({
+                    "reviewModel": turbo_model,
+                    "attemptCount": 2,
+                    "reviewScope": context["scope"],
+                })
+                logger.info(
+                    "provider_review provider=ark task_id=%s from_model=%s to_model=%s issues=%s",
+                    row["id"],
+                    initial_model,
+                    turbo_model,
+                    len(blocking),
+                )
+                try:
+                    reviewed_script, reviewed_usage = await asyncio.to_thread(
+                        ark_recognize,
+                        path,
+                        row["title"],
+                        duration,
+                        evidence,
+                        turbo_model,
+                        review_context=context,
+                    )
+                    review_route = {
+                        **route,
+                        "model": turbo_model,
+                        "band": "turbo_review",
+                        "reasons": [*route["reasons"], "lite_quality_gate_failed_turbo_review"],
+                    }
+                    reviewed_script = normalize_script(reviewed_script, row["title"])
+                    reviewed_quality, _reviewed_approved, reviewed_blocking = _evaluate_quality(
+                        reviewed_script,
+                        "ark",
+                        evidence,
+                        review_route,
+                    )
+                    unresolved_ids = {_issue_identity(issue) for issue in reviewed_blocking}
+                    review_metadata["resolvedIssues"] = [
+                        issue for issue in blocking if _issue_identity(issue) not in unresolved_ids
+                    ]
+                    review_metadata["unresolvedIssues"] = reviewed_blocking
+                    script = reviewed_script
+                    quality = reviewed_quality
+                    final_model = turbo_model
+                    final_usage = _merge_usage(ark_usage_data, reviewed_usage)
+                except ArkError as review_exc:
+                    review_metadata["reviewError"] = safe_error_text(review_exc)
+                    quality["warning"] = "Turbo 自动复核失败，已保留 Lite 草稿并转管理员复核。"
+                    logger.warning(
+                        "provider_review_failed provider=ark task_id=%s error=%s",
+                        row["id"],
+                        safe_error_text(review_exc),
+                    )
+
+            quality["automatedReview"] = review_metadata
+            return script, quality, {**final_usage, "provider": "ark", "model": final_model}, evidence
     elif not OPENAI_API_KEY:
         raise ArkError("未配置方舟或 OpenAI API Key，任务无法进行真实视频识别")
 
@@ -195,16 +334,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         raise ArkError("OpenAI 未返回可用剧本，未生成未经证实的剧本")
     provider = "openai"
     script = normalize_script(script, row["title"])
-    quality = script_quality(script, provider, evidence)
-    approved, blocking = quality_gate(quality)
-    quality["deliveryStatus"] = "approved" if approved else "review_required"
-    quality["blockingIssues"] = blocking
-    quality["evidenceStatus"] = evidence.get("status")
-    quality["evidenceSources"] = {source.get("kind"): source.get("status") for source in evidence.get("sources") or [] if isinstance(source, dict)}
-    quality["evidenceSummary"] = evidence.get("summary", "")
-    quality["modelRoute"] = route["band"]
-    quality["routingScore"] = route["score"]
-    quality["routingReasons"] = route["reasons"]
+    quality, _approved, _blocking = _evaluate_quality(script, provider, evidence, route)
     if ark_error:
         quality["warning"] = ark_fallback_message(ark_error)
         quality["warning"] += " 本次结果使用了 OpenAI 备用识别链路。"

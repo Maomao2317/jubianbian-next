@@ -22,7 +22,7 @@ ARK_MODEL=doubao-seed-2-1-turbo-260628
 ARK_LITE_MODEL=doubao-seed-2-0-lite-260428
 ARK_TURBO_MODEL=doubao-seed-2-1-turbo-260628
 ARK_ROUTING_MODE=complexity
-ARK_VIDEO_FPS=0.5
+ARK_VIDEO_FPS=1.0
 ARK_FILE_POLL_SECONDS=1
 ARK_RESPONSE_POLL_TIMEOUT_SECONDS=900
 ARK_THINKING_TYPE=disabled
@@ -77,3 +77,13 @@ sudo /opt/jubianbian-staging/ops/install-staging-automation.sh
 配置 `ARK_API_KEY` 后，任务会优先走“上传视频 → 方舟 Responses API → 结构化剧本 → Markdown/TXT 导出”的真实链路。方舟返回限流、额度耗尽或暂时不可用时，默认（`ARK_FALLBACK_ON_ERROR=1`）自动尝试 OpenAI；备用识别也失败时任务进入重试/失败流程，不生成未经证实的本地伪剧本，并在识别概况中显示降级提示；需要严格暴露方舟故障时可将该开关设为 `0`。
 
 `ARK_ROUTING_MODE=complexity` 时，系统会在调用方舟前根据视频时长、独立转写/OCR证据和关键帧可用性选择 Lite 或 Turbo，并把实际模型与路由原因写入任务质量记录；设为 `lite_only` 或 `turbo_only` 可用于对照测试。
+
+## 独立证据与质量复核
+
+Docker 镜像内置 `faster-whisper`、Tesseract 简体中文语言包和 ffmpeg。默认用
+`JBB_LOCAL_ASR_MODEL=small` 做独立音频转写，用
+`JBB_OCR_SAMPLE_INTERVAL_SECONDS=1.0`（最长 180 帧）抽取字幕证据；首次运行会把 ASR 模型下载并缓存到持久化数据卷的 `models/huggingface` 目录。可按服务器性能调整设备、计算精度、语言、beam size 和 OCR 帧数，完整变量见 `.env.example`。
+
+复杂度路由会在独立音频或 OCR 任一来源不可用时直接选择 Turbo。Lite 初稿若触发 P0/P1 质量门禁，系统只自动追加一次 Turbo 全视频复核，并把原模型、复核模型、触发问题、时间范围、已解决和未解决问题写入质量记录；不会递归复核。独立 ASR/OCR 缺失时覆盖率保持“未校验”，任务进入管理员复核，不会显示虚假百分比或直接开放下载。
+
+管理员在后台打开“管理员复核”，确认原视频与剧本一致后点击“确认通过并开放下载”，任务由 `review` 变为 `done`，视频流程即结束；若仍有漏台词等问题，点击“退回并免费重试”，不会再次扣除普通用户额度。普通用户无权执行这两个操作。

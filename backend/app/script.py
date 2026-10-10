@@ -1328,13 +1328,14 @@ def script_quality(
                 return True
         return False
 
-    def add_issue(tag: str, severity: str, description: str, scene_index: int | None = None, block_index: int | None = None) -> None:
+    def add_issue(tag: str, severity: str, description: str, scene_index: int | None = None, block_index: int | None = None) -> dict[str, Any]:
         issue: dict[str, Any] = {"tag": tag, "severity": severity, "description": description}
         if scene_index is not None:
             issue["scene"] = scene_index
         if block_index is not None:
             issue["block"] = block_index
         issues.append(issue)
+        return issue
 
     # The visible output follows 剧拆拆 and intentionally has no global event
     # chain or scene-task section. Keep those fields optional for compatibility
@@ -1505,9 +1506,18 @@ def script_quality(
     # instead of trusting the same model that produced the screenplay.
     transcript_reference = ""
     ocr_reference = ""
+    transcript_segments: list[dict[str, Any]] = []
+    ocr_segments: list[dict[str, Any]] = []
+    evidence_problem_ranges: list[dict[str, Any]] = []
+    evidence_sources: dict[str, dict[str, Any]] = {}
     if isinstance(evidence, dict):
         for source in evidence.get("sources") or []:
-            if not isinstance(source, dict) or source.get("status") != "available":
+            if not isinstance(source, dict):
+                continue
+            kind = str(source.get("kind") or "")
+            if kind:
+                evidence_sources[kind] = source
+            if source.get("status") != "available":
                 continue
             # OCR samples the same subtitle over several adjacent frames. Use
             # each distinct normalized item once so repeated sampling is not
@@ -1518,14 +1528,49 @@ def script_quality(
                 if not isinstance(item, dict):
                     continue
                 item_text = evidence_comparison_text(item.get("text"))
-                if item_text and item_text not in seen_items:
-                    seen_items.add(item_text)
-                    source_items.append(item_text)
+                if not item_text:
+                    continue
+                # Repeated adjacent ASR lines are real speech and must not be
+                # collapsed: omitting the second occurrence is still a leaked
+                # line. OCR, in contrast, naturally sees the same subtitle in
+                # several frames and is deduplicated for aggregate coverage.
+                if source.get("kind") == "ocr" and item_text in seen_items:
+                    continue
+                seen_items.add(item_text)
+                source_items.append(item_text)
+                segment = {
+                    "text": item_text,
+                    "startSec": item.get("startSec"),
+                    "endSec": item.get("endSec"),
+                }
+                if source.get("kind") == "audio" and item.get("type") == "transcript_segment":
+                    transcript_segments.append(segment)
+                elif source.get("kind") == "ocr":
+                    ocr_segments.append(segment)
             source_text = "".join(source_items)
             if source.get("kind") == "audio":
                 transcript_reference += source_text
             elif source.get("kind") == "ocr":
                 ocr_reference += source_text
+
+    audio_source = evidence_sources.get("audio")
+    if audio_source is not None and audio_source.get("status") != "available":
+        evidence_warnings += 1
+        reason = str(audio_source.get("reason") or "音频转写不可用").strip()
+        add_issue(
+            "独立音频转写缺失",
+            "P1",
+            f"无法用独立 ASR 校验是否漏台词或改写台词：{reason}。本结果必须人工复核，不能显示伪造覆盖率。",
+        )
+    ocr_source = evidence_sources.get("ocr")
+    if ocr_source is not None and ocr_source.get("status") != "available":
+        evidence_warnings += 1
+        reason = str(ocr_source.get("reason") or "OCR 不可用").strip()
+        add_issue(
+            "独立画面文字校验缺失",
+            "P1",
+            f"无法用独立 OCR 校验字幕、姓名条和系统文字是否遗漏：{reason}。本结果必须人工复核。",
+        )
 
     spoken_candidate = ordered_script_text(script, {"dialogue", "vo"})
     transcript_matched, transcript_size, spoken_size = matching_character_counts(
@@ -1553,6 +1598,39 @@ def script_quality(
                 f"成稿台词与独立音频转写部分不一致（转写覆盖 {transcript_coverage}%、成稿吻合 {dialogue_evidence_precision}%），需按原视频复核。",
             )
 
+    # Overall coverage can remain deceptively high when one short line is
+    # missing from a long clip. Check each time-anchored ASR segment as well so
+    # the reviewer can seek directly to the likely omission.
+    for segment in transcript_segments[:100]:
+        segment_text = str(segment.get("text") or "")
+        if len(segment_text) < 2:
+            continue
+        matched, segment_size, _ = matching_character_counts(segment_text, spoken_candidate)
+        segment_coverage = round(100 * matched / segment_size) if segment_size else 100
+        if segment_coverage >= 72:
+            continue
+        severity = "P0" if segment_size >= 4 and segment_coverage < 45 else "P1"
+        start = segment.get("startSec")
+        end = segment.get("endSec")
+        location = f"{float(start):.1f}-{float(end):.1f} 秒" if isinstance(start, (int, float)) and isinstance(end, (int, float)) else "未定位时段"
+        issue = add_issue(
+            "疑似漏台词片段",
+            severity,
+            f"独立 ASR 在 {location} 的语音片段仅有 {segment_coverage}% 出现在成稿中，需逐字回听核对。",
+        )
+        if start is not None:
+            issue["startSec"] = start
+        if end is not None:
+            issue["endSec"] = end
+        evidence_warnings += 1
+        evidence_problem_ranges.append({
+            "kind": "audio",
+            "startSec": start,
+            "endSec": end,
+            "coverage": segment_coverage,
+            "severity": severity,
+        })
+
     screen_text_candidate = ordered_script_text(script, {"screen_text"})
     ocr_matched, ocr_size, _ = matching_character_counts(ocr_reference, screen_text_candidate)
     ocr_coverage: int | None = None
@@ -1565,6 +1643,35 @@ def script_quality(
                 "P1",
                 f"成稿仅覆盖独立 OCR 证据的 {ocr_coverage}%，可能漏掉字幕、姓名条或系统文字。",
             )
+
+    for segment in ocr_segments[:100]:
+        segment_text = str(segment.get("text") or "")
+        if len(segment_text) < 4:
+            continue
+        matched, segment_size, _ = matching_character_counts(segment_text, screen_text_candidate)
+        segment_coverage = round(100 * matched / segment_size) if segment_size else 100
+        if segment_coverage >= 45:
+            continue
+        start = segment.get("startSec")
+        end = segment.get("endSec")
+        location = f"{float(start):.1f}-{float(end):.1f} 秒" if isinstance(start, (int, float)) and isinstance(end, (int, float)) else "未定位时段"
+        issue = add_issue(
+            "疑似漏画面文字片段",
+            "P1",
+            f"独立 OCR 在 {location} 的文字仅有 {segment_coverage}% 出现在成稿字幕中，需回看画面核对。",
+        )
+        if start is not None:
+            issue["startSec"] = start
+        if end is not None:
+            issue["endSec"] = end
+        evidence_warnings += 1
+        evidence_problem_ranges.append({
+            "kind": "ocr",
+            "startSec": start,
+            "endSec": end,
+            "coverage": segment_coverage,
+            "severity": "P1",
+        })
 
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
@@ -1600,6 +1707,26 @@ def script_quality(
     )
     complexity_band = "complex" if complexity_score >= 60 else "standard" if complexity_score >= 25 else "simple"
     review_recommendation = "turbo_review" if complexity_band == "complex" or uncertain else "lite_only"
+
+    # Give automatic and human reviewers a direct seek range whenever the
+    # model supplied block timestamps.  The issue still remains valid when no
+    # trustworthy timestamp exists, so never invent one here.
+    for issue in issues:
+        scene_number = issue.get("scene")
+        block_number = issue.get("block")
+        if not isinstance(scene_number, int) or not isinstance(block_number, int):
+            continue
+        if scene_number < 1 or scene_number > len(scenes):
+            continue
+        blocks = [block for block in (scenes[scene_number - 1].get("blocks") or []) if isinstance(block, dict)]
+        if block_number < 1 or block_number > len(blocks):
+            continue
+        block = blocks[block_number - 1]
+        if block.get("startSec") is not None:
+            issue["startSec"] = block.get("startSec")
+        if block.get("endSec") is not None:
+            issue["endSec"] = block.get("endSec")
+
     issue_tags = list(dict.fromkeys(str(item["tag"]) for item in issues))
     severity_counts = {
         level: sum(1 for item in issues if item.get("severity") == level)
@@ -1636,6 +1763,7 @@ def script_quality(
         "temporalWarnings": temporal_warnings,
         "spatialWarnings": spatial_warnings,
         "evidenceWarnings": evidence_warnings,
+        "evidenceProblemRanges": evidence_problem_ranges,
         "soundTransitionWarnings": sound_transition_warnings,
         "emotionWarnings": emotion_warnings,
         "severityCounts": severity_counts,
