@@ -100,9 +100,48 @@ def _get_local_asr_model() -> Any:
         return _local_asr_model
 
 
+def _decode_audio_ffmpeg(path: Path) -> Any:
+    """Decode media with ffmpeg so ASR does not depend on PyAV's API version."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("未找到 ffmpeg，无法提取音频")
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-",
+        ],
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg 音频提取失败：{_bounded_text(detail, 300)}")
+    if not result.stdout:
+        raise RuntimeError("视频没有可供转写的音频轨道")
+    import numpy as np
+
+    return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def _local_asr_items(path: Path) -> list[dict[str, Any]]:
     """Return time-anchored transcript segments from the local ASR model."""
     model = _get_local_asr_model()
+    audio = _decode_audio_ffmpeg(path)
     language = LOCAL_ASR_LANGUAGE or None
     items: list[dict[str, Any]] = []
     captured_chars = 0
@@ -110,7 +149,7 @@ def _local_asr_items(path: Path) -> list[dict[str, Any]]:
     # model into memory and competing until the host is unresponsive.
     with _local_asr_infer_lock:
         segments, _info = model.transcribe(
-            str(path),
+            audio,
             language=language,
             beam_size=LOCAL_ASR_BEAM_SIZE,
             vad_filter=True,
