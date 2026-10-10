@@ -8,7 +8,7 @@ from app.evidence import collect_evidence, evidence_summary, transcript_from_evi
 from app.media import default_batch_title
 from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
 from app.errors import ArkError
-from app.script import clean_action_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, script_quality, script_to_markdown
+from app.script import clean_action_text, compact_character_detail, compact_emotion_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, script_quality, script_to_markdown
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
@@ -142,6 +142,17 @@ class ScriptQualityRegressionTests(unittest.TestCase):
 
     def test_micro_action_is_not_lost(self):
         self.assertIn("指尖发白", clean_action_text("指尖发白。"))
+
+    def test_character_description_is_compact_and_keeps_concrete_details(self):
+        detail = compact_character_detail("面容温柔、梳麻花辫的长麻花辫、浅蓝碎花衫、浅蓝碎花翻领衬衫、深色长裤")
+        self.assertLessEqual(len(detail), 42)
+        self.assertIn("长麻花辫", detail)
+        self.assertIn("浅蓝碎花翻领衬衫", detail)
+        self.assertNotIn("长麻花辫的长麻花辫", detail)
+
+    def test_repeated_emotion_is_compacted(self):
+        emotion = compact_emotion_text("神情紧张，情绪紧张，语气急切，声音急切")
+        self.assertEqual(emotion, "神情紧张、语气急切")
 
     def test_evidence_matching_handles_repetitive_transcript_quickly(self):
         matched, reference_size, candidate_size = matching_character_counts("啊" * 12000, "啊" * 12000)
@@ -290,7 +301,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(quality["ocrCoverage"], 100)
         self.assertTrue(quality_gate(quality)[0])
 
-    def test_uncertain_evidence_is_explicit_in_export(self):
+    def test_uncertain_evidence_stays_out_of_export_body(self):
         script = normalize_script(
             {
                 "characters": [],
@@ -307,9 +318,30 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             "测试",
         )
         markdown = script_to_markdown({"title": "测试", "result": script})
-        self.assertIn("【需核对·说话人】", markdown)
-        self.assertIn("【需核对·字幕】", markdown)
-        self.assertIn("【需核对·画面】", markdown)
+        self.assertNotIn("需核对", markdown)
+        self.assertIn("你来了", markdown)
+        self.assertIn("模糊字幕", markdown)
+        self.assertIn("未知人物拿起文件", markdown)
+
+    def test_mixed_speaker_line_is_split_and_marked_uncertain(self):
+        script = normalize_script(
+            {
+                "characters": ["甲", "乙"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{
+                        "type": "dialogue",
+                        "speaker": "甲",
+                        "text": "甲：你先走。乙：我不走。",
+                    }],
+                }],
+            },
+            "测试",
+        )
+        blocks = script["scenes"][0]["blocks"]
+        self.assertEqual([block["speaker"] for block in blocks], ["甲", "乙"])
+        self.assertTrue(all(block.get("uncertain") for block in blocks))
 
     def test_quality_gate_blocks_unresolved_p0_but_allows_clean_script(self):
         uncertain = normalize_script(

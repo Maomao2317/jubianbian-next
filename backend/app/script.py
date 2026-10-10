@@ -88,6 +88,10 @@ _VO_KIND_ALIASES = {
     "phone": "phone",
 }
 _DIALOGUE_LABEL_RE = re.compile(r"(?:^|[。！？…\n])\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9· ]{0,14})\s*[：:]")
+_INTERNAL_REVIEW_MARKER_RE = re.compile(r"【(?:需核对|待核对|内部校对|审核提示)[^】]*】")
+_EMOTION_TOKEN_RE = re.compile(
+    r"(?:紧张|害怕|恐惧|愤怒|生气|焦急|着急|悲伤|难过|惊讶|震惊|疑惑|冷漠|平静|温柔|慌乱|失望|绝望|委屈|欣慰|担忧|激动|疲惫|无奈|警惕|尴尬|沉重|坚定|急切)"
+)
 
 
 def normalize_text(text: Any, *, sentence: bool = False) -> str:
@@ -115,6 +119,73 @@ def normalize_dialogue_text(text: Any) -> str:
     punctuation cleanup used by exports and restores a terminal mark.
     """
     return normalize_text(text, sentence=True)
+
+
+def strip_internal_review_markers(text: Any) -> str:
+    """Remove QA-only badges while preserving the recovered source words."""
+    return _INTERNAL_REVIEW_MARKER_RE.sub("", str(text or "")).strip()
+
+
+def compact_emotion_text(text: Any, *, max_parts: int = 2, max_chars: int = 72) -> str:
+    """Deduplicate repeated emotion wording without rewriting factual action.
+
+    This is intentionally conservative: only clauses containing a known
+    emotion token participate in de-duplication; concrete actions and visual
+    details remain untouched.
+    """
+    value = normalize_text(strip_internal_review_markers(text)).strip("，。！？；：: ")
+    if not value:
+        return ""
+    parts = [part.strip("，。！？；：: ") for part in re.split(r"[；;，,。！？]+", value) if part.strip()]
+    kept: list[str] = []
+    seen_tokens: set[str] = set()
+    for part in parts:
+        tokens = set(_EMOTION_TOKEN_RE.findall(part))
+        if tokens and tokens & seen_tokens:
+            # A later clause such as “情绪紧张、神情紧张” adds no visible
+            # information. Keep the first occurrence only.
+            continue
+        if len(part) > max_chars:
+            part = part[:max_chars].rstrip("，。！？；：: ")
+        kept.append(part)
+        seen_tokens.update(tokens)
+        if len(kept) >= max_parts:
+            break
+    return "、".join(dict.fromkeys(kept))
+
+
+def compact_character_detail(text: Any, *, max_chars: int = 42) -> str:
+    """Keep one short, concrete appearance/clothing identity sentence.
+
+    Provider responses often repeat a noun in slightly different forms (for
+    example ``麻花辫的长麻花辫`` or ``碎花衫、碎花翻领衬衫``).  We retain the
+    most specific phrase and drop only exact/obvious overlaps.
+    """
+    value = normalize_text(strip_internal_review_markers(text)).strip("。！？；; ")
+    if not value:
+        return ""
+    value = re.sub(r"^空(?=(?:浅|深|黑|白|红|蓝|绿|灰|紫|黄|棕))", "穿", value)
+    value = re.sub(r"(麻花辫)的(?:长|短)?麻花辫", r"长\1", value)
+    clauses = [part.strip("，、；：: ") for part in re.split(r"[，、；：:]+", value) if part.strip()]
+    selected: list[str] = []
+    for clause in clauses:
+        # When one clothing phrase contains an earlier, less specific phrase,
+        # keep the specific one and remove the shorter duplicate.
+        contained = False
+        for index, existing in enumerate(selected):
+            if clause in existing and len(existing) >= len(clause) + 2:
+                contained = True
+                break
+            if existing in clause and len(clause) >= len(existing) + 2:
+                selected[index] = clause
+                contained = True
+                break
+        if not contained:
+            selected.append(clause)
+    result = "、".join(dict.fromkeys(selected))
+    if len(result) > max_chars:
+        result = result[:max_chars].rstrip("，、；：: ")
+    return result
 
 
 def evidence_comparison_text(text: Any) -> str:
@@ -519,7 +590,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
     """
 
     def clean_detail(value: Any) -> str:
-        text = normalize_text(value).strip("。！？；; ")
+        text = compact_character_detail(value).strip("。！？；; ")
         if not text or text in {"不明", "未知", "待核对", "首登外观/服装待核对"}:
             return ""
         return text
@@ -535,7 +606,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
             # Some legacy provider responses put the whole introduction in
             # firstAppearance. Use only the descriptive lead before the name,
             # rather than copying a complete action sentence into another one.
-            first = clean_detail(profile.get("firstAppearance"))
+            first = compact_character_detail(profile.get("firstAppearance"), max_chars=48)
             if name and name in first:
                 first = first.split(name, 1)[0].rstrip("，、；：: ")
                 first = re.sub(r"的$", "", first).strip()
@@ -563,7 +634,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
                 continue
             missing = [detail for detail in details if detail not in text]
             if missing:
-                descriptor = "、".join(missing)
+                descriptor = compact_character_detail("、".join(missing), max_chars=72)
                 styled_with_suffix = False
                 # Turn “梳双丸子头的小女孩” + “穿红碎花袄” into the
                 # natural screenplay phrasing “梳双丸子头、穿红碎花袄的
@@ -683,7 +754,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     "action", "dialogue", "vo", "sound", "screen_text", "subtitle", "caption", "transition", "emotion"
                 }:
                     continue
-                text = normalize_text(value.get(key))
+                text = compact_emotion_text(value.get(key), max_parts=2, max_chars=96)
                 if text:
                     fields[output] = text
                     break
@@ -709,16 +780,17 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if not name:
                 continue
             aliases = names(value.get("aliases"))
-            appearance = str(value.get("appearance") or "").strip()
-            clothing = str(value.get("clothing") or "").strip()
+            appearance = compact_character_detail(value.get("appearance"))
+            clothing = compact_character_detail(value.get("clothing"))
             first_appearance = str(
                 value.get("firstAppearance")
                 or value.get("introduction")
                 or value.get("intro")
                 or ""
             ).strip()
+            first_appearance = compact_character_detail(first_appearance, max_chars=72)
             if not first_appearance and (appearance or clothing):
-                first_appearance = "；".join(item for item in (appearance, clothing) if item)
+                first_appearance = compact_character_detail("；".join(item for item in (appearance, clothing) if item), max_chars=72)
             row = {
                 "id": str(value.get("id") or f"character_{index:03d}"),
                 "name": name,
@@ -894,7 +966,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             is_screen_text = raw_block_type in {"screen_text", "subtitle", "caption", "system", "title_card"} or str(raw_block.get("screenType") or "").strip().lower() in {"subtitle", "system", "title_card", "other"}
             if (raw_block.get("isNonPlot") or str(raw_block.get("segmentType") or "").lower() in non_plot_segments) and not is_screen_text:
                 continue
-            text = str(raw_block.get("text") or raw_block.get("description") or "").strip()
+            text = strip_internal_review_markers(raw_block.get("text") or raw_block.get("description") or "")
             if not text:
                 continue
             raw_type = str(raw_block.get("type") or "action").strip().lower()
@@ -945,9 +1017,9 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     or raw_block.get("rawText")
                 )
                 dialogue_source = source_text or raw_block.get("finalText") or text
-                text = normalize_dialogue_text(dialogue_source)
+                text = normalize_dialogue_text(strip_internal_review_markers(dialogue_source))
             elif block_type == "vo":
-                text = normalize_dialogue_text(text)
+                text = normalize_dialogue_text(strip_internal_review_markers(text))
             else:
                 text = normalize_text(text)
             if not text:
@@ -962,7 +1034,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if end is not None:
                 block["endSec"] = end
             if block_type in {"action", "vo"}:
-                block["emotion"] = normalize_text(raw_block.get("emotion"))
+                block["emotion"] = compact_emotion_text(raw_block.get("emotion"), max_parts=2, max_chars=72)
                 block.update(emotion_fields(raw_block))
                 performance = normalize_text(
                     raw_block.get("performance")
@@ -1000,7 +1072,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     raw_block.get("speechTone"),
                 ]
                 performance = compact_performance("、".join(
-                    value for value in (normalize_text(item) for item in performance_parts) if value
+                    value for value in (compact_emotion_text(item, max_parts=2, max_chars=36) for item in performance_parts) if value
                 ))
                 if performance:
                     block["performance"] = performance
@@ -1208,28 +1280,15 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         return f"（{text}）" if text else ""
 
     def uncertainty(block: dict[str, Any], block_type: str) -> str:
-        """Render uncertainty at the exact content boundary in the export.
+        """Keep QA uncertainty out of the screenplay body.
 
-        A generic ``待核对`` badge is easy to miss and does not tell the
-        reviewer what must be checked.  Keep the recovered text intact, then
-        label only the evidence dimension that is uncertain.
+        ``script_quality`` and the administrator review payload retain the
+        exact issue and time range.  The downloadable screenplay should only
+        contain recovered video content; review badges such as ``需核对`` are
+        internal workflow metadata, not dialogue or action.
         """
-        if block_type == "dialogue":
-            if str(block.get("speaker") or "").strip() in {"", "未知说话人", "未知男声", "未知女声"}:
-                return "【需核对·说话人】"
-        if block_type == "vo" and str(block.get("voKind") or "").strip() in {"", "unknown"}:
-            return "【需核对·声音】"
-        if not (block.get("uncertain") or block.get("inferred") or block.get("evidence") is False):
-            return ""
-        if block_type == "dialogue":
-            return "【需核对·对白】"
-        if block_type == "screen_text":
-            return "【需核对·字幕】"
-        if block_type == "vo":
-            return "【需核对·声音】"
-        if block_type == "transition":
-            return "【需核对·时间】"
-        return "【需核对·画面】"
+        del block, block_type
+        return ""
 
     for scene in script.get("scenes", []):
         lines.extend([scene.get("heading", "未标注场景"), ""])
@@ -1706,7 +1765,11 @@ def script_quality(
         + uncertain * 8,
     )
     complexity_band = "complex" if complexity_score >= 60 else "standard" if complexity_score >= 25 else "simple"
-    review_recommendation = "turbo_review" if complexity_band == "complex" or uncertain else "lite_only"
+    review_recommendation = (
+        "turbo_review"
+        if complexity_band == "complex" or uncertain or evidence_problem_ranges or evidence_warnings
+        else "lite_only"
+    )
 
     # Give automatic and human reviewers a direct seek range whenever the
     # model supplied block timestamps.  The issue still remains valid when no
