@@ -57,13 +57,13 @@ ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "0.5"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 # The Ark Files endpoint is reached from the app container.  On the staging
-# host an 80+ MB source can spend more than a minute in transit before the
-# actual model request even starts.  Large files get a temporary, visually
+# host an 8+ MB source can spend more than a minute in transit before the
+# actual model request even starts.  Larger files get a temporary, visually
 # faithful proxy for upload; the original remains untouched on disk.
-ARK_UPLOAD_PROXY_MAX_MB = max(0.0, float(os.getenv("ARK_UPLOAD_PROXY_MAX_MB", "32")))
-ARK_UPLOAD_PROXY_MAX_HEIGHT = max(360, int(os.getenv("ARK_UPLOAD_PROXY_MAX_HEIGHT", "720")))
-ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "1600k").strip() or "1600k"
-ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "64k").strip() or "64k"
+ARK_UPLOAD_PROXY_MAX_MB = max(0.0, float(os.getenv("ARK_UPLOAD_PROXY_MAX_MB", "4")))
+ARK_UPLOAD_PROXY_MAX_HEIGHT = max(360, int(os.getenv("ARK_UPLOAD_PROXY_MAX_HEIGHT", "540")))
+ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "400k").strip() or "400k"
+ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "32k").strip() or "32k"
 ARK_UPLOAD_PROXY_PRESET = os.getenv("ARK_UPLOAD_PROXY_PRESET", "veryfast").strip() or "veryfast"
 ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_TIMEOUT_SECONDS", "180")))
 # Uploads can be slow on a small cloud instance, but an inference response
