@@ -200,6 +200,30 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         emotion = compact_emotion_text("委屈又气愤、委屈又气愤、委屈又气愤")
         self.assertEqual(emotion, "委屈又气愤")
 
+    def test_repeated_character_name_is_collapsed_and_emotion_is_exported(self):
+        normalized = normalize_script(
+            {
+                "characters": ["周景明"],
+                "characterProfiles": [{"name": "周景明", "aliases": []}],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [
+                        {"type": "action", "text": "周周周景明抬头看向门口。", "emotion": "紧张"},
+                        {"type": "dialogue", "speaker": "周周周景明", "text": "你来了", "emotionType": "震惊", "emotionEvidence": "睁大眼睛"},
+                    ],
+                }],
+            },
+            "测试",
+        )
+        blocks = normalized["scenes"][0]["blocks"]
+        self.assertEqual(blocks[0]["text"], "周景明抬头看向门口。")
+        self.assertEqual(blocks[1]["speaker"], "周景明")
+        self.assertIn("震惊", blocks[1]["performance"])
+        exported = script_to_markdown({"title": "测试", "result": normalized})
+        self.assertIn("周景明（震惊）", exported)
+        self.assertIn("▲ 周景明抬头看向门口。（紧张）", exported)
+
     def test_evidence_matching_handles_repetitive_transcript_quickly(self):
         matched, reference_size, candidate_size = matching_character_counts("啊" * 12000, "啊" * 12000)
         self.assertEqual((matched, reference_size, candidate_size), (12000, 12000, 12000))
@@ -648,6 +672,30 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             },
         )
         self.assertEqual(simple["band"], "simple")
+        audio_without_ocr = select_ark_route(
+            117,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "available", "items": [{"text": "完整对白"}]},
+                    {"kind": "ocr", "status": "unavailable", "items": []},
+                    {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+                ]
+            },
+        )
+        self.assertEqual(audio_without_ocr["band"], "simple")
+        self.assertIn("ocr_unavailable_optional", audio_without_ocr["reasons"])
+        short_with_subtitles = select_ark_route(
+            117,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "available", "items": [{"text": "完整对白"}]},
+                    {"kind": "ocr", "status": "available", "items": [{"text": str(index)} for index in range(6)]},
+                    {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+                ]
+            },
+        )
+        self.assertEqual(short_with_subtitles["band"], "simple")
+        self.assertIn("ocr>=3items", short_with_subtitles["reasons"])
         self.assertEqual(complex_route["band"], "complex")
         self.assertIn("duration>=180s", complex_route["reasons"])
 

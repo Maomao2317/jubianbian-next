@@ -68,14 +68,29 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
         score += 1
         reasons.append("transcript>=800chars")
     if ocr_items >= 3:
-        score += 1
+        # Several subtitle/name samples are useful evidence, not proof that
+        # the episode needs the slower model.  Keep the signal for metrics but
+        # let audio fidelity, duration and the post-generation quality gate
+        # decide whether a Turbo pass is actually necessary.
         reasons.append("ocr>=3items")
-    if not audio or audio.get("status") != "available":
+    audio_available = bool(audio and audio.get("status") == "available")
+    ocr_available = bool(ocr and ocr.get("status") == "available")
+    if not audio_available:
+        # Missing independent audio evidence is a real fidelity risk because
+        # there is no second source against which to check short lines.
         score += 2
         reasons.append("audio_unavailable")
-    if not ocr or ocr.get("status") != "available":
-        score += 2
-        reasons.append("ocr_unavailable")
+    if not ocr_available:
+        # OCR is an optional subtitle/name aid on the current image. The
+        # container can legitimately have no usable OCR frames while local
+        # ASR is healthy; treating that as two extra complexity points sent
+        # every short episode to the much slower Turbo model. Keep the fact
+        # in the route metadata, but do not penalize a task that has audio
+        # evidence. When both independent sources are absent, add one small
+        # penalty so the conservative path still wins.
+        reasons.append("ocr_unavailable_optional" if audio_available else "ocr_unavailable")
+        if not audio_available:
+            score += 1
     if (not audio or audio.get("status") != "available") and (not ocr or ocr.get("status") != "available"):
         reasons.append("independent_audio_and_ocr_unavailable")
     if not keyframes or keyframes.get("status") != "available":

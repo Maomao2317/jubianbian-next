@@ -1167,6 +1167,33 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             value = re.sub(re.escape(alias), canonical, value, flags=re.IGNORECASE)
         return value
 
+    def dedupe_character_names(text: Any) -> str:
+        """Collapse adjacent repetitions of known character names.
+
+        Vision responses occasionally return prose such as ``周周周景明``
+        or ``周景明周景明`` after a scene was split. These are not source
+        words and make the exported screenplay look corrupted. Only known
+        profile names are touched, and only when repeats are contiguous;
+        ordinary dialogue and legitimate names such as ``杨洋`` remain intact.
+        """
+        value = str(text or "")
+        known = sorted(
+            {
+                str(name).strip()
+                for name in alias_map.values()
+                if len(str(name).strip()) >= 2
+            },
+            key=len,
+            reverse=True,
+        )
+        for name in known:
+            value = re.sub(rf"(?:{re.escape(name)}){{2,}}", name, value)
+            prefix = name[:1]
+            rest = name[1:]
+            if rest:
+                value = re.sub(rf"(?:{re.escape(prefix)}){{2,}}{re.escape(rest)}", name, value)
+        return value
+
     def normalize_notes(values: Any, *, structured: bool = False) -> list[Any]:
         """Keep evidence-oriented provider notes without inventing content."""
         if isinstance(values, dict):
@@ -1354,7 +1381,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block_type not in {"action", "dialogue", "vo", "sound", "emotion", "screen_text", "transition"}:
                 block_type = "action"
             if block_type == "action":
-                text = clean_action_text(canonicalize_visible_names(text))
+                text = clean_action_text(dedupe_character_names(canonicalize_visible_names(text)))
             elif block_type == "dialogue":
                 # Never merge or paraphrase dialogue while normalizing it.
                 # When a provider returns both verbatim and polished fields,
@@ -1391,15 +1418,24 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             if block_type in {"action", "vo"}:
                 block["emotion"] = compact_emotion_text(raw_block.get("emotion"), max_parts=2, max_chars=72)
                 block.update(emotion_fields(raw_block))
-                performance = normalize_text(
-                    raw_block.get("performance")
-                    or raw_block.get("acting")
-                    or raw_block.get("delivery")
-                )
+                performance_parts = [
+                    raw_block.get("performance") or raw_block.get("acting") or raw_block.get("delivery"),
+                    raw_block.get("emotion"),
+                    raw_block.get("emotionType"),
+                    raw_block.get("emotionChange"),
+                ]
+                performance = compact_performance("、".join(
+                    value
+                    for value in (
+                        compact_emotion_text(item, max_parts=2, max_chars=36)
+                        for item in performance_parts
+                    )
+                    if value
+                ))
                 if performance:
                     block["performance"] = performance
             if block_type == "dialogue":
-                speaker = str(raw_block.get("speaker") or "未知说话人").strip()
+                speaker = dedupe_character_names(str(raw_block.get("speaker") or "未知说话人").strip())
                 block["speaker"] = alias_map.get(speaker.casefold(), speaker)
                 block["rawText"] = str(source_text or dialogue_source).strip()
                 block["finalText"] = text
@@ -1407,7 +1443,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     block["sourceText"] = str(dialogue_source).strip()
                 block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
                 block["uncertain"] = truthy(raw_block.get("uncertain")) or block["confidence"] == "low"
-                visible_speaker = str(raw_block.get("visibleSpeaker") or "").strip()
+                visible_speaker = dedupe_character_names(str(raw_block.get("visibleSpeaker") or "").strip())
                 if visible_speaker:
                     block["visibleSpeaker"] = alias_map.get(visible_speaker.casefold(), visible_speaker)
                 if mouth_moving is not None:
@@ -1420,10 +1456,10 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     block["dialogueIssues"] = issues
                     block["uncertain"] = True
                     block["_dialogueSource"] = str(dialogue_source)
-                # Dialogue emotion is intentionally omitted from the screenplay
-                # body. Repeated parentheticals make every line feel like a
-                # shot list; a genuinely plot-changing turn can be represented
-                # by its own emotion block instead.
+                # Keep technical emotion fields for QA, but also preserve one
+                # short playable cue in the screenplay. Earlier versions
+                # discarded these fields entirely, making valid emotion
+                # evidence disappear from the user's export.
                 block["emotion"] = ""
                 block["emotionImportant"] = False
                 block.update(emotion_fields(raw_block))
@@ -1433,6 +1469,9 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 performance_parts = [
                     raw_block.get("performance") or raw_block.get("acting") or raw_block.get("delivery"),
                     raw_block.get("speechTone"),
+                    raw_block.get("emotion"),
+                    raw_block.get("emotionType"),
+                    raw_block.get("emotionChange"),
                 ]
                 performance = compact_performance("、".join(
                     value for value in (compact_emotion_text(item, max_parts=2, max_chars=36) for item in performance_parts) if value
@@ -1440,7 +1479,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 if performance:
                     block["performance"] = performance
             elif block_type == "vo":
-                speaker = str(raw_block.get("speaker") or ("未知说话人" if raw_type in {"os", "inner_monologue"} else "旁白")).strip()
+                speaker = dedupe_character_names(str(raw_block.get("speaker") or ("未知说话人" if raw_type in {"os", "inner_monologue"} else "旁白")).strip())
                 speaker = alias_map.get(speaker.casefold(), speaker)
                 block["speaker"] = speaker
                 block["voKind"] = "os" if forced_os else normalize_vo_kind(raw_block.get("voKind") or raw_block.get("voiceType"), raw_type, speaker)
@@ -1697,7 +1736,8 @@ def script_to_markdown(task: dict[str, Any]) -> str:
                 marker = uncertainty(block, "transition")
                 lines.append(f"{marker}【{transition_type}：{text}】" if text else f"{marker}【{transition_type}】")
             else:
-                lines.append(f"{uncertainty(block, 'action')}▲ {block.get('text', '')}")
+                acting = parenthetical(block.get("performance") or block.get("emotion"))
+                lines.append(f"{uncertainty(block, 'action')}▲ {block.get('text', '')}{acting}")
         lines.append("")
     return "\n".join(lines)
 
@@ -2048,9 +2088,22 @@ def script_quality(
             {"dialogue", "vo"},
             segment.get("startSec"),
             segment.get("endSec"),
+            margin=1.5,
         )
         matched, segment_size, _ = matching_character_counts(segment_text, local_candidate or spoken_candidate)
         segment_coverage = round(100 * matched / segment_size) if segment_size else 100
+        # Provider timestamps are approximate and often drift across a scene
+        # boundary. For a normal-length segment, a verbatim match elsewhere
+        # in the ordered screenplay is evidence of timing drift rather than a
+        # missing line; keep short one- or two-character beats strict so they
+        # are still recovered and checked individually.
+        if len(segment_text) >= 4 and segment_text in spoken_candidate:
+            continue
+        if len(segment_text) >= 6:
+            global_matched, global_size, _ = matching_character_counts(segment_text, spoken_candidate)
+            global_coverage = round(100 * global_matched / global_size) if global_size else 0
+            if global_coverage >= 72:
+                continue
         if segment_coverage >= 72:
             continue
         filler = evidence_comparison_text(segment_text) in {"啊", "嗯", "哦", "哎", "唉", "呃", "哈"}
