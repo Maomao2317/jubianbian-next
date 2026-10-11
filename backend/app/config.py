@@ -87,6 +87,11 @@ ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_T
 # Uploads can be slow on a small cloud instance, but the upload itself should
 # still have a bounded wait before the task can fail over.
 ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "240")))
+ARK_UPLOAD_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_UPLOAD_ATTEMPTS", "3"))))
+ARK_UPLOAD_MAX_IN_FLIGHT = max(
+    1,
+    min(ARK_MAX_IN_FLIGHT, int(os.getenv("JBB_ARK_UPLOAD_MAX_IN_FLIGHT", "2"))),
+)
 # Real successful Ark responses in staging take roughly 190-290 seconds for
 # 1-2 minute clips.  A slower Turbo response has crossed 300 seconds in the
 # live container, so keep a 2-minute safety margin above the observed range.

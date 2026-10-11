@@ -36,6 +36,26 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             self.assertEqual(providers.ark_sampling_fps(150), 1.0)
             self.assertEqual(providers.ark_sampling_fps(240), 0.5)
 
+    def test_ark_upload_retries_transient_network_without_reencoding(self):
+        source = Path(__file__)
+        with (
+            patch.object(providers, "ARK_UPLOAD_ATTEMPTS", 2),
+            patch.object(providers, "_ark_upload_proxy", return_value=(source, None)) as proxy,
+            patch.object(
+                providers,
+                "ark_http",
+                side_effect=[
+                    ArkError("write timeout", provider_code="transient_network"),
+                    {"id": "file-test"},
+                ],
+            ) as request,
+            patch.object(providers.time, "sleep"),
+        ):
+            file_id, api_key = providers.ark_upload_video(source, "key-test", 120)
+        proxy.assert_called_once_with(source, 120)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual((file_id, api_key), ("file-test", "key-test"))
+
     def test_ark_stream_response_returns_completed_payload(self):
         completed = {
             "id": "resp-test",

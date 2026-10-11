@@ -33,6 +33,8 @@ from .config import (
     ARK_UPLOAD_PROXY_VIDEO_BITRATE,
     ARK_RESPONSE_TIMEOUT_SECONDS,
     ARK_THINKING_TYPE,
+    ARK_UPLOAD_ATTEMPTS,
+    ARK_UPLOAD_MAX_IN_FLIGHT,
     ARK_UPLOAD_TIMEOUT_SECONDS,
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
@@ -63,6 +65,7 @@ _ark_pool_lock = threading.Lock()
 _ark_pool_index = 0
 _ark_cooldowns: dict[str, float] = {}
 _ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
+_ark_upload_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
 
 
 def ark_account_key() -> str:
@@ -354,7 +357,7 @@ def ark_sampling_fps(duration_sec: float) -> float:
     return ARK_VIDEO_FPS
 
 
-def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0) -> str:
+def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0) -> tuple[str, str]:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
     upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec)
@@ -370,20 +373,41 @@ def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float
             upload_path.read_bytes(),
             "video/mp4",
         )
-        payload = ark_http(
-            "POST",
-            "/files",
-            body,
-            f"multipart/form-data; boundary={boundary}",
-            api_key=api_key,
-            timeout=ARK_UPLOAD_TIMEOUT_SECONDS,
-        )
-        file_id = None
-        if isinstance(payload, dict):
-            file_id = payload.get("id") or payload.get("file_id")
-        if not file_id:
-            raise ArkError("方舟上传成功但没有返回 file_id")
-        return str(file_id)
+        selected_key = api_key or ark_account_key()
+        for attempt in range(1, ARK_UPLOAD_ATTEMPTS + 1):
+            try:
+                with _ark_upload_semaphore:
+                    payload = ark_http(
+                        "POST",
+                        "/files",
+                        body,
+                        f"multipart/form-data; boundary={boundary}",
+                        api_key=selected_key,
+                        timeout=ARK_UPLOAD_TIMEOUT_SECONDS,
+                    )
+                file_id = None
+                if isinstance(payload, dict):
+                    file_id = payload.get("id") or payload.get("file_id")
+                if not file_id:
+                    raise ArkError("方舟上传成功但没有返回 file_id")
+                return str(file_id), selected_key
+            except ArkError as exc:
+                retryable = (
+                    exc.provider_code == "transient_network"
+                    or exc.status_code in {408, 425, 429, 500, 502, 503, 504}
+                )
+                if not retryable or attempt >= ARK_UPLOAD_ATTEMPTS:
+                    raise
+                if exc.status_code == 429 and len(ARK_API_KEYS) > 1:
+                    selected_key = ark_account_key()
+                logger.warning(
+                    "provider_step provider=ark operation=upload_retry file=%s attempt=%s error=%s",
+                    path.name,
+                    attempt,
+                    safe_error_text(exc),
+                )
+                time.sleep(min(5.0, float(attempt)))
+        raise ArkError("方舟视频上传重试耗尽")
     finally:
         if proxy_dir is not None:
             shutil.rmtree(proxy_dir, ignore_errors=True)
@@ -409,7 +433,7 @@ def ark_prepare_video(path: Path, duration_sec: float = 0) -> dict[str, str]:
     """Upload and preprocess a video once for initial recognition and review."""
     api_key = ark_account_key()
     upload_started = time.perf_counter()
-    file_id = ark_upload_video(path, api_key, duration_sec)
+    file_id, api_key = ark_upload_video(path, api_key, duration_sec)
     logger.info(
         "provider_step provider=ark operation=upload file=%s duration_ms=%.1f",
         path.name,
