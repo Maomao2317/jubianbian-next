@@ -151,7 +151,7 @@
       ...task,
       status: "running",
       stage: "exporting",
-      progressPercent: Math.max(94, Number(task.progressPercent) || 0),
+      progressPercent: 94,
       result: null,
       quality: null,
       evidence: null,
@@ -424,7 +424,7 @@
     const eta = formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8))));
     const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     const downloads = done ? `<span class="batch-downloads"><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button></span>` : "";
-    const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
+    const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (task.status === "failed" ? 0 : isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
     return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
