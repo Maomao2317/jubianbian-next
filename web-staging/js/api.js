@@ -180,7 +180,7 @@
       lines.push(`## ${scene.heading}`, "");
       scene.blocks.forEach((block) => {
         if (block.type === "dialogue") {
-          lines.push(`${block.speaker}${block.uncertain ? "【需核对】" : ""}：${block.text}`);
+          lines.push(`${block.speaker}：${block.text}`);
         } else if (block.type === "vo" || block.type === "os") {
           const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
           const label = block.speaker && !["旁白", "未知说话人", "OS", "内心独白"].includes(block.speaker)

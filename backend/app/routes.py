@@ -844,8 +844,13 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         value = f"%{keyword.strip()}%"
         params.extend([value, value])
     if status and status != "all":
-        clauses.append("status = ?")
-        params.append(status)
+        # Quality-gated tasks remain in the owner's normal processing view;
+        # the internal review state is never exposed as a user filter.
+        if status == "running":
+            clauses.append("status IN ('running', 'review')")
+        else:
+            clauses.append("status = ?")
+            params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     # The workspace only needs metadata.  Do not read/parse result_json here:
     # completed screenplays can be large, and their full payload is fetched by

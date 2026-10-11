@@ -22,6 +22,52 @@ class FakeRequest:
 
 
 class ParallelUploadFlowTests(unittest.TestCase):
+    def test_running_filter_includes_quality_gate_tasks_for_owner(self):
+        database = "file:jbb-running-filter?mode=memory&cache=shared"
+
+        def open_db():
+            connection = sqlite3.connect(database, uri=True)
+            connection.row_factory = sqlite3.Row
+            return connection
+
+        keeper = open_db()
+        try:
+            with keeper as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY, user_id TEXT, title TEXT, file_name TEXT,
+                        duration_sec REAL, estimated_minutes INTEGER, credits_used INTEGER,
+                        status TEXT, stage TEXT, progress_percent INTEGER, error TEXT,
+                        created_at TEXT, updated_at TEXT, completed_at TEXT,
+                        batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER
+                    )
+                    """
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO tasks (
+                        id, user_id, title, file_name, duration_sec, estimated_minutes,
+                        credits_used, status, stage, progress_percent, created_at,
+                        updated_at, batch_index, batch_total
+                    ) VALUES (?, 'user-1', ?, ?, 30, 1, 1, ?, ?, ?, ?, ?, 1, 2)
+                    """,
+                    [
+                        ("running-1", "处理中", "1.mp4", "running", "vision", 62, "2026-10-11T01:00:00+00:00", "2026-10-11T01:01:00+00:00"),
+                        ("review-1", "后台草稿", "2.mp4", "review", "review", 100, "2026-10-11T01:02:00+00:00", "2026-10-11T01:03:00+00:00"),
+                    ],
+                )
+
+            with (
+                patch.object(routes, "db", open_db),
+                patch.object(routes, "current_user", return_value={"id": "user-1"}),
+            ):
+                tasks = routes.list_tasks(FakeRequest(), status="running")
+
+            self.assertEqual({task["id"] for task in tasks}, {"running-1", "review-1"})
+        finally:
+            keeper.close()
+
     def test_reserve_then_upload_queues_episode(self):
         database = "file:jbb-upload-flow?mode=memory&cache=shared"
         target_path: Path | None = None

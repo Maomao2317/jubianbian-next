@@ -126,9 +126,10 @@
   }
 
   function statusBadge(task) {
-    const displayStatus = task.status;
-    const text = task.status === "running"
-      ? cfg.stageText[task.stage]
+    const displayStatus = task.status === "review" ? "running" : task.status;
+    const displayStage = task.status === "review" ? "exporting" : task.stage;
+    const text = displayStatus === "running"
+      ? cfg.stageText[displayStage]
       : cfg.statusText[displayStatus] || displayStatus;
     return `<span class="badge ${displayStatus}"><span class="badge-dot"></span>${escapeHtml(text)}</span>`;
   }
@@ -138,7 +139,24 @@
   }
 
   function normalizeUserTask(task) {
-    return task;
+    if (!task || task.status !== "review") return task;
+    // Quality-gate details are for administrators only. Keep the task visible
+    // to the owner as an in-progress item until an approved version is ready.
+    const events = Array.isArray(task.events)
+      ? task.events.map((event) => event && (event.status === "review" || event.type === "review_required")
+        ? { ...event, status: "running", stage: "exporting", message: "正在生成可下载剧本" }
+        : event)
+      : task.events;
+    return {
+      ...task,
+      status: "running",
+      stage: "exporting",
+      progressPercent: Math.max(94, Number(task.progressPercent) || 0),
+      result: null,
+      quality: null,
+      evidence: null,
+      events,
+    };
   }
 
   function renderHeader() {
@@ -338,8 +356,6 @@
       : "";
     const quickAction = isCompletedTask(task)
       ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>`
-      : task.status === "review"
-        ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看待复核结果</button>`
       : task.status === "failed"
         ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>`
         : "";
@@ -385,8 +401,7 @@
     const running = group.tasks.filter((task) => task.status === "running").length;
     const failed = group.tasks.filter((task) => task.status === "failed").length;
     const expanded = Boolean(state.expandedBatches[group.id]);
-    const review = group.tasks.filter((task) => task.status === "review").length;
-    const status = failed ? "部分失败" : review ? "质量检查中" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><button class="batch-row" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${expanded ? `<div class="batch-children">${group.tasks.map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
@@ -407,11 +422,10 @@
     const expanded = Boolean(state.expandedBatches[group.id]);
     const remaining = group.tasks.reduce((sum, task) => isCompletedTask(task) ? sum : sum + Number(task.estimatedMinutes || 1) * Math.max(0.05, 1 - Number(task.progressPercent || 0) / 100), 0);
     const eta = formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8))));
-    const review = group.tasks.filter((task) => task.status === "review").length;
-    const status = failed ? "部分失败" : review ? "质量检查中" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     const downloads = done ? `<span class="batch-downloads"><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button></span>` : "";
     const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
-    return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${review ? ` · 质量检查中 ${review} 集` : ""}${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : review ? "review" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
+    return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
   function captureListViewport() {
@@ -628,7 +642,9 @@
     return `<section class="task-timeline">
       <div class="timeline-head"><span class="aside-label">任务状态记录</span><span>${events.length} 条事件</span></div>
       <div class="timeline-list">${events.map((event) => {
-        const label = event.stage ? (cfg.stageText[event.stage] || event.stage) : (cfg.statusText[event.status] || event.type);
+        const label = event.status === "review" || event.type === "review_required"
+          ? "生成中"
+          : event.stage ? (cfg.stageText[event.stage] || event.stage) : (cfg.statusText[event.status] || event.type);
         const duration = Number.isFinite(Number(event.durationMs)) ? ` · ${Math.round(Number(event.durationMs))} ms` : "";
         return `<div class="timeline-item"><i></i><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(event.message || "状态更新")}${duration}</span><small>${formatDate(event.createdAt)}</small></div></div>`;
       }).join("")}</div>
@@ -646,9 +662,9 @@
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
-      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">本集正在进行后台质量检查，完成后即可导出。</div>` : "";
+      </div>` : "";
     let content = "";
-    if (isCompletedTask(task) || task.status === "review") content = renderResult(task);
+    if (isCompletedTask(task)) content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);
     if (task.status === "failed") content = `<div class="error-panel">
       <div class="error-symbol">!</div>
@@ -848,7 +864,7 @@
         source === "filter" ? Promise.resolve(state.queue) : api.getQueueSummary().catch(() => state.queue),
       ]);
       if (requestId !== state.listRequestId || state.view !== "list" || query.keyword !== state.keyword || query.status !== state.status) return;
-      state.tasks = tasks;
+      state.tasks = tasks.map(normalizeUserTask);
       state.queue = queue || state.queue;
       const rateLimitTasks = source === "poll" ? state.tasks.slice(0, 50) : state.tasks;
       const limited = rateLimitTasks.some((task) => /429|ratelimit|setlimit|限流|请求较多/i.test(String(task.error || "")));
