@@ -36,6 +36,7 @@ from .config import (
     ARK_UPLOAD_TIMEOUT_SECONDS,
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
+    ARK_MAX_IN_FLIGHT,
     ARK_VIDEO_FPS,
     DATA_DIR,
     OPENAI_API_KEY,
@@ -61,6 +62,7 @@ def ark_fallback_message(error: ArkError) -> str:
 _ark_pool_lock = threading.Lock()
 _ark_pool_index = 0
 _ark_cooldowns: dict[str, float] = {}
+_ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
 
 
 def ark_account_key() -> str:
@@ -123,8 +125,9 @@ def ark_http(
         method=method,
     )
     try:
-        with urlopen(request, timeout=timeout or ARK_RESPONSE_TIMEOUT_SECONDS) as response:
-            raw = response.read()
+        with _ark_request_semaphore:
+            with urlopen(request, timeout=timeout or ARK_RESPONSE_TIMEOUT_SECONDS) as response:
+                raw = response.read()
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
     except URLError as exc:
@@ -192,29 +195,30 @@ def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
     )
     response_id = ""
     try:
-        with urlopen(request, timeout=ARK_RESPONSE_TIMEOUT_SECONDS) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if not data or data == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(data)
-                except ValueError:
-                    continue
-                response_payload = event.get("response") if isinstance(event, dict) else None
-                if not isinstance(response_payload, dict):
-                    continue
-                response_id = str(response_payload.get("id") or response_id)
-                event_type = str(event.get("type") or "")
-                status = str(response_payload.get("status") or "").lower()
-                if event_type == "response.completed" or status == "completed":
-                    return response_payload
-                if event_type in {"response.failed", "response.incomplete"} or status in {"failed", "incomplete"}:
-                    detail = response_payload.get("error") or response_payload.get("incomplete_details") or status
-                    raise ArkError(f"方舟识别未完成：{detail}")
+        with _ark_request_semaphore:
+            with urlopen(request, timeout=ARK_RESPONSE_TIMEOUT_SECONDS) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(data)
+                    except ValueError:
+                        continue
+                    response_payload = event.get("response") if isinstance(event, dict) else None
+                    if not isinstance(response_payload, dict):
+                        continue
+                    response_id = str(response_payload.get("id") or response_id)
+                    event_type = str(event.get("type") or "")
+                    status = str(response_payload.get("status") or "").lower()
+                    if event_type == "response.completed" or status == "completed":
+                        return response_payload
+                    if event_type in {"response.failed", "response.incomplete"} or status in {"failed", "incomplete"}:
+                        detail = response_payload.get("error") or response_payload.get("incomplete_details") or status
+                        raise ArkError(f"方舟识别未完成：{detail}")
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
     except (URLError, OSError) as exc:

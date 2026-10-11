@@ -8,7 +8,7 @@ from app.evidence import collect_evidence, evidence_summary, transcript_from_evi
 from app.media import default_batch_title
 from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
 from app.errors import ArkError
-from app.script import clean_action_text, compact_character_detail, compact_emotion_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, restore_short_transcript_segments, script_quality, script_to_markdown
+from app.script import clean_action_text, compact_character_detail, compact_emotion_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, restore_evidence_boundary_segments, restore_short_transcript_segments, script_quality, script_to_markdown
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
@@ -196,6 +196,10 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         emotion = compact_emotion_text("神情紧张，情绪紧张，语气急切，声音急切")
         self.assertEqual(emotion, "神情紧张、语气急切")
 
+    def test_repeated_emotion_with_ideographic_comma_is_compacted(self):
+        emotion = compact_emotion_text("委屈又气愤、委屈又气愤、委屈又气愤")
+        self.assertEqual(emotion, "委屈又气愤")
+
     def test_evidence_matching_handles_repetitive_transcript_quickly(self):
         matched, reference_size, candidate_size = matching_character_counts("啊" * 12000, "啊" * 12000)
         self.assertEqual((matched, reference_size, candidate_size), (12000, 12000, 12000))
@@ -324,6 +328,44 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual([block["text"] for block in blocks], ["今天。", "我决定。", "我。"])
         self.assertTrue(all(block.get("asrRecovered") for block in blocks))
         self.assertTrue(quality_gate(script_quality(script, "test", evidence))[0])
+
+    def test_boundary_evidence_restores_missing_opening_words(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{
+                        "type": "dialogue",
+                        "speaker": "甲",
+                        "text": "今天已经决定离开",
+                        "startSec": 0.1,
+                        "endSec": 2.8,
+                    }],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [{
+                "kind": "ocr",
+                "status": "available",
+                "items": [{
+                    "type": "screen_text",
+                    "text": "我今天已经决定离开",
+                    "startSec": 0.0,
+                    "endSec": 2.5,
+                }],
+            }],
+        }
+
+        repaired = restore_evidence_boundary_segments(script, evidence)
+
+        block = script["scenes"][0]["blocks"][0]
+        self.assertEqual(repaired, {"segments": 1, "blocks": 1})
+        self.assertEqual(block["text"], "我今天已经决定离开。")
+        self.assertTrue(block["subtitleRecovered"])
 
     def test_known_low_confidence_speaker_is_advisory_not_p0(self):
         script = normalize_script(

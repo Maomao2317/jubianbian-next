@@ -30,6 +30,7 @@ from .config import (
     OCR_MAX_FRAMES,
     OCR_SAMPLE_INTERVAL_SECONDS,
     OPENAI_API_KEY,
+    EVIDENCE_CONCURRENCY,
 )
 from .logging_setup import logger, safe_error_text
 
@@ -42,6 +43,7 @@ _local_asr_model: Any | None = None
 _local_asr_model_key: tuple[str, str, str] | None = None
 _local_asr_load_lock = threading.Lock()
 _local_asr_infer_lock = threading.Lock()
+_evidence_semaphore = threading.BoundedSemaphore(EVIDENCE_CONCURRENCY)
 
 
 def _source(kind: str, status: str, *, provider: str = "", reason: str = "", items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -364,16 +366,17 @@ def collect_evidence(
 ) -> dict[str, Any]:
     """Collect independent evidence and return a JSON-safe record."""
     del title  # reserved for future provider metadata; never used to infer content
-    # ASR and frame OCR are independent and previously ran serially.  Worse,
-    # the process-wide ASR lock made every later episode wait before it could
-    # even begin OCR.  Running both branches together keeps the same evidence
-    # density while turning a batch into a pipeline.
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="jbb-evidence") as executor:
-        audio_future = executor.submit(_audio_evidence, path, duration_sec, transcribe=transcribe)
-        ocr_future = executor.submit(_ocr_evidence, path, duration_sec)
-        keyframes = _keyframe_evidence(path, duration_sec)
-        audio = audio_future.result()
-        ocr = ocr_future.result()
+    # ASR and frame OCR are independent, but an unbounded batch of workers can
+    # otherwise start many ffmpeg/tesseract processes at once and make every
+    # episode slower.  Keep a small evidence lane so throughput stays stable
+    # while video upload/model requests continue in parallel.
+    with _evidence_semaphore:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="jbb-evidence") as executor:
+            audio_future = executor.submit(_audio_evidence, path, duration_sec, transcribe=transcribe)
+            ocr_future = executor.submit(_ocr_evidence, path, duration_sec)
+            keyframes = _keyframe_evidence(path, duration_sec)
+            audio = audio_future.result()
+            ocr = ocr_future.result()
     sources = [audio, ocr, keyframes]
     available = [source["kind"] for source in sources if source.get("status") == "available"]
     unavailable = [source["kind"] for source in sources if source.get("status") != "available"]

@@ -29,7 +29,13 @@ from .logging_setup import logger, safe_error_text
 from .media import probe_duration
 from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, openai_script, openai_transcribe
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
-from .script import normalize_script, quality_gate, restore_short_transcript_segments, script_quality
+from .script import (
+    normalize_script,
+    quality_gate,
+    restore_evidence_boundary_segments,
+    restore_short_transcript_segments,
+    script_quality,
+)
 from .storage import cleanup_materialized, materialize_media
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
@@ -100,7 +106,14 @@ def _evaluate_quality(
     evidence: dict[str, Any],
     route: dict[str, Any],
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
-    recovered = restore_short_transcript_segments(script, evidence)
+    boundary_recovered = restore_evidence_boundary_segments(script, evidence)
+    short_recovered = restore_short_transcript_segments(script, evidence)
+    recovered = {
+        "segments": boundary_recovered["segments"] + short_recovered["segments"],
+        "blocks": boundary_recovered["blocks"] + short_recovered["blocks"],
+        "boundarySegments": boundary_recovered["segments"],
+        "shortSegments": short_recovered["segments"],
+    }
     quality = script_quality(script, provider, evidence)
     quality["shortDialogueRecovery"] = recovered
     approved, blocking = quality_gate(quality)

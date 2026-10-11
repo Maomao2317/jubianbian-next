@@ -139,18 +139,23 @@ def compact_emotion_text(text: Any, *, max_parts: int = 2, max_chars: int = 72) 
     value = normalize_text(strip_internal_review_markers(text)).strip("，。！？；：: ")
     if not value:
         return ""
-    parts = [part.strip("，。！？；：: ") for part in re.split(r"[；;，,。！？]+", value) if part.strip()]
+    parts = [part.strip("，、。！？；：: ") for part in re.split(r"[、；;，,。！？…]+", value) if part.strip()]
     kept: list[str] = []
     seen_tokens: set[str] = set()
+    seen_clauses: set[str] = set()
     for part in parts:
+        clause_key = re.sub(r"\s+", "", part)
+        if clause_key in seen_clauses:
+            continue
         tokens = set(_EMOTION_TOKEN_RE.findall(part))
         if tokens and tokens & seen_tokens:
             # A later clause such as “情绪紧张、神情紧张” adds no visible
             # information. Keep the first occurrence only.
             continue
         if len(part) > max_chars:
-            part = part[:max_chars].rstrip("，。！？；：: ")
+            part = part[:max_chars].rstrip("，、。！？；：: ")
         kept.append(part)
+        seen_clauses.add(clause_key)
         seen_tokens.update(tokens)
         if len(kept) >= max_parts:
             break
@@ -368,6 +373,105 @@ def restore_short_transcript_segments(
         blocks[block_index : block_index + 1] = replacements
         result["segments"] += len(replacements)
         result["blocks"] += 1
+    return result
+
+
+def restore_evidence_boundary_segments(
+    script: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    *,
+    max_missing_chars: int = 12,
+) -> dict[str, int]:
+    """Recover a short missing prefix/suffix from time-aligned ASR or subtitles.
+
+    A common failure mode is that the model starts a dialogue a few characters
+    late even though the opening word is audible and visible in the subtitle.
+    The old short-beat repair intentionally ignored longer ASR segments, so it
+    could not correct ``我今天已经决定……`` becoming ``今天已经决定……``.  This
+    repair only replaces an existing timed dialogue/VO block when the evidence
+    contains the complete model text as one contiguous prefix/suffix match and
+    the omitted boundary is small.  It never invents a new speaker or a new
+    line, and it accepts OCR only when it points to exactly one timed block.
+    """
+    result = {"segments": 0, "blocks": 0}
+    if not isinstance(script, dict) or not isinstance(evidence, dict):
+        return result
+
+    scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
+    timed_blocks: list[tuple[int, int, dict[str, Any], float, float]] = []
+    for scene_index, scene in enumerate(scenes):
+        for block_index, block in enumerate(scene.get("blocks") or []):
+            if not isinstance(block, dict) or block.get("type") not in {"dialogue", "vo"}:
+                continue
+            start = block.get("startSec")
+            end = block.get("endSec")
+            if not isinstance(start, (int, float)) and not isinstance(end, (int, float)):
+                continue
+            left = float(start if isinstance(start, (int, float)) else end)
+            right = float(end if isinstance(end, (int, float)) else start)
+            if right < left:
+                left, right = right, left
+            timed_blocks.append((scene_index, block_index, block, left, right))
+
+    def boundary_match(reference: str, candidate: str) -> bool:
+        if len(reference) <= len(candidate) or len(candidate) < 2:
+            return False
+        missing = len(reference) - len(candidate)
+        if missing > max_missing_chars or candidate not in reference:
+            return False
+        offset = reference.find(candidate)
+        # Only a boundary omission is safe.  An interior mismatch may be an
+        # ASR/OCR error and must remain visible to the quality gate.
+        return offset <= max_missing_chars and (len(reference) - offset - len(candidate)) <= max_missing_chars
+
+    for source in evidence.get("sources") or []:
+        if not isinstance(source, dict) or source.get("status") != "available":
+            continue
+        kind = str(source.get("kind") or "").strip().lower()
+        if kind not in {"audio", "ocr"}:
+            continue
+        for item in source.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            expected_type = "transcript_segment" if kind == "audio" else "screen_text"
+            if item.get("type") != expected_type:
+                continue
+            raw_text = str(item.get("text") or "").strip()
+            reference = evidence_comparison_text(raw_text)
+            start = item.get("startSec")
+            end = item.get("endSec")
+            if not raw_text or not reference or len(reference) > 180:
+                continue
+            if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+                continue
+            left = min(float(start), float(end))
+            right = max(float(start), float(end))
+            margin = 0.75 if kind == "ocr" else 0.35
+            overlapping = [
+                entry for entry in timed_blocks
+                if entry[4] >= left - margin and entry[3] <= right + margin
+            ]
+            if len(overlapping) != 1:
+                continue
+            scene_index, block_index, block, _block_start, _block_end = overlapping[0]
+            candidate = evidence_comparison_text(block.get("text"))
+            if not boundary_match(reference, candidate):
+                continue
+            recovered_text = normalize_dialogue_text(raw_text)
+            if not recovered_text:
+                continue
+            if recovered_text == block.get("text"):
+                continue
+            block["text"] = recovered_text
+            if block.get("type") == "dialogue":
+                block["rawText"] = raw_text
+                block["finalText"] = recovered_text
+                block["sourceText"] = raw_text
+            block["evidenceRecovered"] = True
+            block["subtitleRecovered"] = kind == "ocr"
+            block["asrRecovered"] = kind == "audio"
+            result["segments"] += 1
+            result["blocks"] += 1
     return result
 
 
