@@ -236,7 +236,7 @@
       } else if (tab === "tasks" || tab === "usage") {
         const pageSize = 20;
         const pageCount = Math.max(1, Math.ceil(tasks.total / pageSize));
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按用户、状态和时间筛选全平台任务</p></div><span>${tasks.total} 条任务</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务或账号" /><select id="adminTaskUser"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${user.id}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>管理员复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><input id="adminTaskFrom" type="date" value="${state.adminTaskFrom}" title="开始日期" /><input id="adminTaskTo" type="date" value="${state.adminTaskTo}" title="结束日期" /><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户账号</th><th>状态</th><th>消耗</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => { const reviewIds = Array.isArray(item.review_task_ids) ? item.review_task_ids : []; const doneIds = Array.isArray(item.done_task_ids) ? item.done_task_ids : []; const actions = item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${item.id}">重试</button>` : item.status === "review" ? reviewIds.map(reviewId => `<button class="admin-action" data-action="admin-review" data-id="${reviewId}">查看并确认</button>`).join("") || `<button class="admin-action" data-action="admin-review" data-id="${item.id}">查看并确认</button>` : item.status === "done" ? doneIds.map(doneId => `<button class="admin-action" data-action="admin-done-recheck" data-id="${doneId}">免费重新复核</button>`).join("") || `<button class="admin-action" data-action="admin-done-recheck" data-id="${item.id}">免费重新复核</button>` : "-"; const label = item.status === "done" ? "成功" : item.status === "review" ? "管理员复核" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td><strong>${escapeHtml(item.title || item.id)}</strong><small>${escapeHtml(item.file_name || "")}</small></td><td>${escapeHtml(item.email || item.user_id || "-")}</td><td><span class="admin-status ${item.status === "done" ? "on" : item.status === "failed" ? "off" : item.status === "review" ? "wait" : "wait"}">${label}</span></td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td><td>${actions}</td></tr>`; }).join("") || `<tr><td colspan="6">暂无任务</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-page" data-page="${Math.max(0, state.adminTaskPage - 1)}" ${state.adminTaskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminTaskPage + 1} / ${pageCount} 页</span><button class="admin-action" data-action="admin-page" data-page="${Math.min(pageCount - 1, state.adminTaskPage + 1)}" ${state.adminTaskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按用户、状态和时间筛选全平台任务</p></div><span>${tasks.total} 条任务</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务或账号" /><select id="adminTaskUser"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${user.id}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>管理员复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><input id="adminTaskFrom" type="date" value="${state.adminTaskFrom}" title="开始日期" /><input id="adminTaskTo" type="date" value="${state.adminTaskTo}" title="结束日期" /><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户账号</th><th>状态</th><th>消耗</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => { const reviewIds = Array.isArray(item.review_task_ids) ? item.review_task_ids : []; const doneIds = Array.isArray(item.done_task_ids) ? item.done_task_ids : []; const reviewId = reviewIds[0] || item.id; const doneId = doneIds[0] || item.id; const actions = item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${item.id}">重试</button>` : item.status === "review" ? `<button class="admin-action" data-action="admin-review" data-id="${reviewId}">查看并确认</button>` : item.status === "done" ? `<button class="admin-action" data-action="admin-done-recheck" data-id="${doneId}">免费重新复核</button>` : "-"; const label = item.status === "done" ? "成功" : item.status === "review" ? "管理员复核" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td><strong>${escapeHtml(item.title || item.id)}</strong><small>${escapeHtml(item.file_name || "")}</small></td><td>${escapeHtml(item.email || item.user_id || "-")}</td><td><span class="admin-status ${item.status === "done" ? "on" : item.status === "failed" ? "off" : item.status === "review" ? "wait" : "wait"}">${label}</span></td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td><td>${actions}</td></tr>`; }).join("") || `<tr><td colspan="6">暂无任务</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-page" data-page="${Math.max(0, state.adminTaskPage - 1)}" ${state.adminTaskPage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminTaskPage + 1} / ${pageCount} 页</span><button class="admin-action" data-action="admin-page" data-page="${Math.min(pageCount - 1, state.adminTaskPage + 1)}" ${state.adminTaskPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近任务</h2><p>平台实时处理概况</p></div><span>实时数据</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => { const label = item.status === "review" ? "管理员复核" : item.status === "done" ? "成功" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td>${escapeHtml(item.title || item.id)}</td><td>${escapeHtml(item.email || item.user_id || item.name || "-")}</td><td>${label}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`; }).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div>`;
       }
@@ -560,48 +560,32 @@
       // The screenplay follows 剧拆拆's readable text layout; timestamps stay
       // in the underlying data for review but are not printed in the body.
       const time = "";
-      const uncertaintyLabel = (type) => {
-        if (type === "dialogue" && ["", "未知说话人", "未知男声", "未知女声"].includes(String(block.speaker || "").trim())) return "需核对·说话人";
-        if (type === "vo" && ["", "unknown"].includes(String(block.voKind || "").trim())) return "需核对·声音";
-        if (!(block.uncertain || block.inferred || block.evidence === false)) return "";
-        if (type === "dialogue") return ["", "未知说话人", "未知男声", "未知女声"].includes(String(block.speaker || "").trim()) ? "需核对·说话人" : "需核对·对白";
-        if (type === "screen_text") return "需核对·字幕";
-        if (type === "vo") return "需核对·声音";
-        if (type === "transition") return "需核对·时间";
-        return "需核对·画面";
-      };
       if (block.type === "dialogue") {
-        const warning = uncertaintyLabel("dialogue") ? `<small class="uncertain">${uncertaintyLabel("dialogue")}</small>` : "";
         const performance = block.performance ? `<em>${escapeHtml(block.performance)}</em>` : "";
-        return `<p class="dialogue">${time}<strong>${escapeHtml(block.speaker || "未知说话人")}</strong>${warning}${performance}<span>：${escapeHtml(block.text || "")}</span></p>`;
+        return `<p class="dialogue">${time}<strong>${escapeHtml(block.speaker || "未知说话人")}</strong>${performance}<span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "vo" || block.type === "os") {
         const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
         const speaker = block.speaker && !["旁白", "未知说话人", "OS", "内心独白"].includes(block.speaker)
           ? `${escapeHtml(block.speaker)} ${isOs ? "OS" : "VO"}`
           : (isOs ? "OS" : "VO");
-        const warning = uncertaintyLabel("vo");
-        return `<p class="os-line">${time}<strong>${speaker}${warning ? `【${warning}】` : ""}</strong><span>：${escapeHtml(block.text || "")}</span></p>`;
+        return `<p class="os-line">${time}<strong>${speaker}</strong><span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "sound") {
         const label = block.category === "music" ? "背景音乐" : block.category === "ambience" ? "环境声" : "音效";
-        const source = block.source === "inferred" ? "推断" : "听到";
-        return `<p class="sound-line">${time}<strong>【${label} · ${source}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+        return `<p class="sound-line">${time}<strong>【${label}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "emotion") {
         return `<p class="action-line">${time}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
       }
       if (block.type === "screen_text") {
-        const warning = uncertaintyLabel("screen_text");
-        return `<p class="sound-line">${time}<strong>【字幕${warning ? ` · ${warning}` : ""}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+        return `<p class="sound-line">${time}<strong>【字幕】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "transition") {
         const transitionLabel = { flashback: "闪回", return: "闪出", flash: "闪白" }[String(block.transitionType || "").toLowerCase()] || block.transitionType || "转场";
-        const warning = uncertaintyLabel("transition");
-        return `<p class="sound-line">${time}<strong>【${escapeHtml(transitionLabel)}${warning ? ` · ${warning}` : ""}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
+        return `<p class="sound-line">${time}<strong>【${escapeHtml(transitionLabel)}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
-      const warning = uncertaintyLabel("action");
-      return `<p class="action-line">${time}${warning ? `<small class="uncertain">${warning}</small>` : ""}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
+      return `<p class="action-line">${time}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
     }
     return `<div class="script-paper">
       <div class="script-title">
@@ -618,13 +602,6 @@
 
   function renderResult(task) {
     if (!task.result) return `<div class="empty-result"><strong>剧本内容暂未生成</strong><span>任务虽然已完成，但当前没有可展示的剧本内容，请稍后刷新或重新识别。</span></div>`;
-    const quality = task.quality || {};
-    const severity = quality.severityCounts || {};
-    const issues = Array.isArray(quality.issues) ? quality.issues.slice(0, 5) : [];
-    const evidenceSources = quality.evidenceSources && typeof quality.evidenceSources === "object"
-      ? Object.entries(quality.evidenceSources).map(([kind, status]) => `${kind}:${status}`).join(" · ")
-      : "未记录";
-    const metric = (value) => value === null || value === undefined ? "--" : value;
     return `<div class="result-layout">
       <aside class="result-aside">
         <div class="aside-section">
@@ -637,21 +614,8 @@
           </dl>
         </div>
         <div class="aside-section quality-section">
-          <span class="aside-label">识别概况</span>
-          <div class="quality-row"><span>台词标点完整</span><strong>${metric(quality.dialogueCoverage)}%</strong></div>
-          <div class="quality-row"><span>音频转写覆盖</span><strong>${quality.transcriptCoverage === null || quality.transcriptCoverage === undefined ? "未校验" : `${metric(quality.transcriptCoverage)}%`}</strong></div>
-          <div class="quality-row"><span>成稿台词吻合</span><strong>${quality.dialogueEvidencePrecision === null || quality.dialogueEvidencePrecision === undefined ? "未校验" : `${metric(quality.dialogueEvidencePrecision)}%`}</strong></div>
-          <div class="quality-row"><span>画面文字覆盖</span><strong>${quality.ocrCoverage === null || quality.ocrCoverage === undefined ? "未校验" : `${metric(quality.ocrCoverage)}%`}</strong></div>
-          <div class="quality-row"><span>人物区分</span><strong>${metric(quality.speakerConfidence)}%</strong></div>
-          <div class="quality-row"><span>待核对问题</span><strong>${metric(quality.warnings)}</strong></div>
-          <div class="quality-row"><span>视频复杂度</span><strong>${escapeHtml(quality.complexityBand || "未评估")}</strong></div>
-          <div class="quality-row"><span>识别路由</span><strong>${escapeHtml(quality.modelRoute || "未记录")}</strong></div>
-          <div class="quality-row"><span>独立证据</span><strong>${escapeHtml(evidenceSources)}</strong></div>
-          <p class="quality-severity"><span>P0 ${metric(severity.P0 || 0)}</span><span>P1 ${metric(severity.P1 || 0)}</span><span>P2 ${metric(severity.P2 || 0)}</span></p>
+          <span class="aside-label">识别说明</span>
           <p class="quality-note">结果由 AI 生成，建议导出前快速核对人名与专有名词。</p>
-          ${Array.isArray(quality.issueTags) && quality.issueTags.length ? `<p class="quality-note quality-warning">待核对：${escapeHtml(quality.issueTags.join("、"))}</p>` : ""}
-          ${issues.length ? `<ul class="quality-issues">${issues.map((issue) => `<li><b>${escapeHtml(issue.severity || "提示")}</b>${escapeHtml(issue.description || issue.tag || "请核对该项")}</li>`).join("")}</ul>` : ""}
-          ${quality.warning ? `<p class="quality-note quality-warning">${escapeHtml(quality.warning)}</p>` : ""}
         </div>
       </aside>
       <div class="result-main">${scriptPreview(task.result)}</div>
@@ -682,7 +646,7 @@
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
-      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0 级内容一致性问题，完成复核前不可导出。</div>` : "";
+      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">本集正在进行后台质量检查，完成后即可导出。</div>` : "";
     let content = "";
     if (isCompletedTask(task) || task.status === "review") content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);

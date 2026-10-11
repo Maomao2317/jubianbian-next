@@ -29,7 +29,7 @@ from .logging_setup import logger, safe_error_text
 from .media import probe_duration
 from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, openai_script, openai_transcribe
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
-from .script import normalize_script, quality_gate, script_quality
+from .script import normalize_script, quality_gate, restore_short_transcript_segments, script_quality
 from .storage import cleanup_materialized, materialize_media
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
@@ -100,7 +100,9 @@ def _evaluate_quality(
     evidence: dict[str, Any],
     route: dict[str, Any],
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    recovered = restore_short_transcript_segments(script, evidence)
     quality = script_quality(script, provider, evidence)
+    quality["shortDialogueRecovery"] = recovered
     approved, blocking = quality_gate(quality)
     quality["deliveryStatus"] = "approved" if approved else "review_required"
     quality["blockingIssues"] = blocking
@@ -350,10 +352,8 @@ async def _run_recognizer_with_media(
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
             may_auto_review = (
                 _needs_automated_content_review(quality)
-                and route.get("band") == "simple"
                 and route.get("mode") not in {"lite", "lite_only"}
                 and bool(turbo_model)
-                and turbo_model != initial_model
             )
             if may_auto_review:
                 review_issues = _automated_review_issues(quality)

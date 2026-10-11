@@ -60,7 +60,7 @@ window.APP_CONFIG = {
     vision: "分析画面与情绪",
     merging: "整理字幕与画面",
     exporting: "生成导出文件",
-    review: "等待管理员复核",
+    review: "质量检查中",
     done: "识别完成",
     failed: "识别失败",
   },

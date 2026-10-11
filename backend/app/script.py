@@ -257,6 +257,120 @@ def matching_character_counts(reference: str, candidate: str) -> tuple[int, int,
     return matched, len(reference), len(candidate)
 
 
+def restore_short_transcript_segments(
+    script: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    *,
+    max_segment_chars: int = 16,
+) -> dict[str, int]:
+    """Restore short ASR beats that a video model compressed or dropped.
+
+    The repair only touches a single timestamped dialogue/VO block when the
+    model text is almost entirely an ordered subset of independent ASR. This
+    covers pauses such as ``今天 / 我决定 / 我`` without guessing a speaker.
+    Multiple ASR beats mapped to one block are split back into separate lines
+    so repeated one-character dialogue is not lost by de-duplication.
+    """
+    result = {"segments": 0, "blocks": 0}
+    if not isinstance(script, dict) or not isinstance(evidence, dict):
+        return result
+    audio = next(
+        (
+            source
+            for source in (evidence.get("sources") or [])
+            if isinstance(source, dict) and source.get("kind") == "audio" and source.get("status") == "available"
+        ),
+        None,
+    )
+    if not isinstance(audio, dict):
+        return result
+    segments = []
+    for item in audio.get("items") or []:
+        if not isinstance(item, dict) or item.get("type") != "transcript_segment":
+            continue
+        comparison = evidence_comparison_text(item.get("text"))
+        start = item.get("startSec")
+        end = item.get("endSec")
+        if not comparison or len(comparison) > max_segment_chars:
+            continue
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        segments.append({**item, "_comparison": comparison})
+    if not segments:
+        return result
+
+    scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
+    timed_blocks: list[tuple[int, int, dict[str, Any], float, float]] = []
+    for scene_index, scene in enumerate(scenes):
+        for block_index, block in enumerate(scene.get("blocks") or []):
+            if not isinstance(block, dict) or block.get("type") not in {"dialogue", "vo", "os"}:
+                continue
+            start = block.get("startSec")
+            end = block.get("endSec")
+            if not isinstance(start, (int, float)) and not isinstance(end, (int, float)):
+                continue
+            left = float(start if isinstance(start, (int, float)) else end)
+            right = float(end if isinstance(end, (int, float)) else start)
+            if right < left:
+                left, right = right, left
+            timed_blocks.append((scene_index, block_index, block, left, right))
+
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for segment in segments:
+        left = float(segment["startSec"])
+        right = float(segment["endSec"])
+        if right < left:
+            left, right = right, left
+        overlapping = [
+            entry for entry in timed_blocks
+            if entry[4] >= left - 0.35 and entry[3] <= right + 0.35
+        ]
+        if len(overlapping) != 1:
+            continue
+        scene_index, block_index, _block, _start, _end = overlapping[0]
+        grouped.setdefault((scene_index, block_index), []).append(segment)
+
+    for (scene_index, block_index), mapped in sorted(grouped.items(), reverse=True):
+        blocks = scenes[scene_index].get("blocks") or []
+        if block_index >= len(blocks) or not isinstance(blocks[block_index], dict):
+            continue
+        block = blocks[block_index]
+        ordered = sorted(mapped, key=lambda item: (float(item["startSec"]), float(item["endSec"])))
+        reference = "".join(str(item.get("_comparison") or "") for item in ordered)
+        candidate = evidence_comparison_text(block.get("text"))
+        matched, reference_size, candidate_size = matching_character_counts(reference, candidate)
+        if not reference_size or not candidate_size:
+            continue
+        reference_coverage = matched / reference_size
+        candidate_precision = matched / candidate_size
+        # The provider line must look like an incomplete subset of ASR. When it
+        # contains substantial extra wording, keep it and request video review.
+        if reference_coverage >= 0.98 or candidate_precision < 0.85:
+            continue
+
+        replacements: list[dict[str, Any]] = []
+        for item in ordered:
+            text = normalize_dialogue_text(strip_internal_review_markers(item.get("text")))
+            if not text:
+                continue
+            replacement = dict(block)
+            replacement["text"] = text
+            replacement["startSec"] = float(item["startSec"])
+            replacement["endSec"] = float(item["endSec"])
+            replacement["asrRecovered"] = True
+            if replacement.get("type") == "dialogue":
+                replacement["rawText"] = str(item.get("text") or "").strip()
+                replacement["finalText"] = text
+                replacement["sourceText"] = str(item.get("text") or "").strip()
+            replacements.append(replacement)
+        if not replacements:
+            continue
+        blocks[block_index : block_index + 1] = replacements
+        result["segments"] += len(replacements)
+        result["blocks"] += 1
+    return result
+
+
 def episode_from_text(value: Any) -> int | None:
     """Extract an explicit episode number from a title or scene heading."""
     text = str(value or "").strip()
@@ -1608,8 +1722,13 @@ def script_quality(
                 add_issue("格式错误", "P2", f"第 {scene_index} 场第 {block_index} 条台词或声音缺少句末标点。", scene_index, block_index)
             if block_type == "dialogue":
                 speaker = str(block.get("speaker") or "未知说话人").strip()
-                if speaker in {"", "未知说话人"} or block.get("uncertain"):
+                if speaker in {"", "未知说话人", "未知男声", "未知女声"}:
                     add_issue("台词归属错", "P0", f"第 {scene_index} 场第 {block_index} 句台词说话人需要核对。", scene_index, block_index)
+                elif block.get("uncertain"):
+                    # Low confidence is not proof that a known speaker is
+                    # wrong. Explicit lip-sync/action conflicts below still
+                    # block delivery, while this remains an internal hint.
+                    add_issue("对白置信度低", "P1", f"第 {scene_index} 场第 {block_index} 句对白置信度较低。", scene_index, block_index)
                 visible_speaker = str(block.get("visibleSpeaker") or "").strip()
                 if block.get("mouthMoving") is False:
                     add_issue("OS漏标", "P0", f"第 {scene_index} 场第 {block_index} 句人物未开口却仍标为对白，应标为人物（OS）。", scene_index, block_index)
@@ -1830,7 +1949,11 @@ def script_quality(
         segment_coverage = round(100 * matched / segment_size) if segment_size else 100
         if segment_coverage >= 72:
             continue
-        severity = "P0" if segment_size >= 4 and segment_coverage < 45 else "P1"
+        filler = evidence_comparison_text(segment_text) in {"啊", "嗯", "哦", "哎", "唉", "呃", "哈"}
+        # A one-character dramatic beat such as “我” can change the line and
+        # must not be silently delivered as complete. Common hesitation fillers
+        # remain advisory when independent ASR cannot align them.
+        severity = "P0" if segment_coverage < 45 and not filler else "P1"
         start = segment.get("startSec")
         end = segment.get("endSec")
         location = f"{float(start):.1f}-{float(end):.1f} 秒" if isinstance(start, (int, float)) and isinstance(end, (int, float)) else "未定位时段"

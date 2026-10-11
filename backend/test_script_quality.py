@@ -8,7 +8,7 @@ from app.evidence import collect_evidence, evidence_summary, transcript_from_evi
 from app.media import default_batch_title
 from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
 from app.errors import ArkError
-from app.script import clean_action_text, compact_character_detail, compact_emotion_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, script_quality, script_to_markdown
+from app.script import clean_action_text, compact_character_detail, compact_emotion_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, restore_short_transcript_segments, script_quality, script_to_markdown
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
@@ -285,6 +285,64 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         }
         quality = script_quality(script, "test", evidence)
         self.assertTrue(any(issue["tag"] == "疑似漏台词片段" for issue in quality["issues"]))
+        self.assertFalse(quality_gate(quality)[0])
+
+    def test_short_asr_beats_restore_repeated_words_without_deduplication(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{
+                        "type": "dialogue",
+                        "speaker": "甲",
+                        "text": "今天，决定",
+                        "startSec": 0,
+                        "endSec": 3,
+                    }],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [{
+                "kind": "audio",
+                "status": "available",
+                "items": [
+                    {"type": "transcript_segment", "text": "今天", "startSec": 0.1, "endSec": 0.7},
+                    {"type": "transcript_segment", "text": "我决定", "startSec": 1.0, "endSec": 1.8},
+                    {"type": "transcript_segment", "text": "我", "startSec": 2.1, "endSec": 2.4},
+                ],
+            }],
+        }
+
+        repaired = restore_short_transcript_segments(script, evidence)
+
+        blocks = script["scenes"][0]["blocks"]
+        self.assertEqual(repaired, {"segments": 3, "blocks": 1})
+        self.assertEqual([block["text"] for block in blocks], ["今天。", "我决定。", "我。"])
+        self.assertTrue(all(block.get("asrRecovered") for block in blocks))
+        self.assertTrue(quality_gate(script_quality(script, "test", evidence))[0])
+
+    def test_known_low_confidence_speaker_is_advisory_not_p0(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "dialogue", "speaker": "甲", "text": "我知道", "uncertain": True}],
+                }],
+            },
+            "测试",
+        )
+
+        quality = script_quality(script, "test")
+
+        self.assertTrue(any(issue["tag"] == "对白置信度低" for issue in quality["issues"]))
+        self.assertFalse(any(issue["tag"] == "台词归属错" for issue in quality["issues"]))
+        self.assertTrue(quality_gate(quality)[0])
 
     def test_independent_audio_evidence_blocks_rewritten_dialogue(self):
         script = normalize_script(
@@ -649,14 +707,16 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 "blocks": [{"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True}],
             }],
         }
-        row = {"id": "task-2", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30}
+        # A complex clip starts on Turbo. It still gets exactly one focused
+        # second pass when a real P0 remains; the review is never recursive.
+        row = {"id": "task-2", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 210}
         with (
             patch.object(processing, "ARK_API_KEYS", ("key",)),
             patch.object(processing, "ARK_LITE_MODEL", "lite"),
             patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
             patch.object(processing, "ARK_MODEL", "turbo"),
             patch.object(processing, "ARK_ROUTING_MODE", "complexity"),
-            patch.object(processing, "probe_duration", return_value=30),
+            patch.object(processing, "probe_duration", return_value=210),
             patch.object(processing, "collect_evidence", return_value=evidence),
             patch.object(processing, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}),
             patch.object(processing, "update_task"),
