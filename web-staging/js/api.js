@@ -184,7 +184,7 @@
         } else if (block.type === "vo" || block.type === "os") {
           const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
           const label = block.speaker && !["旁白", "未知说话人", "OS", "内心独白"].includes(block.speaker)
-            ? `${block.speaker} ${isOs ? "OS" : "VO"}`
+            ? `${block.speaker}（${isOs ? "OS" : "VO"}）`
             : (isOs ? "OS" : "VO");
           lines.push(`${label}${block.inferred ? "（推断）" : ""}：${block.text}`);
         } else if (block.type === "sound") {
@@ -450,12 +450,78 @@
     getTask(id) {
       return this.request(this.url(cfg().api.endpoints.task, { id }));
     },
-    createTask(payload) {
-      const form = new FormData();
-      (payload.files || [payload.file]).forEach((file) => form.append("files", file));
-      form.append("title", payload.title || "");
-      form.append("durationSec", String(payload.durationSec || 0));
-      return this.request(this.url("/tasks/batch"), { method: "POST", body: form, timeoutMs: cfg().api.batchTimeoutMs });
+    async createTask(payload) {
+      const files = (payload.files || [payload.file]).filter(Boolean);
+      const durations = Array.isArray(payload.durations) ? payload.durations : [];
+      const reservation = await this.request(this.url("/uploads/batch"), {
+        method: "POST",
+        body: JSON.stringify({
+          title: payload.title || "",
+          files: files.map((file, index) => ({
+            name: file.name,
+            size: file.size,
+            durationSec: Number(durations[index] || (files.length === 1 ? payload.durationSec : 0)),
+          })),
+        }),
+        timeoutMs: cfg().api.timeoutMs,
+      });
+      const targets = Array.isArray(reservation.uploads) ? reservation.uploads : [];
+      let cursor = 0;
+      let completed = 0;
+      const errors = [];
+      const uploadOne = async (target) => {
+        const file = files[Number(target.inputIndex) || 0];
+        if (!file) throw new Error(`${target.fileName || "视频"} 未找到本地文件`);
+        let lastError;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), cfg().api.batchTimeoutMs);
+          try {
+            const response = await fetch(target.url, {
+              method: target.method || "PUT",
+              headers: target.headers || { "Content-Type": file.type || "video/mp4" },
+              body: file,
+              credentials: target.mode === "object" ? "omit" : "include",
+              signal: controller.signal,
+            });
+            if (!response.ok) {
+              const detail = await response.json().catch(() => ({}));
+              throw new Error(detail.detail || `${file.name} 上传失败（${response.status}）`);
+            }
+            if (target.completeUrl) {
+              await this.request(target.completeUrl, { method: "POST", timeoutMs: cfg().api.timeoutMs });
+            }
+            completed += 1;
+            if (typeof payload.onProgress === "function") payload.onProgress(completed, files.length, file.name);
+            return;
+          } catch (error) {
+            lastError = error.name === "AbortError" ? new Error(`${file.name} 上传超时`) : error;
+            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 800));
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        if (target.abortUrl) {
+          await this.request(target.abortUrl, { method: "POST" }).catch(() => null);
+        }
+        throw lastError || new Error(`${file.name} 上传失败`);
+      };
+      const worker = async () => {
+        while (cursor < targets.length) {
+          const target = targets[cursor];
+          cursor += 1;
+          try { await uploadOne.call(this, target); }
+          catch (error) { errors.push(error); }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(cfg().upload.parallelUploads || 4, targets.length) }, worker));
+      if (errors.length) {
+        const failure = new Error(`${errors.length} 个视频上传失败，已自动退回对应积分；${errors[0].message}`);
+        failure.partialSuccess = completed > 0;
+        failure.failedCount = errors.length;
+        throw failure;
+      }
+      return reservation;
     },
     retryTask(id) {
       return this.request(this.url(cfg().api.endpoints.task, { id }) + "/retry", { method: "POST" });

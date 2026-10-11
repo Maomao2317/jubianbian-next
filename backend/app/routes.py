@@ -66,7 +66,7 @@ from .media import (
     title_with_episode,
     is_default_batch_title,
 )
-from .processing import process_task
+from .processing import _refund_task_once, process_task
 from .rechecks import (
     create_recheck_snapshot,
     mark_recheck_resolved,
@@ -74,6 +74,16 @@ from .rechecks import (
     restore_recheck_snapshot,
 )
 from .script import script_to_markdown
+from .storage import (
+    delete_media,
+    is_object_uri,
+    local_upload_path,
+    media_exists,
+    media_info,
+    object_storage_enabled,
+    object_uri,
+    presigned_put,
+)
 from .task_store import (
     get_task,
     record_task_event,
@@ -717,7 +727,7 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
     user_id = str(row["user_id"]) if row else ""
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if not Path(row["stored_path"]).exists():
+    if not media_exists(row["stored_path"]):
         raise HTTPException(status_code=409, detail="原始视频不存在")
     task_status = str(row["status"] or "")
     if task_status not in {"failed", "review", "done"}:
@@ -865,6 +875,201 @@ def task_event_list(request: Request, task_id: str, limit: int = Query(100, ge=1
     if not task_row(task_id, current_user(request)["id"]):
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
     return task_events(task_id, limit)
+
+
+async def create_upload_batch(request: Request) -> dict[str, Any]:
+    """Reserve one batch and return independent per-episode upload targets."""
+    user = current_user(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="上传批次参数不是合法 JSON") from exc
+    raw_files = payload.get("files") if isinstance(payload, dict) else None
+    title = str(payload.get("title") or "").strip() if isinstance(payload, dict) else ""
+    if not isinstance(raw_files, list) or not raw_files or len(raw_files) > 999:
+        raise HTTPException(status_code=400, detail="一次最多上传 999 个视频")
+
+    prepared: list[dict[str, Any]] = []
+    for input_index, raw in enumerate(raw_files):
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail="视频参数不完整")
+        name = safe_filename(str(raw.get("name") or "video.mp4"))
+        if not name.lower().endswith(".mp4"):
+            raise HTTPException(status_code=400, detail=f"{name} 不是 MP4 视频")
+        try:
+            size = int(raw.get("size") or 0)
+            duration = float(raw.get("durationSec") or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{name} 的大小或时长无效") from exc
+        if size <= 0 or size > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"{name} 超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 或为空")
+        if duration <= 0 or duration > MAX_DURATION_SECONDS:
+            raise HTTPException(status_code=400, detail=f"{name} 时长必须不超过 {MAX_DURATION_MINUTES} 分钟")
+        task_id = f"task-{uuid.uuid4().hex}"
+        stored_path = object_uri(task_id) if object_storage_enabled() else str(local_upload_path(task_id))
+        prepared.append({
+            "id": task_id,
+            "name": name,
+            "size": size,
+            "duration": duration,
+            "minutes": max(1, math.ceil(duration / 60)),
+            "input_index": input_index,
+            "stored_path": stored_path,
+        })
+
+    total_duration = sum(float(item["duration"]) for item in prepared)
+    total_minutes = max(1, math.ceil(total_duration / 60))
+    _allocate_batch_billing_minutes(prepared, total_minutes)
+    total_points = total_minutes * POINTS_PER_MINUTE
+    if total_points > int(user["credits"]):
+        raise HTTPException(status_code=402, detail=f"积分不足，预计需要 {total_points:.1f} 积分")
+    with db() as connection:
+        queue = _queue_summary(connection, sum(item["minutes"] for item in prepared))
+    if queue["blocked"]:
+        raise HTTPException(status_code=429, detail=f"当前任务排队预计超过 {QUEUE_MAX_WAIT_MINUTES // 60} 小时，请稍后再上传", headers={"Retry-After": "600"})
+
+    # Validate object-storage signing before charging the account.  Local
+    # targets use an authenticated same-origin PUT instead.
+    for item in prepared:
+        item["upload"] = (
+            presigned_put(item["stored_path"], "video/mp4")
+            if is_object_uri(item["stored_path"])
+            else {
+                "url": f"/api/uploads/{item['id']}",
+                "method": "PUT",
+                "headers": {"Content-Type": "video/mp4"},
+                "mode": "local",
+            }
+        )
+
+    created = now_iso()
+    batch_id = f"batch-{uuid.uuid4().hex}"
+    batch_title = title or default_batch_title(created)
+    prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item["input_index"])))
+    with db() as connection:
+        charged = _charge_user(connection, user["id"], total_minutes)
+        if charged is None:
+            raise HTTPException(status_code=402, detail="积分不足，请刷新后重试")
+        for index, item in enumerate(prepared, start=1):
+            connection.execute(
+                """INSERT INTO tasks
+                (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec,
+                 estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at,
+                 batch_id, batch_title, batch_index, batch_total)
+                VALUES (?, ?, ?, ?, ?, ?, 'video/mp4', ?, ?, ?, 'queued', 'uploading', 1, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item["id"], user["id"], title_with_episode(title or title_from_filename(item["name"]), item["name"]),
+                    item["name"], item["stored_path"], item["size"], item["duration"], item["minutes"],
+                    item["billing_minutes"], created, created, batch_id, batch_title, index, len(prepared),
+                ),
+            )
+        charge_points, balance = charged
+        connection.execute(
+            "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user["id"], -charge_points, balance, "consume", "视频识别消费", created),
+        )
+    for item in prepared:
+        record_task_event(item["id"], "uploading", "等待视频上传", status="queued", stage="uploading", progress_percent=1)
+
+    uploads = []
+    for item in prepared:
+        uploads.append({
+            "taskId": item["id"],
+            "inputIndex": item["input_index"],
+            "fileName": item["name"],
+            **item["upload"],
+            "completeUrl": f"/api/uploads/{item['id']}/complete" if item["upload"]["mode"] == "object" else None,
+            "abortUrl": f"/api/uploads/{item['id']}/abort",
+        })
+    return {"batchId": batch_id, "uploads": uploads, "count": len(uploads), "storage": "object" if object_storage_enabled() else "local"}
+
+
+async def upload_task_media(request: Request, task_id: str) -> dict[str, Any]:
+    """Accept one raw MP4; independent requests allow bounded parallel upload."""
+    user_id = current_user(request)["id"]
+    row = task_row(task_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="上传任务不存在")
+    if row["status"] == "queued" and row["stage"] == "queued":
+        info = await asyncio.to_thread(media_info, row["stored_path"])
+        if info and int(info.get("size") or 0) == int(row["file_size"] or 0):
+            return {"taskId": task_id, "status": "queued"}
+    if row["status"] != "queued" or row["stage"] != "uploading" or is_object_uri(row["stored_path"]):
+        raise HTTPException(status_code=409, detail="该任务当前不能上传")
+    expected_size = int(row["file_size"] or 0)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="文件过大")
+    target = Path(row["stored_path"])
+    temporary = target.with_suffix(f".{uuid.uuid4().hex}.part")
+    size = 0
+    try:
+        with temporary.open("wb") as output:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="文件过大")
+                output.write(chunk)
+        if size <= 0 or (expected_size and size != expected_size):
+            raise HTTPException(status_code=400, detail="上传文件不完整，请重试")
+        current = task_row(task_id, user_id)
+        if not current or current["status"] != "queued" or current["stage"] != "uploading":
+            raise HTTPException(status_code=409, detail="上传任务已取消或状态已变化")
+        temporary.replace(target)
+        duration = await asyncio.to_thread(probe_duration, target)
+        if duration and duration > MAX_DURATION_SECONDS:
+            target.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"视频超过 {MAX_DURATION_MINUTES} 分钟")
+        update_task(task_id, file_size=size, duration_sec=duration or float(row["duration_sec"] or 0), stage="queued", progress_percent=4, error=None)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    record_task_event(task_id, "uploaded", "视频上传完成，已进入识别队列", status="queued", stage="queued", progress_percent=4)
+    return {"taskId": task_id, "status": "queued"}
+
+
+async def complete_task_upload(request: Request, task_id: str) -> dict[str, Any]:
+    """Confirm that a browser direct-to-object-store PUT is complete."""
+    user_id = current_user(request)["id"]
+    row = task_row(task_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="上传任务不存在")
+    if row["status"] == "queued" and row["stage"] == "queued":
+        return {"taskId": task_id, "status": "queued"}
+    if row["status"] != "queued" or row["stage"] != "uploading" or not is_object_uri(row["stored_path"]):
+        raise HTTPException(status_code=409, detail="该任务当前不能确认上传")
+    info = await asyncio.to_thread(media_info, row["stored_path"])
+    expected_size = int(row["file_size"] or 0)
+    if not info or int(info.get("size") or 0) != expected_size:
+        raise HTTPException(status_code=409, detail="对象存储中的文件尚未完整上传")
+    update_task(task_id, stage="queued", progress_percent=4, error=None)
+    record_task_event(task_id, "uploaded", "视频直传完成，已进入识别队列", status="queued", stage="queued", progress_percent=4)
+    return {"taskId": task_id, "status": "queued"}
+
+
+async def abort_task_upload(request: Request, task_id: str) -> dict[str, Any]:
+    """Cancel an incomplete upload and return its allocated points once."""
+    user_id = current_user(request)["id"]
+    row = task_row(task_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="上传任务不存在")
+    if row["status"] != "queued" or row["stage"] != "uploading":
+        raise HTTPException(status_code=409, detail="只有未完成上传可以取消")
+    completed = now_iso()
+    with db() as connection:
+        claimed = connection.execute(
+            "UPDATE tasks SET status = 'failed', stage = 'failed', progress_percent = 100, error = ?, completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'queued' AND stage = 'uploading'",
+            ("视频上传未完成，已退回本集积分", completed, completed, task_id, user_id),
+        ).rowcount
+    if claimed != 1:
+        raise HTTPException(status_code=409, detail="上传状态已变化")
+    try:
+        await asyncio.to_thread(delete_media, row["stored_path"])
+    except Exception:
+        logger.warning("upload_abort_delete_failed task_id=%s", task_id)
+    _refund_task_once(task_id, user_id, int(row["credits_used"] or 0))
+    record_task_event(task_id, "upload_aborted", "视频上传失败，已退回本集积分", status="failed", stage="failed", progress_percent=100)
+    return {"taskId": task_id, "status": "failed"}
 
 
 async def create_task(
@@ -1022,7 +1227,7 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
         raise HTTPException(status_code=409, detail="只有失败任务可以重试")
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if not Path(row["stored_path"]).exists():
+    if not media_exists(row["stored_path"]):
         raise HTTPException(status_code=409, detail="原始视频已不存在，无法重试")
     retry_minutes = max(1, int(row["estimated_minutes"] or 1))
     with db() as connection:
@@ -1057,7 +1262,10 @@ def delete_task(request: Request, task_id: str) -> Response:
     row = task_row(task_id, current_user(request)["id"])
     if not row:
         return Response(status_code=204)
-    Path(row["stored_path"]).unlink(missing_ok=True)
+    try:
+        delete_media(row["stored_path"])
+    except Exception as exc:
+        logger.warning("task_media_delete_failed task_id=%s error=%s", task_id, safe_error_text(exc))
     with db() as connection:
         connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))

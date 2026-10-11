@@ -83,6 +83,48 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         poll.assert_called_once_with("resp-test", "key")
         self.assertEqual(payload, completed)
 
+    def test_ark_poll_retries_transient_network_without_losing_response(self):
+        completed = {"id": "resp-test", "status": "completed", "output": []}
+        with (
+            patch.object(
+                providers,
+                "ark_http",
+                side_effect=[ArkError("temporary", provider_code="transient_network"), completed],
+            ) as request,
+            patch.object(providers.time, "sleep"),
+            patch.object(providers, "ARK_RESPONSE_POLL_TIMEOUT_SECONDS", 30),
+        ):
+            payload = providers._ark_poll_response("resp-test", "key")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(payload, completed)
+
+    def test_ark_response_creation_retry_reuses_prepared_video(self):
+        completed = {
+            "id": "resp-test",
+            "status": "completed",
+            "output": [{"content": [{"text": '{"title":"测试","scenes":[{"heading":"1-1 日 内 客厅","location":"客厅","blocks":[{"type":"dialogue","speaker":"甲","text":"你好"}]}]}'}]}],
+        }
+        with (
+            patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+            patch.object(
+                providers,
+                "ark_stream_response",
+                side_effect=[ArkError("socket closed", provider_code="transient_network"), completed],
+            ) as response,
+            patch.object(providers, "ark_prepare_video") as prepare,
+            patch.object(providers.time, "sleep"),
+        ):
+            script, _usage = providers.ark_recognize(
+                Path(__file__),
+                "测试",
+                30,
+                model="lite",
+                prepared_video={"api_key": "key", "file_id": "file"},
+            )
+        prepare.assert_not_called()
+        self.assertEqual(response.call_count, 2)
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "你好。")
+
     def test_episode_markers_in_upload_names(self):
         self.assertEqual(episode_from_text("2.mp4"), 2)
         self.assertEqual(episode_from_text("episode_02_final.mp4"), 2)
@@ -91,11 +133,11 @@ class ScriptQualityRegressionTests(unittest.TestCase):
     def test_auto_batch_title_uses_shanghai_upload_time(self):
         self.assertEqual(default_batch_title("2026-10-08T06:06:00+00:00"), "短剧批次 2026-10-08 14:06")
 
-    def test_lite_model_failure_is_non_retryable_and_detected(self):
+    def test_lite_model_failure_is_non_retryable_but_timeout_can_recover(self):
         error = ArkError("方舟接口请求失败（HTTP 400）：ModelNotOpen model not active", status_code=400, provider_code="ModelNotOpen")
         self.assertTrue(_is_lite_model_unavailable(error))
         self.assertTrue(_is_non_retryable_provider_error(error))
-        self.assertTrue(_is_non_retryable_provider_error(TimeoutError("The read operation timed out")))
+        self.assertFalse(_is_non_retryable_provider_error(TimeoutError("The read operation timed out")))
 
     def test_batch_scene_order_and_editorial_notes(self):
         script = {
@@ -179,6 +221,70 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         line = script["scenes"][0]["blocks"][0]
         self.assertEqual(line["text"], "我没有拿你的东西。")
         self.assertEqual(line["rawText"], "我没有拿你的东西")
+
+    def test_explicit_speech_action_repairs_wrong_speaker(self):
+        normalized = normalize_script(
+            {
+                "characters": ["甲", "乙"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "characters": ["甲", "乙"],
+                    "blocks": [
+                        {"type": "action", "text": "甲转向乙，开口问道。", "object": "乙", "result": "开口"},
+                        {"type": "dialogue", "speaker": "乙", "text": "你去哪里"},
+                    ],
+                }],
+            },
+            "测试",
+        )
+        dialogue = normalized["scenes"][0]["blocks"][1]
+        self.assertEqual(dialogue["speaker"], "甲")
+        self.assertEqual(dialogue["speakerCorrectedFrom"], "乙")
+
+    def test_non_lip_synced_character_voice_exports_as_parenthesized_os(self):
+        normalized = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{
+                        "type": "dialogue",
+                        "speaker": "甲",
+                        "mouthMoving": False,
+                        "text": "今天，我一定要离开",
+                    }],
+                }],
+            },
+            "测试",
+        )
+        block = normalized["scenes"][0]["blocks"][0]
+        self.assertEqual(block["type"], "vo")
+        self.assertEqual(block["voKind"], "os")
+        exported = script_to_markdown({"title": "测试", "result": normalized})
+        self.assertIn("甲（OS）：", exported)
+
+    def test_one_character_time_anchored_line_is_checked(self):
+        script = normalize_script(
+            {
+                "characters": ["甲"],
+                "scenes": [{
+                    "heading": "1-1 日 内 客厅",
+                    "location": "客厅",
+                    "blocks": [{"type": "dialogue", "speaker": "甲", "text": "今天", "startSec": 0, "endSec": 1}],
+                }],
+            },
+            "测试",
+        )
+        evidence = {
+            "sources": [
+                {"kind": "audio", "status": "available", "items": [{"type": "transcript_segment", "text": "我", "startSec": 2, "endSec": 2.2}]},
+                {"kind": "ocr", "status": "available", "items": []},
+            ],
+        }
+        quality = script_quality(script, "test", evidence)
+        self.assertTrue(any(issue["tag"] == "疑似漏台词片段" for issue in quality["issues"]))
 
     def test_independent_audio_evidence_blocks_rewritten_dialogue(self):
         script = normalize_script(
@@ -418,7 +524,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertIsNone(quality["transcriptCoverage"])
         self.assertIsNone(quality["dialogueEvidencePrecision"])
         self.assertTrue(any(issue["tag"] == "独立音频转写缺失" for issue in quality["issues"]))
-        self.assertFalse(quality_gate(quality)[0])
+        self.assertTrue(quality_gate(quality)[0])
 
     def test_ark_route_uses_turbo_for_complex_or_evidence_poor_video(self):
         simple = select_ark_route(
@@ -505,6 +611,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(processing, "ARK_ROUTING_MODE", "complexity"),
             patch.object(processing, "probe_duration", return_value=30),
             patch.object(processing, "collect_evidence", return_value=evidence),
+            patch.object(processing, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}),
             patch.object(processing, "update_task"),
             patch.object(
                 processing,
@@ -551,6 +658,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(processing, "ARK_ROUTING_MODE", "complexity"),
             patch.object(processing, "probe_duration", return_value=30),
             patch.object(processing, "collect_evidence", return_value=evidence),
+            patch.object(processing, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}),
             patch.object(processing, "update_task"),
             patch.object(
                 processing,

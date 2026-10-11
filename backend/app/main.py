@@ -30,6 +30,10 @@ from .routes import (
     admin_users,
     create_task,
     create_tasks_batch,
+    create_upload_batch,
+    upload_task_media,
+    complete_task_upload,
+    abort_task_upload,
     delete_task,
     download_task,
     download_all_tasks,
@@ -66,7 +70,7 @@ app.add_middleware(
     # access limited to the configured first-party frontends.
     allow_origins=list(CORS_ORIGINS),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Accept", "Content-Type", "X-Request-ID"],
 )
 app.add_middleware(RateLimitMiddleware)
@@ -116,6 +120,10 @@ app.add_api_route("/api/tasks/{task_id}", task_detail, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}/events", task_event_list, methods=["GET"])
 app.add_api_route("/api/tasks", create_task, methods=["POST"])
 app.add_api_route("/api/tasks/batch", create_tasks_batch, methods=["POST"])
+app.add_api_route("/api/uploads/batch", create_upload_batch, methods=["POST"])
+app.add_api_route("/api/uploads/{task_id}", upload_task_media, methods=["PUT"])
+app.add_api_route("/api/uploads/{task_id}/complete", complete_task_upload, methods=["POST"])
+app.add_api_route("/api/uploads/{task_id}/abort", abort_task_upload, methods=["POST"])
 app.add_api_route("/api/tasks/{task_id}/retry", retry_task, methods=["POST"])
 app.add_api_route("/api/tasks/{task_id}", delete_task, methods=["DELETE"], status_code=204)
 app.add_api_route("/api/tasks/{task_id}/download", download_task, methods=["GET"])

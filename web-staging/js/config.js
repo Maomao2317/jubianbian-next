@@ -53,6 +53,7 @@ window.APP_CONFIG = {
   },
 
   stageText: {
+    uploading: "上传视频",
     queued: "等待处理",
     probing: "读取视频信息",
     transcribing: "提取台词",
@@ -65,6 +66,7 @@ window.APP_CONFIG = {
   },
 
   pipeline: [
+    { id: "uploading", label: "上传视频" },
     { id: "probing", label: "读取视频" },
     { id: "transcribing", label: "提取台词" },
     { id: "vision", label: "分析画面" },
@@ -83,6 +85,7 @@ window.APP_CONFIG = {
     maxSizeMB: 500,
     maxDurationMinutes: 6,
     maxFiles: 999,
+    parallelUploads: 4,
     hint: "支持 MP4，单个视频最长 6 分钟、最大 500MB",
   },
 

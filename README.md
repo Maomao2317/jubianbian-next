@@ -25,6 +25,7 @@ ARK_ROUTING_MODE=complexity
 ARK_VIDEO_FPS=1.0
 ARK_FILE_POLL_SECONDS=1
 ARK_RESPONSE_POLL_TIMEOUT_SECONDS=900
+ARK_RESPONSE_CREATE_ATTEMPTS=2
 ARK_THINKING_TYPE=disabled
 ARK_FALLBACK_ON_ERROR=1
 ```
@@ -78,13 +79,27 @@ sudo /opt/jubianbian-staging/ops/install-staging-automation.sh
 
 `ARK_ROUTING_MODE=complexity` 时，系统会在调用方舟前根据视频时长、独立转写/OCR证据和关键帧可用性选择 Lite 或 Turbo，并把实际模型与路由原因写入任务质量记录；设为 `lite_only` 或 `turbo_only` 可用于对照测试。
 
+批量上传使用“创建批次 → 每集独立上传”的两阶段协议，浏览器默认同时上传 4 集；任意一集上传完成即可进入识别，不需要等待整个 50–100 集批次。若配置下面的 S3 兼容参数，浏览器会通过预签名 URL 直传对象存储，应用服务器不再中转上传流量；未配置时自动使用本地数据卷，不影响现有部署：
+
+```env
+JBB_OBJECT_STORAGE_ENDPOINT=https://你的-S3-兼容端点
+JBB_OBJECT_STORAGE_BUCKET=jubianbian
+JBB_OBJECT_STORAGE_REGION=auto
+JBB_OBJECT_STORAGE_ACCESS_KEY=
+JBB_OBJECT_STORAGE_SECRET_KEY=
+JBB_OBJECT_STORAGE_ADDRESSING_STYLE=path
+JBB_OBJECT_STORAGE_PREFIX=jubianbian/uploads
+```
+
+对象存储桶需允许站点域名执行 `PUT`，并放行 `Content-Type` 请求头。密钥只配置在服务端环境变量中，浏览器只获得有时效、仅能上传指定对象的预签名 URL。
+
 ## 独立证据与质量复核
 
 Docker 镜像内置 `faster-whisper`、Tesseract 简体中文语言包和 ffmpeg。默认用
 `JBB_LOCAL_ASR_MODEL=small` 做独立音频转写，用
 `JBB_OCR_SAMPLE_INTERVAL_SECONDS=1.0`（最长 180 帧）抽取字幕证据；首次运行会把 ASR 模型下载并缓存到持久化数据卷的 `models/huggingface` 目录。可按服务器性能调整设备、计算精度、语言、beam size 和 OCR 帧数，完整变量见 `.env.example`。
 
-复杂度路由会在独立音频或 OCR 任一来源不可用时直接选择 Turbo。Lite 初稿若触发 P0/P1 质量门禁，系统只自动追加一次 Turbo 全视频复核，并把原模型、复核模型、触发问题、时间范围、已解决和未解决问题写入质量记录；不会递归复核。独立 ASR/OCR 缺失时覆盖率保持“未校验”，任务进入管理员复核，不会显示虚假百分比或直接开放下载。
+复杂度路由会在独立音频或 OCR 任一来源不可用时直接选择 Turbo。Lite 初稿只有遇到台词遗漏、人物归属、OS/VO 或事实一致性风险时才追加一次 Turbo 复核，并复用第一次上传得到的 `file_id`；动作拆分、人物外形、反应节奏等 P1 编辑建议不再触发人工复核。只有台词严重缺失/改写、说话人无法确认、正文臆造等 P0 内容风险会进入管理员复核。独立 ASR/OCR 缺失时覆盖率仍显示“未校验”，但不再仅因校验工具缺失阻断整集交付。
 
 管理员在后台打开“管理员复核”，确认原视频与剧本一致后点击“确认通过并开放下载”，任务由 `review` 变为 `done`，视频流程即结束；若仍有漏台词等问题，点击“退回并免费重试”，不会再次扣除普通用户额度。普通用户无权执行这两个操作。
 

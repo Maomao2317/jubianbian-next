@@ -22,7 +22,7 @@
     authCooldownTimer: null,
     authEmail: "",
     menuTaskId: "",
-    upload: { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" },
+    upload: { files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "" },
     pollTimer: null,
     rateLimitNotified: false,
     adminTab: "overview",
@@ -682,7 +682,7 @@
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
-      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0/P1 级质量问题，完成复核前不可导出。</div>` : "";
+      </div>` : task.status === "review" ? `<div class="quality-note quality-warning">该结果存在 P0 级内容一致性问题，完成复核前不可导出。</div>` : "";
     let content = "";
     if (isCompletedTask(task) || task.status === "review") content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);
@@ -862,6 +862,7 @@
     rerenderCreateModal(titleValue);
     try {
       const durations = await Promise.all(files.map(readVideoDuration));
+      state.upload.durations = durations;
       state.upload.durationSec = durations.reduce((sum, value) => sum + value, 0);
       // Bill the selected batch by its aggregate duration, rounded once. This
       // must match the backend, otherwise every short episode is overcharged.
@@ -1306,8 +1307,12 @@
         const task = await api.createTask({
           title,
           files,
+          durations: state.upload.durations || [],
           durationSec: Math.round(state.upload.durationSec),
           estimatedMinutes: uploadEstimate(),
+          onProgress: (completed, total) => {
+            actionElement.textContent = `正在上传 ${completed}/${total}`;
+          },
         });
         state.profile = await api.getProfile();
         renderHeader();
@@ -1315,6 +1320,14 @@
         toast("任务已创建，正在后台识别");
         go("tasks");
       } catch (error) {
+        if (error.partialSuccess) {
+          state.profile = await api.getProfile().catch(() => state.profile);
+          renderHeader();
+          $("#modalRoot").innerHTML = "";
+          toast(error.message || "部分视频上传失败", "warning");
+          go("tasks");
+          return;
+        }
         actionElement.disabled = false;
         actionElement.textContent = "开始识别";
         toast(error.message || "创建失败", "error");

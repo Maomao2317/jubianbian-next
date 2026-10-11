@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,6 +23,9 @@ from .config import (
     LOCAL_ASR_DEVICE,
     LOCAL_ASR_LANGUAGE,
     LOCAL_ASR_MODEL,
+    LOCAL_ASR_VAD_MIN_SILENCE_MS,
+    LOCAL_ASR_VAD_MIN_SPEECH_MS,
+    LOCAL_ASR_VAD_SPEECH_PAD_MS,
     OCR_LANG,
     OCR_MAX_FRAMES,
     OCR_SAMPLE_INTERVAL_SECONDS,
@@ -153,6 +157,14 @@ def _local_asr_items(path: Path) -> list[dict[str, Any]]:
             language=language,
             beam_size=LOCAL_ASR_BEAM_SIZE,
             vad_filter=True,
+            vad_parameters={
+                # Short dramatic beats such as “我”“今天”“决定” are often
+                # below the default VAD duration.  Preserve them as evidence
+                # instead of letting the silence filter erase them.
+                "min_speech_duration_ms": LOCAL_ASR_VAD_MIN_SPEECH_MS,
+                "min_silence_duration_ms": LOCAL_ASR_VAD_MIN_SILENCE_MS,
+                "speech_pad_ms": LOCAL_ASR_VAD_SPEECH_PAD_MS,
+            },
             condition_on_previous_text=False,
         )
         for segment in segments:
@@ -352,11 +364,17 @@ def collect_evidence(
 ) -> dict[str, Any]:
     """Collect independent evidence and return a JSON-safe record."""
     del title  # reserved for future provider metadata; never used to infer content
-    sources = [
-        _audio_evidence(path, duration_sec, transcribe=transcribe),
-        _ocr_evidence(path, duration_sec),
-        _keyframe_evidence(path, duration_sec),
-    ]
+    # ASR and frame OCR are independent and previously ran serially.  Worse,
+    # the process-wide ASR lock made every later episode wait before it could
+    # even begin OCR.  Running both branches together keeps the same evidence
+    # density while turning a batch into a pipeline.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="jbb-evidence") as executor:
+        audio_future = executor.submit(_audio_evidence, path, duration_sec, transcribe=transcribe)
+        ocr_future = executor.submit(_ocr_evidence, path, duration_sec)
+        keyframes = _keyframe_evidence(path, duration_sec)
+        audio = audio_future.result()
+        ocr = ocr_future.result()
+    sources = [audio, ocr, keyframes]
     available = [source["kind"] for source in sources if source.get("status") == "available"]
     unavailable = [source["kind"] for source in sources if source.get("status") != "available"]
     result: dict[str, Any] = {

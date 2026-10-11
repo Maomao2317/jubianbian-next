@@ -107,6 +107,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api/") or path == "/api/health":
             return await call_next(request)
 
+        # A reserved 100-episode batch legitimately performs one upload (and,
+        # for object storage, one completion callback) per file.  These calls
+        # are authenticated and scoped to pre-created task IDs, so counting
+        # them against the generic 120-request UI bucket would fail healthy
+        # large batches halfway through.  Enforce the byte ceiling here and
+        # let the task state provide the write-once guard.
+        if path.startswith("/api/uploads/") and path != "/api/uploads/batch":
+            if request.method == "PUT":
+                content_length = request.headers.get("content-length")
+                try:
+                    too_large = bool(content_length) and int(content_length) > MAX_UPLOAD_BYTES
+                except ValueError:
+                    too_large = True
+                if too_large:
+                    return JSONResponse({"detail": "文件过大"}, status_code=413)
+            return await call_next(request)
+
         client_ip = self._client_ip(request)
         if request.method == "POST" and path == "/api/tasks":
             content_length = request.headers.get("content-length")

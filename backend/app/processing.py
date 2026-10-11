@@ -18,6 +18,7 @@ from .config import (
     ARK_MODEL,
     ARK_ROUTING_MODE,
     ARK_TURBO_MODEL,
+    MAX_DURATION_SECONDS,
     OPENAI_API_KEY,
     OPENAI_TEXT_MODEL,
 )
@@ -26,9 +27,10 @@ from .evidence import collect_evidence, evidence_json, transcript_from_evidence
 from .errors import ArkError
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
-from .providers import ark_fallback_message, ark_recognize, openai_script, openai_transcribe
+from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, openai_script, openai_transcribe
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import normalize_script, quality_gate, script_quality
+from .storage import cleanup_materialized, materialize_media
 from .task_store import mark_task_stage, record_task_event, task_row, update_task
 
 
@@ -158,6 +160,42 @@ def _automated_review_context(
     }
 
 
+def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
+    """Review source-fidelity risks, not every advisory screenplay heuristic."""
+    critical_tags = {
+        "台词归属错",
+        "漏台词",
+        "OS漏标",
+        "OS/VO混淆",
+        "音频对白不一致",
+        "音频对白需核对",
+        "疑似漏台词片段",
+        "正文混入校对备注",
+        "事实臆造",
+    }
+    return any(
+        isinstance(issue, dict)
+        and (
+            str(issue.get("severity") or "").upper() == "P0"
+            or str(issue.get("tag") or "") in critical_tags
+        )
+        for issue in (quality.get("issues") or [])
+    )
+
+
+def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
+    critical_tags = {
+        "台词归属错", "漏台词", "OS漏标", "OS/VO混淆", "音频对白不一致",
+        "音频对白需核对", "疑似漏台词片段", "正文混入校对备注", "事实臆造",
+    }
+    return [
+        issue
+        for issue in (quality.get("issues") or [])
+        if isinstance(issue, dict)
+        and (str(issue.get("severity") or "").upper() == "P0" or str(issue.get("tag") or "") in critical_tags)
+    ]
+
+
 def _is_lite_model_unavailable(error: ArkError) -> bool:
     text = f"{error} {error.provider_code}".casefold()
     return error.status_code in {400, 404} and any(
@@ -171,10 +209,6 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
     return any(
         marker in text
         for marker in (
-            "read operation timed out",
-            "timed out",
-            "timeout",
-            "超时",
             "modelnotopen",
             "model_not_open",
             "not active",
@@ -184,31 +218,81 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
 
 
 def _task_error_message(error: BaseException) -> str:
+    text = str(error).casefold()
     if _is_non_retryable_provider_error(error):
-        text = str(error).casefold()
-        if "modelnotopen" in text or "model_not_open" in text or "未激活" in text:
-            return "当前 Lite 模型未启用，已停止重复重试；请启用该模型或改用 Turbo 后再识别。"
-        return "方舟识别响应超时，已停止重复重试；请稍后重新识别。"
+        return "当前 Lite 模型未启用，已停止重复重试；请启用该模型或改用 Turbo 后再识别。"
+    if any(marker in text for marker in ("timed out", "timeout", "超时")):
+        return "方舟识别暂时超时，自动恢复与重试均未成功；请稍后重新识别。"
     return safe_error_text(error)
 
 
 # Provider selection and fallback policy live here; HTTP routes only enqueue work.
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Collect evidence, then use Ark with an explicit OpenAI fallback."""
-    path = Path(row["stored_path"])
+    path, materialized_dir = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"])
     duration = float(row["duration_sec"] or 0)
-    probed = await asyncio.to_thread(probe_duration, path)
-    if probed:
-        duration = probed
-        update_task(row["id"], duration_sec=duration)
-    evidence = await asyncio.to_thread(collect_evidence, path, row["title"], duration)
-    route = select_ark_route(duration, evidence)
-    ark_error: ArkError | None = None
-    if ARK_API_KEYS:
+    try:
+        probed = await asyncio.to_thread(probe_duration, path)
+        if probed:
+            if probed > MAX_DURATION_SECONDS:
+                raise ArkError("视频实际时长超过系统允许的单集上限")
+            duration = probed
+            update_task(row["id"], duration_sec=duration)
+
+        # Video upload/preprocessing does not depend on ASR/OCR.  Starting it
+        # alongside evidence collection hides the network latency, and the
+        # resulting file_id is reused by a possible Turbo review.
+        evidence_task = asyncio.create_task(asyncio.to_thread(collect_evidence, path, row["title"], duration))
+        prepare_task = (
+            asyncio.create_task(asyncio.to_thread(ark_prepare_video, path, duration))
+            if ARK_API_KEYS
+            else None
+        )
+        evidence = await evidence_task
+        prepared_video: dict[str, str] | None = None
+        prepare_error: ArkError | None = None
+        if prepare_task is not None:
+            try:
+                prepared_video = await prepare_task
+            except ArkError as exc:
+                prepare_error = exc
+        route = select_ark_route(duration, evidence)
+        return await _run_recognizer_with_media(
+            row,
+            path,
+            duration,
+            evidence,
+            route,
+            prepared_video,
+            prepare_error,
+        )
+    finally:
+        await asyncio.to_thread(cleanup_materialized, materialized_dir)
+
+
+async def _run_recognizer_with_media(
+    row: sqlite3.Row,
+    path: Path,
+    duration: float,
+    evidence: dict[str, Any],
+    route: dict[str, Any],
+    prepared_video: dict[str, str] | None,
+    prepare_error: ArkError | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ark_error: ArkError | None = prepare_error
+    if ARK_API_KEYS and prepared_video is not None:
         ark_script: dict[str, Any] | None = None
         ark_usage_data: dict[str, Any] | None = None
         try:
-            ark_script, ark_usage_data = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence, route["model"])
+            ark_script, ark_usage_data = await asyncio.to_thread(
+                ark_recognize,
+                path,
+                row["title"],
+                duration,
+                evidence,
+                route["model"],
+                prepared_video=prepared_video,
+            )
         except ArkError as exc:
             ark_error = exc
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
@@ -220,7 +304,15 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
                     turbo_model,
                 )
                 try:
-                    ark_script, ark_usage_data = await asyncio.to_thread(ark_recognize, path, row["title"], duration, evidence, turbo_model)
+                    ark_script, ark_usage_data = await asyncio.to_thread(
+                        ark_recognize,
+                        path,
+                        row["title"],
+                        duration,
+                        evidence,
+                        turbo_model,
+                        prepared_video=prepared_video,
+                    )
                     route = {
                         **route,
                         "model": turbo_model,
@@ -241,7 +333,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
                     raise ark_error or exc
         if ark_script is not None and ark_usage_data is not None:
             script = normalize_script(ark_script, row["title"])
-            quality, approved, blocking = _evaluate_quality(script, "ark", evidence, route)
+            quality, _approved, blocking = _evaluate_quality(script, "ark", evidence, route)
             initial_model = route["model"]
             final_model = initial_model
             final_usage = dict(ark_usage_data)
@@ -257,25 +349,27 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
 
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
             may_auto_review = (
-                not approved
+                _needs_automated_content_review(quality)
                 and route.get("band") == "simple"
                 and route.get("mode") not in {"lite", "lite_only"}
                 and bool(turbo_model)
                 and turbo_model != initial_model
             )
             if may_auto_review:
-                context = _automated_review_context(script, blocking)
+                review_issues = _automated_review_issues(quality)
+                context = _automated_review_context(script, review_issues)
                 review_metadata.update({
                     "reviewModel": turbo_model,
                     "attemptCount": 2,
                     "reviewScope": context["scope"],
+                    "triggeringIssues": review_issues,
                 })
                 logger.info(
                     "provider_review provider=ark task_id=%s from_model=%s to_model=%s issues=%s",
                     row["id"],
                     initial_model,
                     turbo_model,
-                    len(blocking),
+                    len(review_issues),
                 )
                 try:
                     reviewed_script, reviewed_usage = await asyncio.to_thread(
@@ -286,6 +380,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
                         evidence,
                         turbo_model,
                         review_context=context,
+                        prepared_video=prepared_video,
                     )
                     review_route = {
                         **route,
@@ -294,24 +389,29 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
                         "reasons": [*route["reasons"], "lite_quality_gate_failed_turbo_review"],
                     }
                     reviewed_script = normalize_script(reviewed_script, row["title"])
-                    reviewed_quality, _reviewed_approved, reviewed_blocking = _evaluate_quality(
+                    reviewed_quality, _reviewed_approved, _reviewed_blocking = _evaluate_quality(
                         reviewed_script,
                         "ark",
                         evidence,
                         review_route,
                     )
-                    unresolved_ids = {_issue_identity(issue) for issue in reviewed_blocking}
+                    reviewed_content_issues = _automated_review_issues(reviewed_quality)
+                    unresolved_ids = {_issue_identity(issue) for issue in reviewed_content_issues}
                     review_metadata["resolvedIssues"] = [
-                        issue for issue in blocking if _issue_identity(issue) not in unresolved_ids
+                        issue for issue in review_issues if _issue_identity(issue) not in unresolved_ids
                     ]
-                    review_metadata["unresolvedIssues"] = reviewed_blocking
+                    review_metadata["unresolvedIssues"] = reviewed_content_issues
                     script = reviewed_script
                     quality = reviewed_quality
                     final_model = turbo_model
                     final_usage = _merge_usage(ark_usage_data, reviewed_usage)
                 except ArkError as review_exc:
                     review_metadata["reviewError"] = safe_error_text(review_exc)
-                    quality["warning"] = "Turbo 自动复核失败，已保留 Lite 草稿并转管理员复核。"
+                    quality["warning"] = (
+                        "Turbo 自动复核失败，已保留 Lite 草稿并转管理员复核。"
+                        if not quality_gate(quality)[0]
+                        else "Turbo 自动复核失败，已保留通过 P0 门禁的 Lite 结果并记录提示。"
+                    )
                     logger.warning(
                         "provider_review_failed provider=ark task_id=%s error=%s",
                         row["id"],
@@ -320,6 +420,14 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
 
             quality["automatedReview"] = review_metadata
             return script, quality, {**final_usage, "provider": "ark", "model": final_model}, evidence
+    elif ARK_API_KEYS and prepare_error is not None:
+        logger.warning(
+            "provider_failed provider=ark operation=prepare task_id=%s error=%s",
+            row["id"],
+            safe_error_text(prepare_error),
+        )
+        if not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
+            raise prepare_error
     elif not OPENAI_API_KEY:
         raise ArkError("未配置方舟或 OpenAI API Key，任务无法进行真实视频识别")
 
@@ -384,10 +492,9 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
         # A successful provider response is not automatically a deliverable
-        # screenplay.  P0/P1 findings mean that the system could not prove
-        # the result is faithful to the source video, so keep the generated
-        # script available for inspection but put the task behind the admin
-        # review gate.  Only a clean quality gate is downloadable by users.
+        # screenplay. P0 source-fidelity findings keep the generated script
+        # available for inspection but put the task behind the admin review
+        # gate. P1 editing hints stay visible without blocking delivery.
         approved, blocking = quality_gate(quality)
         quality["deliveryStatus"] = "approved" if approved else "review_required"
         quality["blockingIssues"] = blocking

@@ -10,8 +10,15 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+backend_dir = Path(__file__).resolve().parents[1] / "backend"
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+from app.storage import delete_media, is_object_uri
 
 
 data_dir = Path(os.getenv("JBB_DATA_DIR", "/app/data"))
@@ -37,10 +44,16 @@ if db_path.exists():
             (cutoff,),
         ).fetchall()
         for row in rows:
-            stored_path = Path(row["stored_path"] or "")
-            if stored_path.is_file():
-                stored_path.unlink(missing_ok=True)
-                deleted_files += 1
+            stored_value = row["stored_path"] or ""
+            stored_path = Path(stored_value)
+            if is_object_uri(stored_value) or stored_path.is_file():
+                try:
+                    delete_media(stored_value)
+                    deleted_files += 1
+                except Exception:
+                    # A retention run must still remove the stale DB row when
+                    # a remote object was already deleted or is unavailable.
+                    pass
             connection.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
             deleted_tasks += 1
         connection.commit()
@@ -48,7 +61,7 @@ if db_path.exists():
         referenced = {
             Path(row[0]).resolve()
             for row in connection.execute("SELECT stored_path FROM tasks").fetchall()
-            if row[0]
+            if row[0] and not is_object_uri(row[0])
         }
 
     if upload_dir.exists():

@@ -24,6 +24,7 @@ from .config import (
     ARK_MODEL,
     ARK_RESPONSE_POLL_SECONDS,
     ARK_RESPONSE_POLL_TIMEOUT_SECONDS,
+    ARK_RESPONSE_CREATE_ATTEMPTS,
     ARK_UPLOAD_PROXY_AUDIO_BITRATE,
     ARK_UPLOAD_PROXY_MAX_HEIGHT,
     ARK_UPLOAD_PROXY_MAX_MB,
@@ -127,9 +128,9 @@ def ark_http(
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
     except URLError as exc:
-        raise ArkError(f"无法连接方舟接口：{exc.reason}") from exc
+        raise ArkError(f"无法连接方舟接口：{exc.reason}", provider_code="transient_network") from exc
     except OSError as exc:
-        raise ArkError(f"方舟接口网络错误：{exc}") from exc
+        raise ArkError(f"方舟接口网络错误：{exc}", provider_code="transient_network") from exc
     if not raw:
         return {}
     try:
@@ -152,9 +153,20 @@ def _ark_poll_response(response_id: str, api_key: str) -> Any:
             )
         except ArkError as exc:
             # Ark documents that querying an in-progress response returns an
-            # error. The response ID came from response.created, so these
-            # transient states are safe to poll until the bounded deadline.
-            if exc.status_code in {400, 404, 409, 425} and time.monotonic() < deadline:
+            # error. Network hiccups, throttling and provider 5xx errors are
+            # also safe to retry because the response already has a durable
+            # ID; failing the episode here used to discard successful work.
+            retryable = (
+                exc.provider_code == "transient_network"
+                or exc.status_code in {400, 404, 408, 409, 425, 429, 500, 502, 503, 504}
+            )
+            if retryable and time.monotonic() < deadline:
+                logger.warning(
+                    "provider_step provider=ark operation=response_poll_retry response_id=%s status_code=%s error=%s",
+                    response_id,
+                    exc.status_code,
+                    safe_error_text(exc),
+                )
                 time.sleep(ARK_RESPONSE_POLL_SECONDS)
                 continue
             raise
@@ -207,7 +219,10 @@ def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
         raise _ark_http_error(exc, api_key) from exc
     except (URLError, OSError) as exc:
         if not response_id:
-            raise ArkError(f"方舟接口网络错误：{getattr(exc, 'reason', exc)}") from exc
+            raise ArkError(
+                f"方舟接口网络错误：{getattr(exc, 'reason', exc)}",
+                provider_code="transient_network",
+            ) from exc
         logger.warning(
             "provider_step provider=ark operation=response_stream_recover response_id=%s error=%s",
             response_id,
@@ -386,6 +401,26 @@ def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
         time.sleep(ARK_FILE_POLL_SECONDS)
 
 
+def ark_prepare_video(path: Path, duration_sec: float = 0) -> dict[str, str]:
+    """Upload and preprocess a video once for initial recognition and review."""
+    api_key = ark_account_key()
+    upload_started = time.perf_counter()
+    file_id = ark_upload_video(path, api_key, duration_sec)
+    logger.info(
+        "provider_step provider=ark operation=upload file=%s duration_ms=%.1f",
+        path.name,
+        (time.perf_counter() - upload_started) * 1000,
+    )
+    wait_started = time.perf_counter()
+    ark_wait_for_file(file_id, api_key)
+    logger.info(
+        "provider_step provider=ark operation=file_ready file=%s duration_ms=%.1f",
+        path.name,
+        (time.perf_counter() - wait_started) * 1000,
+    )
+    return {"api_key": api_key, "file_id": file_id}
+
+
 def ark_prompt(
     title: str,
     duration_sec: float,
@@ -403,7 +438,7 @@ def ark_prompt(
         "scenes:[{id:string,heading:string,location:string,timeOfDay:string,interiorExterior:string,segmentType:'main'|'recap'|'trailer'|'title_card'|'credits'|'flashback',"
         "goal:string,obstacle:string,result:string,continuityIn:string,continuityOut:string,hook:string,summary:string,characters:string[],environment:string,props:[{name:string,state:string,evidence:string}],"
         "blocks:[{type:'action',text:string,emotion:string,emotionType:string,emotionIntensity:0|1|2|3|4|5,emotionTrigger:string,emotionChange:string,emotionTarget:string,emotionEvidence:string,performance:string,object:string,result:string,startSec:number,endSec:number}|"
-        "{type:'dialogue',speaker:string,rawText:string,finalText:string,performance:string,speechTone:string,emotionType:string,emotionIntensity:0|1|2|3|4|5,emotionTrigger:string,emotionChange:string,emotionTarget:string,emotionEvidence:string,tone:string,volume:string,pause:string,emphasis:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,startSec:number,endSec:number}|"
+        "{type:'dialogue',speaker:string,visibleSpeaker:string,mouthMoving:boolean,speakerEvidence:string,rawText:string,finalText:string,performance:string,speechTone:string,emotionType:string,emotionIntensity:0|1|2|3|4|5,emotionTrigger:string,emotionChange:string,emotionTarget:string,emotionEvidence:string,tone:string,volume:string,pause:string,emphasis:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,startSec:number,endSec:number}|"
         "{type:'vo',speaker:string,voKind:'os'|'narration'|'memory'|'phone'|'unknown',performance:string,emotion:string,text:string,confidence:'high'|'medium'|'low',uncertain:boolean,inferred:boolean,startSec:number,endSec:number}|"
         "{type:'sound',category:'effect'|'ambience',source:'heard',importance:'plot'|'atmosphere',text:string,startSec:number,endSec:number}|"
         "{type:'screen_text',screenType:'subtitle'|'system'|'title_card'|'other',text:string,startSec:number,endSec:number}|"
@@ -425,9 +460,11 @@ def ark_prompt(
         "9. dialogue 必须一人一句、完整保留原话，不能改写成剧情概括，不能省略、合并、调换顺序或补写听不清的内容。台词文字是不可改写字段：只允许恢复中文标点和清理空白，不能替换同义词。每个 dialogue block 只能对应一个 speaker；发现说话人切换就拆成多个 block，仍逐字保留。先根据语气和语法恢复准确中文标点：逗号分隔分句，句末使用‘。’、‘？’、‘！’或‘……’，不要输出无标点的长句，也不要连续重复标点。听不清的人名、称谓和代词保留‘[听不清]’，confidence 写 low、uncertain 写 true。"
         "9a. 对白括号只保留一到两个简短、可执行的情绪/状态词，例如‘震惊’、‘急切呼喊’、‘语气坚定’；不要输出音高、音量、停顿、重音、语气分析、同义重复或完整表演说明。不要把两个人的台词合并到一个 speaker 下，下一位说话人必须新建 dialogue block。"
         "9b. 独立 ASR 证据中的每个 transcript_segment 都必须在同一时间顺序中逐句对照；不得用剧情概括替代任何一句，也不得把两段不同时间的对白合并。无法确认某句或说话人时，保留原始可辨识文字、confidence 写 low、uncertain 写 true，并将 speaker 写‘未知说话人’，绝不能按上下文猜测或把上一句人物沿用给下一句。"
+        "9c. 一个字、两个字或被停顿切开的短台词也必须各自保留，例如‘今天’、‘我’、‘决定’、再次出现的‘我’都不能因太短、重复或语义不完整而省略；逐个 transcript_segment 对齐次数和时间，不得去重。"
         "10. 情绪必须绑定可观察证据：先写画面动作/声音，再写 emotionType、emotionIntensity、emotionTrigger、emotionChange、emotionTarget、emotionEvidence；看不清时标 emotion_uncertain，不得编造心理。对白的 speechTone 只有视频确实能判断时才填写。关键转折可单独使用 emotion block，但不能只写场次总结。"
         "11. 人物或旁白的画外音、内心声、回忆声、电话另一端声音必须使用 type=vo，并在 speaker 写对应人物名或‘旁白’，不能混成普通 dialogue，也不能漏标。voKind 必须分别写 os（明确是人物内心独白）、narration（旁白/画外音）、memory（回忆声）或 phone（电话另一端）；没有明确证据时写 unknown，不得把普通旁白猜成 OS。若声音来源无法确认，speaker 写‘未知说话人’并标 uncertain。没有声音依据时不能臆造 VO。"
         "11a. 画面中能看到人物开口说话的内容一律是 dialogue，不能只用 screen_text 替代；如果画面同时确实显示这句对白字幕，除 dialogue 外再保留一条 screen_text。screen_text 还记录画面上额外出现的姓名条、标题、免责声明、系统提示或非对白文字。人物在画外说话才是 VO；人物自己的内心独白才是 OS，不能因为句子像旁白就把普通对白标成 VO/OS。"
+        "11b. 每句 dialogue 都必须填写 visibleSpeaker、mouthMoving 和 speakerEvidence：先看当前画面到底是谁的嘴与声音同步，再填写 speaker，不能沿用上一句人物，也不能被同画面中未开口的人物误导。若人物声音出现但画面中该人物嘴没有动，必须改为 type=vo、voKind=os，导出为‘人物（OS）’，不能仍写 dialogue。"
         "12. 正式扒剧本不输出背景音乐；sound 只保留原片确实听到且对剧情有作用的动作音效或环境声。必须逐条识别所有画面字幕，包括人物姓名字幕、对白字幕、作品/AI免责声明、系统提示、标题字样和转场字幕，全部使用 screen_text 单独标记并保持出现顺序，不能漏掉、合并或改写；闪回、回到现实和闪白等使用 transition。"
         "13. characterProfiles 中为每个人建立唯一 id、规范 name 和 aliases；正文所有 speaker 和 characters 必须使用同一个规范 name，不能混用‘男主’、‘江川’等称呼。"
         "14. recap、trailer、title_card 或 credits 不作为新剧情场景，但其中实际出现的字幕必须保留为 screen_text；不要因其属于片头、片尾或包装而丢弃字幕。"
@@ -534,17 +571,16 @@ def ark_recognize(
     model: str | None = None,
     *,
     review_context: dict[str, Any] | None = None,
+    prepared_video: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
-    api_key = ark_account_key()
     selected_model = (model or ARK_MODEL).strip() or ARK_MODEL
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s model=%s duration_sec=%.1f", path.name, selected_model, duration_sec)
-    upload_started = time.perf_counter()
-    file_id = ark_upload_video(path, api_key, duration_sec)
-    logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name, (time.perf_counter() - upload_started) * 1000)
-    wait_started = time.perf_counter()
-    ark_wait_for_file(file_id, api_key)
-    logger.info("provider_step provider=ark operation=file_ready file=%s duration_ms=%.1f", path.name, (time.perf_counter() - wait_started) * 1000)
+    prepared = prepared_video or ark_prepare_video(path, duration_sec)
+    api_key = str(prepared.get("api_key") or "")
+    file_id = str(prepared.get("file_id") or "")
+    if not api_key or not file_id:
+        raise ArkError("方舟视频准备结果不完整")
     response_started = time.perf_counter()
     response_payload: dict[str, Any] = {
             "model": selected_model,
@@ -558,7 +594,25 @@ def ark_recognize(
         }
     if ARK_THINKING_TYPE in {"enabled", "disabled", "auto"}:
         response_payload["thinking"] = {"type": ARK_THINKING_TYPE}
-    payload = ark_stream_response(response_payload, api_key)
+    payload: Any = None
+    for attempt in range(1, ARK_RESPONSE_CREATE_ATTEMPTS + 1):
+        try:
+            payload = ark_stream_response(response_payload, api_key)
+            break
+        except ArkError as exc:
+            # A response with an ID is already recovered inside
+            # ``ark_stream_response``.  Only retry creation when the socket
+            # failed before an ID was received; reuse the prepared file so a
+            # transient disconnect never forces another upload/transcode.
+            if exc.provider_code != "transient_network" or attempt >= ARK_RESPONSE_CREATE_ATTEMPTS:
+                raise
+            logger.warning(
+                "provider_step provider=ark operation=response_create_retry file=%s attempt=%s error=%s",
+                path.name,
+                attempt,
+                safe_error_text(exc),
+            )
+            time.sleep(min(5.0, float(attempt)))
     logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
     text = ark_response_text(payload)
     if not text:
@@ -630,7 +684,7 @@ def openai_script(title: str, duration_sec: float, transcript: str, evidence: di
         "只要画面从一个明确空间切换到另一个空间就拆新场次，重新编号并只列该场实际出现/说话的人；heading 要写清日夜、内外景和地点，允许‘内转外’、‘外转内’、‘傍晚转夜’，不能把多个镜头地点压成一个场次。"
         "blocks 可使用 action、dialogue、vo、sound、screen_text、transition、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名、视频中实际动词、动作对象和结果，不能省略动作主语或把动作概括成泛化词。人物第一次在正文 action 中出现时，要把可见发型、服装、颜色和体貌直接写在人物名前，例如‘梳双丸子头、穿红碎花袄的小女孩希希趴在米缸口……’；不能只把外形放在 characterProfiles。"
         "每条 action 只写一到两句可拍摄的主体、动词、对象和结果，连续动作拆成多个 block，不重复整段环境或同一人物外形。"
-        "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；每个 block 只能有一个 speaker。画面中人物开口说话必须是 dialogue，不能只写成字幕或 VO；若视频同时有对白字幕，另外保留 screen_text。只有画外音/电话另一端/回忆声使用 vo，人物明确的内心独白才使用 os。对白括号只写一到两个简短情绪词，不写音高、音量、停顿、重音等技术分析。"
+        "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；‘今天’、‘我’、‘决定’等一到三个字的短台词以及重复出现的短词也必须按次数和顺序逐句保留。每个 block 只能有一个 speaker。画面中人物开口说话必须是 dialogue，不能只写成字幕或 VO；若视频同时有对白字幕，另外保留 screen_text。人物声音出现但嘴没有动时必须写 voKind=os，导出为人物（OS）；画外音/电话另一端/回忆声分别使用对应 voKind。对白括号只写一到两个简短情绪词，不写音高、音量、停顿、重音等技术分析。"
         "sound 只描述原片中确实听到且有用的动作音效或环境声，不输出背景音乐；必须逐条保留所有额外画面文字、人物姓名条、免责声明和系统提示，使用 screen_text，不能把人物实际说出的台词误写成 screen_text；闪回和回到现实使用 transition。"
         "16. props 必须记录视频中实际出现的关键道具及其状态/证据；跨场景的手机、证物、钱、钥匙等必须在 continuityIn/continuityOut 或 props 中保持可追踪。时间锚点、室内外和门内外变化必须写入场次头或衔接字段，不能让正文自行猜测。"
         "17. 提示中的人物和场景名称只是格式示例，不能照搬；针对当前视频自适应识别题材、时代、地点、人物关系和叙事语气，覆盖现代、古装、校园、职场、悬疑、动作、喜剧等各种类型，只写视频证据，不套用类型套路或示例剧情。"

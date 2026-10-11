@@ -92,6 +92,9 @@ _INTERNAL_REVIEW_MARKER_RE = re.compile(r"【(?:需核对|待核对|内部校对
 _EMOTION_TOKEN_RE = re.compile(
     r"(?:紧张|害怕|恐惧|愤怒|生气|焦急|着急|悲伤|难过|惊讶|震惊|疑惑|冷漠|平静|温柔|慌乱|失望|绝望|委屈|欣慰|担忧|激动|疲惫|无奈|警惕|尴尬|沉重|坚定|急切)"
 )
+_SPEECH_CUE_RE = re.compile(
+    r"(?:开口|说道|说着|说|问道|询问|追问|反问|问|回答|答道|回应|喊道|呼喊|喊|叫道|怒斥|嘀咕|念道|低声道|高声道)"
+)
 
 
 def normalize_text(text: Any, *, sentence: bool = False) -> str:
@@ -209,6 +212,37 @@ def ordered_script_text(script: dict[str, Any], block_types: set[str]) -> str:
     )
 
 
+def time_window_script_text(
+    script: dict[str, Any],
+    block_types: set[str],
+    start_sec: Any,
+    end_sec: Any,
+    *,
+    margin: float = 0.8,
+) -> str:
+    """Return text from timestamped blocks overlapping one evidence segment."""
+    if not isinstance(start_sec, (int, float)) or not isinstance(end_sec, (int, float)):
+        return ""
+    start = max(0.0, float(start_sec) - margin)
+    end = max(start, float(end_sec) + margin)
+    values: list[str] = []
+    for scene in script.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        for block in scene.get("blocks") or []:
+            if not isinstance(block, dict) or block.get("type") not in block_types:
+                continue
+            block_start = block.get("startSec")
+            block_end = block.get("endSec")
+            if not isinstance(block_start, (int, float)) and not isinstance(block_end, (int, float)):
+                continue
+            left = float(block_start if isinstance(block_start, (int, float)) else block_end)
+            right = float(block_end if isinstance(block_end, (int, float)) else block_start)
+            if right >= start and left <= end:
+                values.append(evidence_comparison_text(block.get("text")))
+    return "".join(values)
+
+
 def matching_character_counts(reference: str, candidate: str) -> tuple[int, int, int]:
     """Return ordered matching characters and both input sizes."""
     if not reference or not candidate:
@@ -313,6 +347,83 @@ def normalize_vo_kind(raw_kind: Any, raw_type: str, speaker: str) -> str:
     if speaker.strip().casefold() in {"os", "内心独白", "内心声"}:
         return "os"
     return "unknown" if value and value not in _VO_KINDS else (value or "narration")
+
+
+def speech_action_speaker(text: Any, characters: list[str]) -> str | None:
+    """Return the named character immediately attached to a speech cue.
+
+    This repairs the common vision-model error where an action explicitly says
+    “甲开口/甲问” but the following dialogue is accidentally labelled 乙.  It
+    deliberately requires a nearby explicit cue and never guesses from turn
+    taking alone.
+    """
+    value = str(text or "")
+    escaped = [re.escape(name) for name in characters if name]
+    if not escaped:
+        return None
+    name_pattern = "(?:" + "|".join(sorted(escaped, key=len, reverse=True)) + ")"
+    resolved: str | None = None
+    for cue in _SPEECH_CUE_RE.finditer(value):
+        sentence_start = max((value.rfind(mark, 0, cue.start()) for mark in "。！？；"), default=-1) + 1
+        segment = value[sentence_start : cue.start()]
+        # “甲对/向/看着乙说” and “甲转向乙，开口” retain 甲 as
+        # the grammatical subject even though 乙 is nearer to the cue.
+        directional = re.search(
+            rf"({name_pattern}).{{0,4}}(?:对|向|冲着|看着|望着|转向)({name_pattern}).{{0,6}}$",
+            segment,
+        )
+        if directional:
+            resolved = directional.group(1)
+            continue
+        # In “甲听见乙说”, the embedded voice belongs to 乙.
+        heard = re.search(rf"({name_pattern}).{{0,3}}(?:听见|听到)({name_pattern}).{{0,2}}$", segment)
+        if heard:
+            resolved = heard.group(2)
+            continue
+        attached = [
+            (cue.start() - (sentence_start + match.end()), match.group(0))
+            for match in re.finditer(name_pattern, value[sentence_start : cue.start()])
+            if cue.start() - (sentence_start + match.end()) <= 2
+        ]
+        if attached:
+            resolved = min(attached)[1]
+            continue
+        first = re.search(name_pattern, segment)
+        if first:
+            resolved = first.group(0)
+    return resolved
+
+
+def repair_dialogue_speakers(blocks: list[dict[str, Any]], characters: list[str]) -> None:
+    """Reconcile dialogue labels with explicit lip-sync/action evidence."""
+    previous_action = ""
+    for block in blocks:
+        if block.get("type") == "action":
+            previous_action = str(block.get("text") or "")
+            continue
+        if block.get("type") != "dialogue":
+            if block.get("type") not in {"screen_text", "sound"}:
+                previous_action = ""
+            continue
+        current = str(block.get("speaker") or "未知说话人").strip()
+        visible = str(block.get("visibleSpeaker") or "").strip()
+        mouth_moving = block.get("mouthMoving")
+        candidate = visible if visible in characters and mouth_moving is True else speech_action_speaker(previous_action, characters)
+        if candidate and candidate != current:
+            block["speakerCorrectedFrom"] = current
+            block["speaker"] = candidate
+            block["speakerCorrection"] = "visible_lip_sync" if candidate == visible else "preceding_speech_action"
+            block["confidence"] = "high" if candidate == visible else "medium"
+            # The deterministic mismatch has been resolved; unrelated dialogue
+            # integrity findings, if any, remain reviewable.
+            issues = [item for item in (block.get("dialogueIssues") or []) if item != "speaker_label_mismatch"]
+            if issues:
+                block["dialogueIssues"] = issues
+            else:
+                block.pop("dialogueIssues", None)
+                if "[听不清]" not in str(block.get("text") or ""):
+                    block["uncertain"] = False
+        previous_action = ""
 
 
 def order_blocks_without_crossing_sentences(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -731,6 +842,16 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             return value
         return str(value).strip().lower() in {"1", "true", "yes", "是", "推断"}
 
+    def optional_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "是", "有", "同步"}:
+            return True
+        if normalized in {"0", "false", "no", "否", "无", "未动", "不同步"}:
+            return False
+        return None
+
     def emotion_fields(value: Any) -> dict[str, Any]:
         """Normalize evidence-bound emotion metadata without inventing it."""
         if not isinstance(value, dict):
@@ -1002,6 +1123,16 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 "return": "transition",
                 "emotion": "action",
             }.get(raw_type, raw_type)
+            raw_voice_kind = str(raw_block.get("voKind") or raw_block.get("voiceType") or "").strip().casefold()
+            voice_source = str(raw_block.get("voiceSource") or "").strip().casefold()
+            mouth_moving = optional_bool(raw_block.get("mouthMoving", raw_block.get("lipSync")))
+            forced_os = (
+                raw_voice_kind in {"os", "inner_monologue", "inner-monologue", "monologue", "thought"}
+                or voice_source in {"os", "inner", "internal", "inner_monologue", "non_lip_sync"}
+                or (block_type == "dialogue" and mouth_moving is False and bool(str(raw_block.get("speaker") or "").strip()))
+            )
+            if block_type == "dialogue" and forced_os:
+                block_type = "vo"
             if block_type not in {"action", "dialogue", "vo", "sound", "emotion", "screen_text", "transition"}:
                 block_type = "action"
             if block_type == "action":
@@ -1019,7 +1150,13 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 dialogue_source = source_text or raw_block.get("finalText") or text
                 text = normalize_dialogue_text(strip_internal_review_markers(dialogue_source))
             elif block_type == "vo":
-                text = normalize_dialogue_text(strip_internal_review_markers(text))
+                voice_text = (
+                    raw_block.get("sourceText")
+                    or raw_block.get("verbatimText")
+                    or raw_block.get("rawText")
+                    or text
+                )
+                text = normalize_dialogue_text(strip_internal_review_markers(voice_text))
             else:
                 text = normalize_text(text)
             if not text:
@@ -1052,6 +1189,14 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     block["sourceText"] = str(dialogue_source).strip()
                 block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
                 block["uncertain"] = truthy(raw_block.get("uncertain")) or block["confidence"] == "low"
+                visible_speaker = str(raw_block.get("visibleSpeaker") or "").strip()
+                if visible_speaker:
+                    block["visibleSpeaker"] = alias_map.get(visible_speaker.casefold(), visible_speaker)
+                if mouth_moving is not None:
+                    block["mouthMoving"] = mouth_moving
+                speaker_evidence = normalize_text(raw_block.get("speakerEvidence"))
+                if speaker_evidence:
+                    block["speakerEvidence"] = speaker_evidence
                 issues = dialogue_integrity_issues(str(dialogue_source), block["speaker"])
                 if issues:
                     block["dialogueIssues"] = issues
@@ -1080,7 +1225,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 speaker = str(raw_block.get("speaker") or ("未知说话人" if raw_type in {"os", "inner_monologue"} else "旁白")).strip()
                 speaker = alias_map.get(speaker.casefold(), speaker)
                 block["speaker"] = speaker
-                block["voKind"] = normalize_vo_kind(raw_block.get("voKind") or raw_block.get("voiceType"), raw_type, speaker)
+                block["voKind"] = "os" if forced_os else normalize_vo_kind(raw_block.get("voKind") or raw_block.get("voiceType"), raw_type, speaker)
                 block["isInnerMonologue"] = block["voKind"] == "os"
                 block["inferred"] = truthy(raw_block.get("inferred"))
                 block["confidence"] = str(raw_block.get("confidence") or "medium").strip().lower()
@@ -1127,6 +1272,12 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 block["speaker"] = alias_map.get(str(block.get("speaker") or "").casefold(), block.get("speaker"))
                 block.pop("_dialogueSource", None)
         blocks = order_blocks_without_crossing_sentences(blocks)
+        known_speakers = list(dict.fromkeys(
+            names(raw_scene.get("characters"))
+            + names(script.get("characters"))
+            + [str(profile.get("name") or "").strip() for profile in character_profiles]
+        ))
+        repair_dialogue_speakers(blocks, [name for name in known_speakers if name])
         blocks = compact_action_blocks(blocks)
         raw_scene_characters = names(raw_scene.get("characters"))
         all_profile_names = [
@@ -1307,9 +1458,9 @@ def script_to_markdown(task: dict[str, Any]) -> str:
                 speaker = block.get("speaker") or "旁白"
                 vo_kind = block.get("voKind")
                 if vo_kind == "os" or block.get("isInnerMonologue") or block_type == "os":
-                    label = "OS" if speaker in {"旁白", "未知说话人", "OS", "内心独白"} else f"{speaker} OS"
+                    label = "OS" if speaker in {"旁白", "未知说话人", "OS", "内心独白"} else f"{speaker}（OS）"
                 else:
-                    label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker} VO"
+                    label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker}（VO）"
                 lines.append(f"{label}{inferred}：{quote_dialogue(block.get('text', ''))}")
             elif block_type == "sound":
                 category = "环境音" if block.get("category") == "ambience" else "音效"
@@ -1338,7 +1489,7 @@ def script_quality(
     provider: str,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Expose deterministic P0/P1 acceptance signals with reviewable labels."""
+    """Expose deterministic P0 blockers and P1/P2 reviewable editing signals."""
     scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
     dialogue = [
         block
@@ -1459,6 +1610,11 @@ def script_quality(
                 speaker = str(block.get("speaker") or "未知说话人").strip()
                 if speaker in {"", "未知说话人"} or block.get("uncertain"):
                     add_issue("台词归属错", "P0", f"第 {scene_index} 场第 {block_index} 句台词说话人需要核对。", scene_index, block_index)
+                visible_speaker = str(block.get("visibleSpeaker") or "").strip()
+                if block.get("mouthMoving") is False:
+                    add_issue("OS漏标", "P0", f"第 {scene_index} 场第 {block_index} 句人物未开口却仍标为对白，应标为人物（OS）。", scene_index, block_index)
+                elif visible_speaker and visible_speaker != speaker:
+                    add_issue("台词归属错", "P0", f"第 {scene_index} 场第 {block_index} 句口型人物为{visible_speaker}，但对白标记为{speaker}。", scene_index, block_index)
                 if block.get("dialogueIssues"):
                     dialogue_integrity_warnings += 1
                     if any(item in {"mixed_speakers", "split_mixed_speakers"} for item in block.get("dialogueIssues", [])):
@@ -1474,7 +1630,7 @@ def script_quality(
                 has_explicit_subject = action_has_subject(text)
                 if known_characters and not has_explicit_subject:
                     action_subject_warnings += 1
-                    add_issue("可拍摄性", "P0", f"第 {scene_index} 场第 {block_index} 个动作缺少明确人物主体。", scene_index, block_index)
+                    add_issue("可拍摄性", "P1", f"第 {scene_index} 场第 {block_index} 个动作缺少明确人物主体。", scene_index, block_index)
                 missing_parts = [
                     label
                     for key, label in (("object", "对象"), ("result", "结果"))
@@ -1662,9 +1818,15 @@ def script_quality(
     # the reviewer can seek directly to the likely omission.
     for segment in transcript_segments[:100]:
         segment_text = str(segment.get("text") or "")
-        if len(segment_text) < 2:
+        if not segment_text:
             continue
-        matched, segment_size, _ = matching_character_counts(segment_text, spoken_candidate)
+        local_candidate = time_window_script_text(
+            script,
+            {"dialogue", "vo"},
+            segment.get("startSec"),
+            segment.get("endSec"),
+        )
+        matched, segment_size, _ = matching_character_counts(segment_text, local_candidate or spoken_candidate)
         segment_coverage = round(100 * matched / segment_size) if segment_size else 100
         if segment_coverage >= 72:
             continue
@@ -1839,14 +2001,15 @@ def script_quality(
 def quality_gate(quality: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
     """Return whether a script is safe to expose as a downloadable result.
 
-    P0/P1 findings are acceptance failures.  P0 findings are fact or structure
-    breaks; P1 findings are continuity, action-chain, or classification gaps.
-    Both can reproduce the old defects in a delivered screenplay, so callers
-    must keep the result in review instead of silently shipping a warning.
+    Only P0 findings block delivery.  P1 findings are useful automated editing
+    hints (action granularity, appearance, continuity and similar heuristics),
+    but treating every hint as a manual-review failure sent nearly every
+    episode to an administrator.  Content-loss and attribution defects remain
+    P0 and still fail closed.
     """
     issues = [
         issue
         for issue in (quality.get("issues") or [])
-        if isinstance(issue, dict) and str(issue.get("severity") or "").upper() in {"P0", "P1"}
+        if isinstance(issue, dict) and str(issue.get("severity") or "").upper() == "P0"
     ]
     return not issues, issues

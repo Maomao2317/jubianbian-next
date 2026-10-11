@@ -23,6 +23,7 @@ RATE_LIMIT_CREATE_PER_WINDOW = max(1, int(os.getenv("JBB_RATE_LIMIT_CREATE_PER_W
 RATE_LIMIT_CREATE_WINDOW_SECONDS = max(60, int(os.getenv("JBB_RATE_LIMIT_CREATE_WINDOW_SECONDS", "600")))
 WORKER_CONCURRENCY = max(1, min(10, int(os.getenv("JBB_WORKER_CONCURRENCY", "8"))))
 QUEUE_MAX_WAIT_MINUTES = max(1, int(os.getenv("JBB_QUEUE_MAX_WAIT_MINUTES", "600")))
+UPLOAD_RESERVATION_TTL_SECONDS = max(900, int(os.getenv("JBB_UPLOAD_RESERVATION_TTL_SECONDS", "7200")))
 TRUST_PROXY_HEADERS = os.getenv("JBB_TRUST_PROXY_HEADERS", "0").strip().lower() in {"1", "true", "yes"}
 JBB_ENVIRONMENT = os.getenv("JBB_ENVIRONMENT", "production").strip() or "production"
 BUILD_VERSION = os.getenv("JBB_BUILD_VERSION", "8b3c16f")
@@ -52,6 +53,9 @@ LOCAL_ASR_DEVICE = os.getenv("JBB_LOCAL_ASR_DEVICE", "cpu").strip() or "cpu"
 LOCAL_ASR_COMPUTE_TYPE = os.getenv("JBB_LOCAL_ASR_COMPUTE_TYPE", "int8").strip() or "int8"
 LOCAL_ASR_LANGUAGE = os.getenv("JBB_LOCAL_ASR_LANGUAGE", "zh").strip()
 LOCAL_ASR_BEAM_SIZE = max(1, min(10, int(os.getenv("JBB_LOCAL_ASR_BEAM_SIZE", "5"))))
+LOCAL_ASR_VAD_MIN_SPEECH_MS = max(50, int(os.getenv("JBB_LOCAL_ASR_VAD_MIN_SPEECH_MS", "100")))
+LOCAL_ASR_VAD_MIN_SILENCE_MS = max(100, int(os.getenv("JBB_LOCAL_ASR_VAD_MIN_SILENCE_MS", "300")))
+LOCAL_ASR_VAD_SPEECH_PAD_MS = max(0, int(os.getenv("JBB_LOCAL_ASR_VAD_SPEECH_PAD_MS", "200")))
 OCR_LANG = os.getenv("JBB_OCR_LANG", "chi_sim+eng").strip() or "chi_sim+eng"
 OCR_SAMPLE_INTERVAL_SECONDS = max(0.5, float(os.getenv("JBB_OCR_SAMPLE_INTERVAL_SECONDS", "1.0")))
 OCR_MAX_FRAMES = max(12, min(360, int(os.getenv("JBB_OCR_MAX_FRAMES", "180"))))
@@ -91,6 +95,7 @@ ARK_RESPONSE_POLL_TIMEOUT_SECONDS = max(
     ARK_RESPONSE_TIMEOUT_SECONDS,
     float(os.getenv("ARK_RESPONSE_POLL_TIMEOUT_SECONDS", "900")),
 )
+ARK_RESPONSE_CREATE_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_RESPONSE_CREATE_ATTEMPTS", "2"))))
 ARK_THINKING_TYPE = os.getenv("ARK_THINKING_TYPE", "disabled").strip().lower() or "disabled"
 ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Optional Ark billing fallback.  The Ark response is preferred when it
@@ -99,6 +104,23 @@ ARK_FALLBACK_ON_ERROR = os.getenv("ARK_FALLBACK_ON_ERROR", "1").strip().lower() 
 # are RMB per one million tokens and should match the configured model.
 ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION = float(os.getenv("ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION", "0") or "0")
 ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION = float(os.getenv("ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION", "0") or "0")
+# Optional S3-compatible object storage.  When configured, browsers upload
+# episodes directly to the bucket and workers download only the files they are
+# ready to process.  Leaving these values empty keeps the local-volume path.
+OBJECT_STORAGE_ENDPOINT = os.getenv("JBB_OBJECT_STORAGE_ENDPOINT", "").strip().rstrip("/")
+OBJECT_STORAGE_BUCKET = os.getenv("JBB_OBJECT_STORAGE_BUCKET", "").strip()
+OBJECT_STORAGE_REGION = os.getenv("JBB_OBJECT_STORAGE_REGION", "auto").strip() or "auto"
+OBJECT_STORAGE_ACCESS_KEY = os.getenv("JBB_OBJECT_STORAGE_ACCESS_KEY", "").strip()
+OBJECT_STORAGE_SECRET_KEY = os.getenv("JBB_OBJECT_STORAGE_SECRET_KEY", "").strip()
+OBJECT_STORAGE_ADDRESSING_STYLE = os.getenv("JBB_OBJECT_STORAGE_ADDRESSING_STYLE", "path").strip().lower() or "path"
+OBJECT_STORAGE_PRESIGN_SECONDS = max(300, min(86400, int(os.getenv("JBB_OBJECT_STORAGE_PRESIGN_SECONDS", "3600"))))
+OBJECT_STORAGE_PREFIX = os.getenv("JBB_OBJECT_STORAGE_PREFIX", "jubianbian/uploads").strip().strip("/")
+OBJECT_STORAGE_ENABLED = bool(
+    OBJECT_STORAGE_ENDPOINT
+    and OBJECT_STORAGE_BUCKET
+    and OBJECT_STORAGE_ACCESS_KEY
+    and OBJECT_STORAGE_SECRET_KEY
+)
 VOLCENGINE_ACCESS_KEY = os.getenv("VOLCENGINE_ACCESS_KEY", "").strip()
 VOLCENGINE_SECRET_KEY = os.getenv("VOLCENGINE_SECRET_KEY", "").strip()
 TENCENTCLOUD_SECRET_ID = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
