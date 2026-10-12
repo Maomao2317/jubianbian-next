@@ -1276,14 +1276,21 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         ambiguous to rewrite safely.
         """
         value = str(text or "")
-        replacements: list[tuple[str, str]] = []
-        for alias, canonical in alias_map.items():
-            if alias == canonical.casefold() or len(alias) < 2:
-                continue
-            replacements.append((alias, canonical))
-        for alias, canonical in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
-            value = re.sub(re.escape(alias), canonical, value, flags=re.IGNORECASE)
-        return value
+        # Match canonical names as well as aliases in one pass. A name such
+        # as "苏婉晴（小青）" already contains its alias; replacing "小青"
+        # inside it again used to grow a new nested name on every review.
+        visible_labels = dict(alias_map)
+        for label, canonical in alias_map.items():
+            visible_labels.setdefault(unicodedata.normalize("NFKC", label).casefold(), canonical)
+        labels = sorted((label for label in visible_labels if len(label) >= 2), key=len, reverse=True)
+        if not labels:
+            return value
+        return re.sub(
+            "|".join(re.escape(label) for label in labels),
+            lambda match: visible_labels[match.group(0).casefold()],
+            value,
+            flags=re.IGNORECASE,
+        )
 
     def dedupe_character_names(text: Any) -> str:
         """Collapse adjacent repetitions of known character names.

@@ -290,6 +290,27 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         matched, reference_size, candidate_size = matching_character_counts("啊" * 12000, "啊" * 12000)
         self.assertEqual((matched, reference_size, candidate_size), (12000, 12000, 12000))
 
+    def test_alias_inside_canonical_name_is_not_expanded_on_each_review(self):
+        script = {
+            "characters": ["苏婉晴（小青）", "萧华音（皇后）"],
+            "characterProfiles": [
+                {"name": "苏婉晴（小青）", "aliases": ["小青"]},
+                {"name": "萧华音（皇后）", "aliases": ["皇后"]},
+            ],
+            "scenes": [{"heading": "1-1 日 内 宫殿", "blocks": [
+                {"type": "action", "text": "苏婉晴（小青）看向皇后，小青点头。"},
+                {"type": "dialogue", "speaker": "小青", "text": "皇后，皇后！",
+                 "performance": "惊讶", "emotionType": "惊讶", "emotionEvidence": "睁大眼睛"},
+            ]}],
+        }
+        for _ in range(5):
+            script = normalize_script(script, "第1集")
+            action, dialogue = script["scenes"][0]["blocks"]
+            self.assertEqual(action["text"], "苏婉晴(小青)看向萧华音(皇后)，苏婉晴(小青)点头。")
+            self.assertEqual(dialogue["speaker"], "苏婉晴（小青）")
+            self.assertEqual(dialogue["text"], "皇后，皇后！")
+            self.assertEqual(dialogue["performance"], "惊讶")
+
     def test_verbatim_dialogue_wins_over_polished_text(self):
         script = normalize_script(
             {

@@ -264,15 +264,21 @@ def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
 
 
 def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
+    issues = [issue for issue in (quality.get("issues") or []) if isinstance(issue, dict)]
+    blocking = [issue for issue in issues if str(issue.get("severity") or "").upper() == "P0"]
+    if blocking:
+        # Repair delivery blockers first. Mixing advisory ASR disagreements
+        # into the same patch can alter correct words and reject a useful
+        # missing-line repair through the regression guard.
+        return blocking
     critical_tags = {
         "台词归属错", "漏台词", "OS漏标", "OS/VO混淆", "音频对白不一致",
         "音频对白需核对", "疑似漏台词片段", "正文混入校对备注", "事实臆造",
     }
     return [
         issue
-        for issue in (quality.get("issues") or [])
-        if isinstance(issue, dict)
-        and (str(issue.get("severity") or "").upper() == "P0" or str(issue.get("tag") or "") in critical_tags)
+        for issue in issues
+        if str(issue.get("tag") or "") in critical_tags
     ]
 
 

@@ -158,6 +158,13 @@ class ProviderDeliveryTests(unittest.TestCase):
                          "more_blocking_issues")
         self.assertIsNone(processing._review_regression_reason(first, {**first, "transcriptCoverage": 99}))
 
+    def test_review_repairs_blockers_before_advisory_asr_disagreements(self):
+        missing = {"severity": "P0", "tag": "疑似漏台词片段", "startSec": 43, "endSec": 44.4}
+        advisory = {"severity": "P1", "tag": "疑似漏台词片段", "startSec": 112, "endSec": 114}
+        heuristic = {"severity": "P1", "tag": "画面文字需核对"}
+        self.assertEqual(processing._automated_review_issues({"issues": [advisory, missing, heuristic]}), [missing])
+        self.assertEqual(processing._automated_review_issues({"issues": [advisory, heuristic]}), [advisory])
+
     def test_first_episode_context_is_owner_scoped_and_does_not_use_later_completed_episode(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row

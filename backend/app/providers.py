@@ -816,7 +816,10 @@ def ark_recognize(
             except ArkError as exc:
                 if not video_url or not _is_video_url_error(exc):
                     raise
-                logger.warning("provider_step provider=ark operation=object_url_fallback file=%s status_code=%s", path.name, exc.status_code)
+                logger.warning(
+                    "provider_step provider=ark operation=object_url_fallback file=%s status_code=%s code=%s error=%s",
+                    path.name, exc.status_code, exc.provider_code, safe_error_text(exc),
+                )
                 fallback = ark_prepare_video(path, duration_sec)
                 # Share the uploaded file with the subsequent quality review.
                 # No second URL failure/upload is needed for the same episode.
