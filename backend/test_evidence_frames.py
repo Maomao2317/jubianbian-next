@@ -13,7 +13,7 @@ from app import evidence
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for pixel comparisons")
 class EvidenceFrameTests(unittest.TestCase):
-    def compare_samples(self, *, offset=False, fail_batch=False):
+    def compare_samples(self, *, offset=False, audio_leads=False, fail_batch=False):
         ffmpeg = shutil.which("ffmpeg")
         with tempfile.TemporaryDirectory(prefix="jbb-frame-test-") as root:
             directory = Path(root)
@@ -21,6 +21,8 @@ class EvidenceFrameTests(unittest.TestCase):
             command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=160x96:rate=25:duration=4.2"]
             if offset:
                 command += ["-vf", "select=not(mod(n\\,3)),setpts=PTS+1.7/TB", "-fps_mode", "vfr"]
+            if audio_leads:
+                command += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=4.2", "-map", "0:v", "-map", "1:a", "-vf", "setpts=PTS+0.05/TB", "-fps_mode", "passthrough", "-c:a", "aac"]
             subprocess.run(command + ["-c:v", "mpeg4", "-y", str(video)], capture_output=True, check=True, timeout=30)
             duration = 4.137
             times = [round(index * duration / 7, 3) for index in range(7)]
@@ -49,6 +51,9 @@ class EvidenceFrameTests(unittest.TestCase):
 
     def test_failed_batch_decode_preserves_seek_fallback(self):
         self.compare_samples(fail_batch=True)
+
+    def test_audio_starting_before_video_preserves_pixels(self):
+        self.compare_samples(audio_leads=True)
 
 
 if __name__ == "__main__":

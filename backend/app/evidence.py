@@ -295,7 +295,7 @@ def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: 
             subprocess.run(
                 [
                     ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path),
-                    "-vf", f"setpts=PTS-STARTPTS,select=gte(t\\,floor(selected_n*{step:.12f}*1000+0.5)/1000)",
+                    "-vf", f"select=gte(t\\,floor(selected_n*{step:.12f}*1000+0.5)/1000)",
                     "-fps_mode", "passthrough", "-frames:v", str(len(times)),
                     "-start_number", "0", "-y", str(temp_dir / "frame-%03d.png"),
                 ],
