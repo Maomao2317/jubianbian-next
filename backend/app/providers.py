@@ -478,7 +478,7 @@ def ark_prompt(
         return (
             "你是专业视频复核员。逐一回看issues和ranges的时间范围，只修明确有视频声音/字幕证据的漏词、"
             "说话人或OS错误。只返回合法JSON corrections数组，不要重写整集，不删除正文，不做风格调整。"
-            "每个修改包含sceneIndex和blockIndex（draft中从0开始）、operation（replace、insert_before、insert_after）"
+            "每个修改包含sceneIndex和blockIndex（直接复制draft中该场次和该段的编号，不要自行计数）、operation（replace、insert_before、insert_after）"
             "及完整block。block包含type、text、startSec、endSec，以及该类型必需的说话人、口型、声音、情绪证据字段。"
             "修正的时间必须属于ranges。对白逐字保留，不可概括，今天、我、决定等短词不可删减或去重。"
             "人物规范姓名沿用draft及首集人物表，台词和字幕原始称谓不能替换。人物声音出现但嘴未动时"

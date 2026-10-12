@@ -112,6 +112,8 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual(reviewed["speakerEvidence"], "口型同步")
         self.assertEqual(reviewed["emotionEvidence"], "语气坚定")
         self.assertEqual(reviewed["startSec"], 1)
+        self.assertEqual(context["draft"]["scenes"][0]["sceneIndex"], 0)
+        self.assertEqual(reviewed["blockIndex"], 0)
         self.assertNotIn("rawText", reviewed)
         self.assertNotIn("finalText", reviewed)
         self.assertEqual(block["text"], "今天，我决定，我要留下。")

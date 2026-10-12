@@ -218,13 +218,15 @@ def _automated_review_context(
         "characterProfiles": script.get("characterProfiles") or [],
         "scenes": [],
     }
-    for scene in script.get("scenes") or []:
+    for scene_index, scene in enumerate(script.get("scenes") or []):
         compact_scene = {key: scene[key] for key in (
             "heading", "location", "timeOfDay", "interiorExterior", "segmentType", "characters",
         ) if key in scene}
         compact_scene["blocks"] = []
-        for block in scene.get("blocks") or []:
+        compact_scene["sceneIndex"] = scene_index
+        for block_index, block in enumerate(scene.get("blocks") or []):
             compact_block = {key: value for key, value in block.items() if key in block_keys and value not in (None, "")}
+            compact_block["blockIndex"] = block_index
             if block.get("type") in {"dialogue", "vo"}:
                 compact_block["text"] = block.get("sourceText") or block.get("rawText") or block.get("text") or ""
             compact_scene["blocks"].append(compact_block)
