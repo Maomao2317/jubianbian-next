@@ -97,6 +97,33 @@ def update_task(task_id: str, **values: Any) -> None:
         )
 
 
+def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any] | None:
+    """Read only the actual first episode's cast; never wait for other workers."""
+    if not {"batch_id", "user_id"}.issubset(row.keys()) or not row["batch_id"] or not row["user_id"]:
+        return None
+    with db() as connection:
+        first = connection.execute(
+            """SELECT id, title, status, result_json FROM tasks
+               WHERE batch_id = ? AND user_id = ?
+               ORDER BY COALESCE(batch_index, 2147483647), created_at, id LIMIT 1""",
+            (row["batch_id"], row["user_id"]),
+        ).fetchone()
+    if not first or first["id"] == row["id"] or first["status"] not in {"done", "review"}:
+        return None
+    try:
+        script = json.loads(first["result_json"] or "")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(script, dict):
+        return None
+    profiles = [
+        {key: profile[key] for key in ("name", "aliases", "appearance", "clothing") if key in profile}
+        for profile in script.get("characterProfiles") or []
+        if isinstance(profile, dict) and profile.get("name")
+    ]
+    return {"referenceTitle": first["title"], "characterProfiles": profiles} if profiles else None
+
+
 def reconcile_batch_character_continuity(batch_id: str | None) -> int:
     """Persist one stable cast naming table across completed batch episodes.
 
@@ -109,6 +136,13 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
     if not batch_id:
         return 0
     with db() as connection:
+        first = connection.execute(
+            """SELECT id, status FROM tasks WHERE batch_id = ?
+               ORDER BY COALESCE(batch_index, 2147483647), created_at, id LIMIT 1""",
+            (batch_id,),
+        ).fetchone()
+        if not first or first["status"] not in {"done", "review"}:
+            return 0
         rows = connection.execute(
             """
             SELECT id, result_json
@@ -118,6 +152,8 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
             """,
             (batch_id,),
         ).fetchall()
+        if not rows or rows[0]["id"] != first["id"]:
+            return 0
         scripts: list[dict[str, Any]] = []
         usable_rows: list[sqlite3.Row] = []
         for row in rows:

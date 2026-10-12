@@ -1845,8 +1845,8 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
     exact aliases, contained names, and a unique high-similarity match are
     remapped; ambiguous or genuinely new characters are left alone.  It
     mutates the supplied result objects and returns the number of changed
-    labels.  Dialogue words are never rewritten except when they contain one
-    of those already-confirmed character labels.
+    labels. Dialogue and visible subtitle words remain verbatim; only speaker
+    labels and action narration use the canonical names.
     """
     if not isinstance(scripts, list) or len(scripts) < 2:
         return 0
@@ -1972,9 +1972,13 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
                 for key in ("speaker", "visibleSpeaker"):
                     if key in block:
                         block[key] = replace_label(block.get(key))
-                for key in ("text", "rawText", "finalText", "sourceText"):
-                    if key in block and isinstance(block.get(key), str):
-                        block[key] = replace_text(block[key])
+                # Canonical names belong in speaker labels and narration.
+                # Spoken honorifics and visible subtitle/name text are source
+                # evidence: renaming a character must never delete their words.
+                if block.get("type") == "action":
+                    for key in ("text", "rawText", "finalText", "sourceText"):
+                        if key in block and isinstance(block.get(key), str):
+                            block[key] = replace_text(block[key])
         total_changes += len(mapping)
     return total_changes
 

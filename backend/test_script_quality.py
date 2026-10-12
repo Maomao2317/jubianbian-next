@@ -239,7 +239,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(changed, 1)
         self.assertEqual(second["characters"], ["江川"])
         self.assertEqual(second["scenes"][0]["blocks"][0]["speaker"], "江川")
-        self.assertIn("江川", second["scenes"][0]["blocks"][0]["text"])
+        self.assertEqual(second["scenes"][0]["blocks"][0]["text"], "江川哥，你来了")
 
     def test_interior_transcript_gap_is_recovered_only_when_unambiguous(self):
         script = {

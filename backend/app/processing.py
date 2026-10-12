@@ -38,7 +38,7 @@ from .script import (
     script_quality,
 )
 from .storage import cleanup_materialized, is_object_uri, materialize_media
-from .task_store import mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
+from .task_store import batch_character_context, mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
 
 
 def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> dict[str, Any]:
@@ -169,6 +169,17 @@ def _issue_identity(issue: dict[str, Any]) -> str:
     )
 
 
+def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any]) -> str | None:
+    """Do not replace a draft with a review that loses independent evidence."""
+    if len(quality_gate(reviewed)[1]) > len(quality_gate(initial)[1]):
+        return "more_blocking_issues"
+    for key in ("transcriptCoverage", "dialogueEvidencePrecision"):
+        before, after = initial.get(key), reviewed.get(key)
+        if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after < before:
+            return f"lower_{key}"
+    return None
+
+
 def _automated_review_context(
     script: dict[str, Any],
     blocking: list[dict[str, Any]],
@@ -177,7 +188,13 @@ def _automated_review_context(
     for issue in blocking:
         start = issue.get("startSec")
         end = issue.get("endSec")
-        if start is None and end is None:
+        if not isinstance(start, (int, float)) and not isinstance(end, (int, float)):
+            continue
+        if not isinstance(start, (int, float)):
+            start = max(0.0, end - 3.0)
+        if not isinstance(end, (int, float)):
+            end = start + 3.0
+        if not 0 <= start <= end:
             continue
         ranges.append({
             "startSec": start,
@@ -213,10 +230,11 @@ def _automated_review_context(
             compact_scene["blocks"].append(compact_block)
         draft["scenes"].append(compact_scene)
     return {
-        "scope": "full_video_with_issue_ranges",
+        "scope": "issue_patches" if ranges else "full_video_with_issue_ranges",
         "issues": blocking[:40],
         "ranges": ranges[:40],
         "draft": draft,
+        "_sourceScript": script,
     }
 
 
@@ -312,6 +330,9 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             else None
         )
         evidence = await evidence_task
+        cast_context = await asyncio.to_thread(batch_character_context, row)
+        if cast_context:
+            evidence = {**evidence, "batchCharacterContext": cast_context}
         prepared_video: dict[str, str] | None = None
         prepare_error: ArkError | None = None
         if prepare_task is not None:
@@ -457,15 +478,22 @@ async def _run_recognizer_with_media(
                         review_route,
                     )
                     reviewed_content_issues = _automated_review_issues(reviewed_quality)
-                    unresolved_ids = {_issue_identity(issue) for issue in reviewed_content_issues}
-                    review_metadata["resolvedIssues"] = [
-                        issue for issue in review_issues if _issue_identity(issue) not in unresolved_ids
-                    ]
-                    review_metadata["unresolvedIssues"] = reviewed_content_issues
-                    script = reviewed_script
-                    quality = reviewed_quality
-                    final_model = turbo_model
                     final_usage = _merge_usage(ark_usage_data, reviewed_usage)
+                    regression = _review_regression_reason(quality, reviewed_quality)
+                    review_metadata["accepted"] = regression is None
+                    if regression:
+                        review_metadata["retainedDraftReason"] = regression
+                        review_metadata["unresolvedIssues"] = review_issues
+                        logger.warning("provider_review_retained_draft task_id=%s reason=%s", row["id"], regression)
+                    else:
+                        unresolved_ids = {_issue_identity(issue) for issue in reviewed_content_issues}
+                        review_metadata["resolvedIssues"] = [
+                            issue for issue in review_issues if _issue_identity(issue) not in unresolved_ids
+                        ]
+                        review_metadata["unresolvedIssues"] = reviewed_content_issues
+                        script = reviewed_script
+                        quality = reviewed_quality
+                        final_model = turbo_model
                 except ArkError as review_exc:
                     review_metadata["reviewError"] = safe_error_text(review_exc)
                     quality["warning"] = (
