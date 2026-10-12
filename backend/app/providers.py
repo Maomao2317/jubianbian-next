@@ -642,6 +642,7 @@ def ark_recognize(
     response_payload: dict[str, Any] = {
             "model": selected_model,
             "max_output_tokens": ARK_MAX_OUTPUT_TOKENS,
+            "text": {"format": {"type": "json_object"}},
             "input": [{
                 "role": "user",
                 "content": [

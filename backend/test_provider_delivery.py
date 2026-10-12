@@ -53,6 +53,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         prepare.assert_not_called()
         request = create.call_args.args[0]
         self.assertEqual(request["max_output_tokens"], 32768)
+        self.assertEqual(request["text"], {"format": {"type": "json_object"}})
         self.assertEqual(request["input"][0]["content"][0], {
             "type": "input_video", "video_url": "https://cos.test/video", "fps": 2,
         })
