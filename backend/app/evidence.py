@@ -9,10 +9,12 @@ or cloud credentials produce ``unavailable`` records instead of guessed text.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
@@ -277,6 +279,48 @@ def _keyframe_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     return _source("keyframes", "available", provider=Path(ffmpeg).name, items=items)
 
 
+def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: str, duration_sec: float) -> list[Path]:
+    """Decode dense short-video samples once without changing their timestamps.
+
+    Each selected frame is the first frame at or after the same timestamp used
+    by the individual seek path. Sparse samples of long videos retain seeking
+    so we do not decode an entire movie to obtain a handful of frames.
+    """
+    images = [temp_dir / f"frame-{index:03d}.png" for index in range(len(times))]
+    step = duration_sec / len(times) if len(times) > 1 else 0.0
+    uniform = times == [round(index * step, 3) for index in range(len(times))]
+    if times and times[0] == 0 and uniform and times[-1] <= 300 and step <= 3:
+        started = time.perf_counter()
+        try:
+            subprocess.run(
+                [
+                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path),
+                    "-vf", f"setpts=PTS-STARTPTS,select=gte(t\\,floor(selected_n*{step:.12f}*1000+0.5)/1000)",
+                    "-fps_mode", "passthrough", "-frames:v", str(len(times)),
+                    "-start_number", "0", "-y", str(temp_dir / "frame-%03d.png"),
+                ],
+                capture_output=True,
+                timeout=max(60.0, min(240.0, times[-1] * 1.5 + 30)),
+                check=True,
+            )
+            if all(image.exists() for image in images):
+                logger.info(
+                    "evidence_step file=%s kind=ocr_frames mode=single_decode frames=%s duration_ms=%.1f",
+                    path.name, len(images), (time.perf_counter() - started) * 1000,
+                )
+                return images
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("evidence_frame_batch_failed file=%s error=%s", path.name, safe_error_text(exc))
+    for image, timestamp in zip(images, times):
+        subprocess.run(
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", str(timestamp), "-i", str(path), "-frames:v", "1", "-y", str(image)],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+    return images
+
+
 def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     """Optionally OCR sampled frames when both command-line tools exist.
 
@@ -294,17 +338,14 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     successful_frames = 0
     errors: list[str] = []
     previous_text = ""
+    # Tesseract's OpenMP workers otherwise compete with ASR and other episodes.
+    # One OCR thread keeps the same recognition settings and sampled pixels.
+    ocr_env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
     try:
         with tempfile.TemporaryDirectory(prefix="jbb-ocr-") as temp_name:
             temp_dir = Path(temp_name)
-            for index, timestamp in enumerate(times):
-                image_path = temp_dir / f"frame-{index:03d}.png"
-                subprocess.run(
-                    [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", str(timestamp), "-i", str(path), "-frames:v", "1", "-y", str(image_path)],
-                    capture_output=True,
-                    timeout=30,
-                    check=True,
-                )
+            images = _extract_ocr_frames(path, temp_dir, times, ffmpeg, duration_sec)
+            for timestamp, image_path in zip(times, images):
                 result = subprocess.run(
                     [tesseract, str(image_path), "stdout", "-l", OCR_LANG],
                     capture_output=True,
@@ -313,6 +354,7 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=ocr_env,
                 )
                 text = _bounded_text(result.stdout, 1000)
                 if result.returncode == 0:
@@ -370,13 +412,23 @@ def collect_evidence(
     # otherwise start many ffmpeg/tesseract processes at once and make every
     # episode slower.  Keep a small evidence lane so throughput stays stable
     # while video upload/model requests continue in parallel.
+    started = time.perf_counter()
+
+    def timed_source(kind: str, function: Callable[..., dict[str, Any]], **kwargs: Any) -> tuple[dict[str, Any], float]:
+        source_started = time.perf_counter()
+        source = function(path, duration_sec, **kwargs)
+        elapsed_ms = round((time.perf_counter() - source_started) * 1000, 1)
+        logger.info("evidence_step file=%s kind=%s status=%s items=%s duration_ms=%.1f", path.name, kind, source.get("status"), len(source.get("items") or []), elapsed_ms)
+        return source, elapsed_ms
+
     with _evidence_semaphore:
+        queue_ms = round((time.perf_counter() - started) * 1000, 1)
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="jbb-evidence") as executor:
-            audio_future = executor.submit(_audio_evidence, path, duration_sec, transcribe=transcribe)
-            ocr_future = executor.submit(_ocr_evidence, path, duration_sec)
+            audio_future = executor.submit(timed_source, "audio", _audio_evidence, transcribe=transcribe)
+            ocr_future = executor.submit(timed_source, "ocr", _ocr_evidence)
             keyframes = _keyframe_evidence(path, duration_sec)
-            audio = audio_future.result()
-            ocr = ocr_future.result()
+            audio, audio_ms = audio_future.result()
+            ocr, ocr_ms = ocr_future.result()
     sources = [audio, ocr, keyframes]
     available = [source["kind"] for source in sources if source.get("status") == "available"]
     unavailable = [source["kind"] for source in sources if source.get("status") != "available"]
@@ -386,6 +438,7 @@ def collect_evidence(
         "availableSources": available,
         "unavailableSources": unavailable,
         "sources": sources,
+        "timingsMs": {"queue": queue_ms, "audio": audio_ms, "ocr": ocr_ms, "total": round((time.perf_counter() - started) * 1000, 1)},
     }
     result["summary"] = evidence_summary(result)
     return result
