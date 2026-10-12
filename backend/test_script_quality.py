@@ -8,7 +8,7 @@ from app.evidence import collect_evidence, evidence_summary, transcript_from_evi
 from app.media import default_batch_title
 from app.processing import _is_lite_model_unavailable, _is_non_retryable_provider_error, select_ark_route
 from app.errors import ArkError
-from app.script import clean_action_text, compact_character_detail, compact_emotion_text, episode_from_text, matching_character_counts, normalize_script, quality_gate, restore_evidence_boundary_segments, restore_short_transcript_segments, script_quality, script_to_markdown
+from app.script import apply_batch_character_continuity, clean_action_text, compact_character_detail, compact_emotion_text, compact_performance, episode_from_text, matching_character_counts, normalize_script, quality_gate, restore_evidence_boundary_segments, restore_short_transcript_segments, restore_transcript_gap_segments, script_quality, script_to_markdown
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
@@ -219,6 +219,48 @@ class ScriptQualityRegressionTests(unittest.TestCase):
     def test_repeated_emotion_with_ideographic_comma_is_compacted(self):
         emotion = compact_emotion_text("委屈又气愤、委屈又气愤、委屈又气愤")
         self.assertEqual(emotion, "委屈又气愤")
+
+    def test_repeated_performance_clauses_with_ideographic_comma_are_compacted(self):
+        performance = compact_performance("目光愁切、关切、关切、关切、从看文件")
+        self.assertEqual(performance, "目光愁切、关切")
+
+    def test_batch_character_continuity_uses_first_episode_name(self):
+        first = {
+            "characters": ["江川"],
+            "characterProfiles": [{"name": "江川", "aliases": []}],
+            "scenes": [{"characters": ["江川"], "blocks": [{"type": "dialogue", "speaker": "江川", "text": "我来了"}]}],
+        }
+        second = {
+            "characters": ["江川哥"],
+            "characterProfiles": [{"name": "江川哥", "aliases": []}],
+            "scenes": [{"characters": ["江川哥"], "blocks": [{"type": "dialogue", "speaker": "江川哥", "text": "江川哥，你来了"}]}],
+        }
+        changed = apply_batch_character_continuity([first, second])
+        self.assertEqual(changed, 1)
+        self.assertEqual(second["characters"], ["江川"])
+        self.assertEqual(second["scenes"][0]["blocks"][0]["speaker"], "江川")
+        self.assertIn("江川", second["scenes"][0]["blocks"][0]["text"])
+
+    def test_interior_transcript_gap_is_recovered_only_when_unambiguous(self):
+        script = {
+            "scenes": [{
+                "blocks": [{
+                    "type": "dialogue",
+                    "speaker": "甲",
+                    "text": "我决定。",
+                    "startSec": 1.0,
+                    "endSec": 3.0,
+                }],
+            }],
+        }
+        evidence = {"sources": [{
+            "kind": "audio",
+            "status": "available",
+            "items": [{"type": "transcript_segment", "text": "我今天决定", "startSec": 1.1, "endSec": 2.8}],
+        }]}
+        repaired = restore_transcript_gap_segments(script, evidence)
+        self.assertEqual(repaired, {"segments": 1, "blocks": 1})
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "我今天决定。")
 
     def test_repeated_character_name_is_collapsed_and_emotion_is_exported(self):
         normalized = normalize_script(

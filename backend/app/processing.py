@@ -33,11 +33,12 @@ from .script import (
     normalize_script,
     quality_gate,
     restore_evidence_boundary_segments,
+    restore_transcript_gap_segments,
     restore_short_transcript_segments,
     script_quality,
 )
 from .storage import cleanup_materialized, materialize_media
-from .task_store import mark_task_stage, record_task_event, task_row, update_task
+from .task_store import mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
 
 
 def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> dict[str, Any]:
@@ -122,11 +123,13 @@ def _evaluate_quality(
     route: dict[str, Any],
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
     boundary_recovered = restore_evidence_boundary_segments(script, evidence)
+    gap_recovered = restore_transcript_gap_segments(script, evidence)
     short_recovered = restore_short_transcript_segments(script, evidence)
     recovered = {
-        "segments": boundary_recovered["segments"] + short_recovered["segments"],
-        "blocks": boundary_recovered["blocks"] + short_recovered["blocks"],
+        "segments": boundary_recovered["segments"] + gap_recovered["segments"] + short_recovered["segments"],
+        "blocks": boundary_recovered["blocks"] + gap_recovered["blocks"] + short_recovered["blocks"],
         "boundarySegments": boundary_recovered["segments"],
+        "interiorGapSegments": gap_recovered["segments"],
         "shortSegments": short_recovered["segments"],
     }
     quality = script_quality(script, provider, evidence)
@@ -556,6 +559,26 @@ async def process_task(task_id: str) -> None:
             api_cost_rmb=usage.get("api_cost_rmb", 0),
             completed_at=now_iso(),
         )
+        if row["batch_id"]:
+            try:
+                continuity_changes = reconcile_batch_character_continuity(row["batch_id"])
+                if continuity_changes:
+                    logger.info(
+                        "batch_character_continuity batch_id=%s task_id=%s changes=%s",
+                        row["batch_id"],
+                        task_id,
+                        continuity_changes,
+                    )
+            except Exception as continuity_error:  # pragma: no cover - defensive persistence boundary
+                # A naming reconciliation must never turn an otherwise valid
+                # screenplay into a failed task. The next episode completion
+                # will retry the same deterministic pass.
+                logger.warning(
+                    "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
+                    row["batch_id"],
+                    task_id,
+                    safe_error_text(continuity_error),
+                )
         record_task_event(
             task_id,
             "completed" if can_deliver else "review_required",

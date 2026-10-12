@@ -376,6 +376,111 @@ def restore_short_transcript_segments(
     return result
 
 
+def restore_transcript_gap_segments(
+    script: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    *,
+    max_missing_chars: int = 12,
+) -> dict[str, int]:
+    """Restore one provable interior gap from a time-aligned ASR segment.
+
+    Boundary recovery fixes dropped opening/closing words, but a provider can
+    also omit a short middle phrase (``我决定`` from ``我今天决定``).  This
+    pass accepts only a single contiguous deletion from the ASR reference,
+    with one unambiguous timed block and no replacement/substitution.  It is
+    therefore safe against ASR paraphrases and never assigns a line to a new
+    speaker. Short one-word segments remain handled by the stricter repair.
+    """
+    result = {"segments": 0, "blocks": 0}
+    if not isinstance(script, dict) or not isinstance(evidence, dict):
+        return result
+    audio = next(
+        (
+            source
+            for source in (evidence.get("sources") or [])
+            if isinstance(source, dict) and source.get("kind") == "audio" and source.get("status") == "available"
+        ),
+        None,
+    )
+    if not isinstance(audio, dict):
+        return result
+    scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
+    timed_blocks: list[tuple[int, int, dict[str, Any], float, float]] = []
+    for scene_index, scene in enumerate(scenes):
+        for block_index, block in enumerate(scene.get("blocks") or []):
+            if not isinstance(block, dict) or block.get("type") not in {"dialogue", "vo"}:
+                continue
+            start = block.get("startSec")
+            end = block.get("endSec")
+            if not isinstance(start, (int, float)) and not isinstance(end, (int, float)):
+                continue
+            left = float(start if isinstance(start, (int, float)) else end)
+            right = float(end if isinstance(end, (int, float)) else start)
+            timed_blocks.append((scene_index, block_index, block, min(left, right), max(left, right)))
+
+    def one_gap(reference: str, candidate: str) -> str | None:
+        if len(reference) <= len(candidate) or len(candidate) < 3:
+            return None
+        opcodes = SequenceMatcher(None, reference, candidate, autojunk=False).get_opcodes()
+        gaps: list[str] = []
+        for tag, ref_start, ref_end, cand_start, cand_end in opcodes:
+            if tag == "equal":
+                continue
+            if tag == "delete":
+                gaps.append(reference[ref_start:ref_end])
+                continue
+            # A replacement means the model/ASR disagrees on a spoken word;
+            # do not silently choose either side.
+            return None
+        missing = "".join(gaps)
+        if len(gaps) != 1 or not missing or len(missing) > max_missing_chars:
+            return None
+        matched = len(candidate)
+        if matched / max(1, len(reference)) < 0.55:
+            return None
+        return missing
+
+    repaired_blocks: set[tuple[int, int]] = set()
+    for item in audio.get("items") or []:
+        if not isinstance(item, dict) or item.get("type") != "transcript_segment":
+            continue
+        raw_text = str(item.get("text") or "").strip()
+        reference = evidence_comparison_text(raw_text)
+        start = item.get("startSec")
+        end = item.get("endSec")
+        if not raw_text or len(reference) < 4 or len(reference) > 180:
+            continue
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        left, right = min(float(start), float(end)), max(float(start), float(end))
+        overlapping = [
+            entry for entry in timed_blocks
+            if entry[4] >= left - 0.35 and entry[3] <= right + 0.35
+        ]
+        if len(overlapping) != 1:
+            continue
+        scene_index, block_index, block, _block_start, _block_end = overlapping[0]
+        if (scene_index, block_index) in repaired_blocks:
+            continue
+        candidate = evidence_comparison_text(block.get("text"))
+        if one_gap(reference, candidate) is None:
+            continue
+        recovered_text = normalize_dialogue_text(raw_text)
+        if not recovered_text or recovered_text == block.get("text"):
+            continue
+        block["text"] = recovered_text
+        if block.get("type") == "dialogue":
+            block["rawText"] = raw_text
+            block["finalText"] = recovered_text
+            block["sourceText"] = raw_text
+        block["evidenceRecovered"] = True
+        block["asrRecovered"] = True
+        repaired_blocks.add((scene_index, block_index))
+        result["segments"] += 1
+        result["blocks"] += 1
+    return result
+
+
 def restore_evidence_boundary_segments(
     script: dict[str, Any],
     evidence: dict[str, Any] | None,
@@ -747,21 +852,34 @@ def compact_performance(value: Any) -> str:
     《剧拆拆》 uses only a few useful emotion/action words in parentheses, so
     retain at most two concise clauses and discard technical narration.
     """
-    text = normalize_text(value).strip("，。！？；：: ")
+    text = normalize_text(value).strip("，、。！？；：: … ")
     if not text:
         return ""
     text = re.sub(r"^(?:语气|神态|情绪|声音|音量|重音|停顿)\s*[：:]\s*", "", text)
-    parts = [part.strip("，。！？；：: ") for part in re.split(r"[；;，,。]", text) if part.strip()]
+    # Providers sometimes separate every adjective with an ideographic comma
+    # and repeat the same clause several times (for example
+    # ``关切、关切、关切``).  Split on the complete Chinese punctuation set,
+    # then compare whitespace-free clauses so punctuation/spacing cannot make
+    # a duplicate survive the export.
+    parts = [
+        part.strip("，、。！？；：: … ")
+        for part in re.split(r"[；;，、,。！？…]+", text)
+        if part.strip("，、。！？；：: … ")
+    ]
     kept: list[str] = []
+    seen: set[str] = set()
     for part in parts:
-        if not part or part in kept:
+        key = re.sub(r"\s+", "", part)
+        if not key or key in seen:
             continue
         if len(part) > 18:
             # Prefer the first compact descriptive clause over a verbose
             # explanation such as "重音落在……、停顿……".
             part = part[:18].rstrip("，。！？；：: ")
-        if part and part not in kept:
+        key = re.sub(r"\s+", "", part)
+        if part and key not in seen:
             kept.append(part)
+            seen.add(key)
         if len(kept) >= 2:
             break
     return "、".join(kept)
@@ -1669,6 +1787,196 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         "characterProfiles": used_profiles,
         "scenes": scenes,
     }
+
+
+_GENERIC_CHARACTER_LABELS = {
+    "旁白", "未知说话人", "未知男声", "未知女声", "人物", "男主", "女主",
+    "主角", "配角", "路人", "群众", "工作人员", "全体", "os", "vo",
+    "内心独白",
+}
+
+
+def _character_key(value: Any) -> str:
+    """Return a conservative comparison key for a character label."""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+    text = re.sub(r"[（(].*?[）)]", "", text)
+    text = re.sub(r"[\s·•、，,。！？!?：:；;\[\]【】]+", "", text)
+    return text
+
+
+def _is_generic_character(value: Any) -> bool:
+    return _character_key(value) in {_character_key(item) for item in _GENERIC_CHARACTER_LABELS}
+
+
+def _script_character_names(script: dict[str, Any]) -> list[str]:
+    """Collect visible character labels in stable first-seen order."""
+    values: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and not _is_generic_character(text) and text not in values:
+            values.append(text)
+
+    for value in script.get("characters") or []:
+        add(value)
+    for profile in script.get("characterProfiles") or []:
+        if isinstance(profile, dict):
+            add(profile.get("name"))
+    for scene in script.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        for value in scene.get("characters") or []:
+            add(value)
+        for block in scene.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in {"dialogue", "vo"}:
+                add(block.get("speaker"))
+                add(block.get("visibleSpeaker"))
+    return values
+
+
+def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
+    """Use the first episode's cast as the canonical batch character table.
+
+    Each video is recognized independently, so a provider may call the same
+    person ``江川`` in episode one, ``男主`` in episode two, and ``江先生`` in
+    episode three.  This pass is intentionally deterministic and conservative:
+    exact aliases, contained names, and a unique high-similarity match are
+    remapped; ambiguous or genuinely new characters are left alone.  It
+    mutates the supplied result objects and returns the number of changed
+    labels.  Dialogue words are never rewritten except when they contain one
+    of those already-confirmed character labels.
+    """
+    if not isinstance(scripts, list) or len(scripts) < 2:
+        return 0
+    first = scripts[0] if isinstance(scripts[0], dict) else None
+    if not first:
+        return 0
+    canonical_names = _script_character_names(first)
+    if not canonical_names:
+        return 0
+
+    alias_map: dict[str, str] = {}
+    for name in canonical_names:
+        alias_map[_character_key(name)] = name
+    for profile in first.get("characterProfiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        canonical = str(profile.get("name") or "").strip()
+        if not canonical:
+            continue
+        for alias in profile.get("aliases") or []:
+            alias_key = _character_key(alias)
+            if alias_key and not _is_generic_character(alias):
+                alias_map.setdefault(alias_key, canonical)
+
+    def resolve(candidate: str) -> str | None:
+        key = _character_key(candidate)
+        if not key:
+            return None
+        role_key = key
+        for suffix in ("先生", "女士", "小姐", "老师", "医生", "总裁", "少爷", "夫人", "哥哥", "姐姐", "哥", "姐"):
+            if role_key.endswith(suffix) and len(role_key) > len(suffix):
+                role_key = role_key[: -len(suffix)]
+                break
+        if role_key != key and role_key in alias_map:
+            return alias_map[role_key]
+        if _is_generic_character(candidate) and key not in {"男主", "女主", "主角"}:
+            return None
+        exact = alias_map.get(key)
+        if exact:
+            return exact
+        # A shortened form such as ``景明`` is safe only when it is contained
+        # in exactly one canonical name.  This also handles honorific suffixes
+        # such as ``江先生`` without guessing between two similar characters.
+        contained = [name for name in canonical_names if len(key) >= 2 and (key in _character_key(name) or _character_key(name) in key)]
+        if len(contained) == 1:
+            return contained[0]
+        scored: list[tuple[float, str]] = []
+        for name in canonical_names:
+            target = _character_key(name)
+            if len(key) < 2 or len(target) < 2:
+                continue
+            score = SequenceMatcher(None, key, target).ratio()
+            if key[:1] == target[:1]:
+                score += 0.08
+            scored.append((score, name))
+        scored.sort(reverse=True)
+        if scored and scored[0][0] >= 0.86 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.12):
+            return scored[0][1]
+        # A generic role label can be carried across episodes only when the
+        # first episode has one unambiguous named lead.
+        if key in {"男主", "女主", "主角"} and len(canonical_names) == 1:
+            return canonical_names[0]
+        return None
+
+    total_changes = 0
+    for script in scripts[1:]:
+        if not isinstance(script, dict):
+            continue
+        candidates = _script_character_names(script)
+        mapping: dict[str, str] = {}
+        for candidate in candidates:
+            resolved = resolve(candidate)
+            if resolved and _character_key(candidate) != _character_key(resolved):
+                mapping[candidate] = resolved
+                alias_map.setdefault(_character_key(candidate), resolved)
+        if not mapping:
+            continue
+        replacements = sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True)
+
+        def replace_text(value: Any) -> Any:
+            text = str(value or "")
+            for source, target in replacements:
+                text = re.sub(re.escape(source), target, text, flags=re.IGNORECASE)
+            return text
+
+        def replace_label(value: Any) -> Any:
+            if value is None:
+                return value
+            text = str(value).strip()
+            return mapping.get(text) or alias_map.get(_character_key(text), text)
+
+        script["characters"] = list(dict.fromkeys(replace_label(value) for value in script.get("characters") or []))
+        merged_profiles: list[dict[str, Any]] = []
+        profile_by_name: dict[str, dict[str, Any]] = {}
+        for profile in script.get("characterProfiles") or []:
+            if not isinstance(profile, dict):
+                continue
+            old_name = str(profile.get("name") or "").strip()
+            new_name = replace_label(old_name)
+            profile = dict(profile)
+            profile["name"] = new_name
+            profile["aliases"] = list(dict.fromkeys(
+                [replace_label(alias) for alias in profile.get("aliases") or []]
+                + ([old_name] if old_name and old_name != new_name else [])
+            ))
+            existing = profile_by_name.get(_character_key(new_name))
+            if existing:
+                existing["aliases"] = list(dict.fromkeys(existing.get("aliases", []) + profile["aliases"]))
+                for field in ("appearance", "clothing", "firstAppearance"):
+                    if not existing.get(field) and profile.get(field):
+                        existing[field] = profile[field]
+            else:
+                profile_by_name[_character_key(new_name)] = profile
+                merged_profiles.append(profile)
+        script["characterProfiles"] = merged_profiles
+        for scene in script.get("scenes") or []:
+            if not isinstance(scene, dict):
+                continue
+            scene["characters"] = list(dict.fromkeys(replace_label(value) for value in scene.get("characters") or []))
+            for block in scene.get("blocks") or []:
+                if not isinstance(block, dict):
+                    continue
+                for key in ("speaker", "visibleSpeaker"):
+                    if key in block:
+                        block[key] = replace_label(block.get(key))
+                for key in ("text", "rawText", "finalText", "sourceText"):
+                    if key in block and isinstance(block.get(key), str):
+                        block[key] = replace_text(block[key])
+        total_changes += len(mapping)
+    return total_changes
 
 def script_to_markdown(task: dict[str, Any]) -> str:
     script = task.get("result") or {}

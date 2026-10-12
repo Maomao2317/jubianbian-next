@@ -11,7 +11,7 @@ from .config import REQUEST_ID
 from .errors import ArkError
 from .logging_setup import logger
 from .media import default_batch_title, episode_from_filename, is_default_batch_title, title_with_episode
-from .script import normalize_script
+from .script import apply_batch_character_continuity, normalize_script
 
 # Read adapters keep the API shape independent from SQLite column names.
 def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, Any]:
@@ -95,6 +95,52 @@ def update_task(task_id: str, **values: Any) -> None:
             f"UPDATE tasks SET {assignments} WHERE id = ?",
             (*values.values(), task_id),
         )
+
+
+def reconcile_batch_character_continuity(batch_id: str | None) -> int:
+    """Persist one stable cast naming table across completed batch episodes.
+
+    Recognition runs independently per episode and may finish out of order.
+    Reconcile every completed result in batch order whenever one task finishes;
+    a later episode can therefore be corrected again once episode one arrives.
+    Only result JSON is changed here—the source evidence and QA records remain
+    untouched for auditability.
+    """
+    if not batch_id:
+        return 0
+    with db() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, result_json
+            FROM tasks
+            WHERE batch_id = ? AND status IN ('done', 'review') AND result_json IS NOT NULL
+            ORDER BY COALESCE(batch_index, 2147483647), created_at ASC, id ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        scripts: list[dict[str, Any]] = []
+        usable_rows: list[sqlite3.Row] = []
+        for row in rows:
+            try:
+                value = json.loads(row["result_json"] or "")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            usable_rows.append(row)
+            scripts.append(value)
+        if len(scripts) < 2:
+            return 0
+        changed = apply_batch_character_continuity(scripts)
+        if not changed:
+            return 0
+        timestamp = now_iso()
+        for row, script in zip(usable_rows, scripts):
+            connection.execute(
+                "UPDATE tasks SET result_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(script, ensure_ascii=False), timestamp, row["id"]),
+            )
+        return changed
 
 
 def record_task_event(
