@@ -297,19 +297,27 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 {"name": "苏婉晴（小青）", "aliases": ["小青"]},
                 {"name": "萧华音（皇后）", "aliases": ["皇后"]},
             ],
-            "scenes": [{"heading": "1-1 日 内 宫殿", "blocks": [
+            "scenes": [{"heading": "1-1 日 内 宫殿", "characters": ["小青", "皇后"], "blocks": [
                 {"type": "action", "text": "苏婉晴（小青）看向皇后，小青点头。"},
                 {"type": "dialogue", "speaker": "小青", "text": "皇后，皇后！",
                  "performance": "惊讶", "emotionType": "惊讶", "emotionEvidence": "睁大眼睛"},
+                {"type": "dialogue", "speaker": "皇后", "text": "我在这里。"},
             ]}],
         }
         for _ in range(5):
             script = normalize_script(script, "第1集")
-            action, dialogue = script["scenes"][0]["blocks"]
+            action, dialogue = script["scenes"][0]["blocks"][:2]
             self.assertEqual(action["text"], "苏婉晴(小青)看向萧华音(皇后)，苏婉晴(小青)点头。")
             self.assertEqual(dialogue["speaker"], "苏婉晴（小青）")
             self.assertEqual(dialogue["text"], "皇后，皇后！")
             self.assertEqual(dialogue["performance"], "惊讶")
+
+        script["scenes"][0]["blocks"][0]["text"] = (
+            "苏婉晴（苏婉晴（苏婉晴（小青）））看向萧华音(萧华音(皇后))。"
+        )
+        repaired = normalize_script(script, "第1集")
+        self.assertEqual(repaired["scenes"][0]["blocks"][0]["text"],
+                         "苏婉晴(小青)看向萧华音(皇后)。")
 
     def test_verbatim_dialogue_wins_over_polished_text(self):
         script = normalize_script(

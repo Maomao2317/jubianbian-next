@@ -1282,6 +1282,26 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         visible_labels = dict(alias_map)
         for label, canonical in alias_map.items():
             visible_labels.setdefault(unicodedata.normalize("NFKC", label).casefold(), canonical)
+        # Repair expansion left in older stored results as well. Derive the
+        # exact malformed wrapper from a known alias/profile pair, touching
+        # action prose only and leaving spoken repetitions unchanged.
+        for label, canonical in visible_labels.items():
+            canonical_text = unicodedata.normalize("NFKC", canonical)
+            canonical_key = canonical_text.casefold()
+            if len(label) < 2 or label == canonical_key or canonical_key.count(label) != 1:
+                continue
+            position = canonical_key.index(label)
+            prefix, suffix = canonical_text[:position], canonical_text[position + len(label):]
+            if not prefix and not suffix:
+                continue
+            expanded = re.compile(
+                re.escape(prefix) + re.escape(canonical_text) + re.escape(suffix), re.IGNORECASE,
+            )
+            for _ in range(16):
+                repaired = expanded.sub(lambda _: canonical_text, unicodedata.normalize("NFKC", value))
+                if repaired == value:
+                    break
+                value = repaired
         labels = sorted((label for label in visible_labels if len(label) >= 2), key=len, reverse=True)
         if not labels:
             return value
