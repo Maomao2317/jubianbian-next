@@ -24,7 +24,11 @@ docker compose --env-file fangzhou.env up -d --build
 
 服务仍然通过 http://127.0.0.1:8000/ 访问。上传文件和 SQLite 数据保存在 Docker volume `jbb-data`，容器重建不会丢失。生产环境建议在前面接 Nginx/Caddy 提供 HTTPS，并限制上传接口的访问范围。
 
-当前处理器已完成完整任务生命周期和结构化剧本导出。配置根目录 `fangzhou.env` 中的 `ARK_API_KEY` 后，会将视频上传到方舟 Files API，再调用 Responses API 生成结构化剧本；方舟限流或暂时不可用时，默认自动尝试 OpenAI，仍不可用则生成可导出的本地兜底剧本，保证测试闭环不被额度问题卡住。前端契约保持不变。
+配置根目录 `fangzhou.env` 中的 `ARK_API_KEY` 后，通过方舟 Responses API 生成结构化剧本。对象存储中的视频默认使用单对象临时 GET 签名直读，省去再次转码和上传；ASR/OCR 仍使用原视频核对台词和字幕。无法读取视频 URL 时回退到 Files API，初次生成和自动复核复用同一份上传。签名不会改变存储桶权限，也不会写入任务错误日志。
+
+`ARK_VIDEO_SOURCE_MODE=auto` 启用对象存储直读，设为 `files` 可切回原上传方式。`ARK_MAX_OUTPUT_TOKENS=32768` 为长剧本和复核设置显式输出上限（不是目标长度）；输出省去空字段和重复台词副本，仍保留完整对白、字幕、动作、人物与情绪证据。两项配置在正式和测试 Compose 中保持一致。
+
+方舟不可用时，只有显式启用备用策略且配置了 OpenAI 才尝试备用识别；备用识别也失败时，任务会报告失败，不会生成未经证实的兜底剧本。
 
 ## 腾讯云邮箱验证码
 

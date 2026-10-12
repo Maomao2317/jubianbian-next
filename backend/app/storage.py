@@ -80,6 +80,17 @@ def presigned_put(uri: str, content_type: str = "video/mp4") -> dict[str, Any]:
     return {"url": url, "method": "PUT", "headers": {"Content-Type": content_type}, "mode": "object"}
 
 
+def presigned_get(uri: str | Path) -> str:
+    """Grant temporary read access to one video without making it public."""
+    bucket, key = _object_parts(uri)
+    return str(_client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=max(3600, OBJECT_STORAGE_PRESIGN_SECONDS),
+        HttpMethod="GET",
+    ))
+
+
 def media_info(uri: str | Path) -> dict[str, Any] | None:
     if is_object_uri(uri):
         try:

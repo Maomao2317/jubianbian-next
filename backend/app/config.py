@@ -72,6 +72,11 @@ ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-0-lite-260428").stri
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
 ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() or "complexity"
 ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "1.0"))))
+ARK_VIDEO_SOURCE_MODE = os.getenv("ARK_VIDEO_SOURCE_MODE", "auto").strip().lower()
+# Long scripts need an explicit allowance; the provider's default can cut a
+# full-video review off after minutes of generation. This is a ceiling, not
+# a target: the prompt omits repeated text and unused metadata.
+ARK_MAX_OUTPUT_TOKENS = max(4096, min(32768, int(os.getenv("ARK_MAX_OUTPUT_TOKENS", "32768"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 # The Ark Files endpoint is reached from the app container.  On the staging

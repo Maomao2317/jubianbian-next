@@ -37,7 +37,7 @@ from .script import (
     restore_short_transcript_segments,
     script_quality,
 )
-from .storage import cleanup_materialized, materialize_media
+from .storage import cleanup_materialized, is_object_uri, materialize_media
 from .task_store import mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
 
 
@@ -185,11 +185,38 @@ def _automated_review_context(
             "tag": issue.get("tag"),
             "severity": issue.get("severity"),
         })
+    # Normalized results contain several copies of each line and display-only
+    # defaults. Keep the verbatim line and fidelity metadata once so review
+    # spends its context on the video/issues rather than repeated JSON.
+    block_keys = {
+        "type", "text", "speaker", "visibleSpeaker", "mouthMoving", "speakerEvidence",
+        "voKind", "confidence", "uncertain", "inferred", "startSec", "endSec",
+        "object", "result", "performance", "emotionType", "emotionEvidence",
+        "emotionIntensity", "emotionTrigger", "emotionChange", "emotionTarget",
+        "speechTone", "category", "source", "importance", "screenType", "transitionType",
+    }
+    draft = {
+        "title": script.get("title"),
+        "characters": script.get("characters") or [],
+        "characterProfiles": script.get("characterProfiles") or [],
+        "scenes": [],
+    }
+    for scene in script.get("scenes") or []:
+        compact_scene = {key: scene[key] for key in (
+            "heading", "location", "timeOfDay", "interiorExterior", "segmentType", "characters",
+        ) if key in scene}
+        compact_scene["blocks"] = []
+        for block in scene.get("blocks") or []:
+            compact_block = {key: value for key, value in block.items() if key in block_keys and value not in (None, "")}
+            if block.get("type") in {"dialogue", "vo"}:
+                compact_block["text"] = block.get("sourceText") or block.get("rawText") or block.get("text") or ""
+            compact_scene["blocks"].append(compact_block)
+        draft["scenes"].append(compact_scene)
     return {
         "scope": "full_video_with_issue_ranges",
         "issues": blocking[:40],
         "ranges": ranges[:40],
-        "draft": script,
+        "draft": draft,
     }
 
 
@@ -277,7 +304,10 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         # resulting file_id is reused by a possible Turbo review.
         evidence_task = asyncio.create_task(asyncio.to_thread(collect_evidence, path, row["title"], duration))
         prepare_task = (
-            asyncio.create_task(asyncio.to_thread(ark_prepare_video, path, duration))
+            asyncio.create_task(asyncio.to_thread(
+                ark_prepare_video, path, duration,
+                **({"source_uri": row["stored_path"]} if is_object_uri(row["stored_path"]) else {}),
+            ))
             if ARK_API_KEYS
             else None
         )
