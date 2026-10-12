@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 import unittest
 from pathlib import Path
@@ -22,6 +23,26 @@ class FakeRequest:
 
 
 class ParallelUploadFlowTests(unittest.TestCase):
+    def test_repeated_admin_approval_is_idempotent(self):
+        approved_row = {
+            "id": "review-1",
+            "status": "done",
+            "quality_json": json.dumps(
+                {
+                    "deliveryStatus": "approved",
+                    "approvedAt": "2026-10-12T01:02:03+00:00",
+                }
+            ),
+        }
+        with (
+            patch.object(routes, "_require_admin", return_value={"id": "admin-1", "role": "admin"}),
+            patch.object(routes, "task_row", return_value=approved_row),
+        ):
+            result = asyncio.run(routes.admin_approve_task(FakeRequest(), "review-1"))
+
+        self.assertEqual(result["status"], "done")
+        self.assertTrue(result["alreadyApproved"])
+
     def test_running_filter_includes_quality_gate_tasks_for_owner(self):
         database = "file:jbb-running-filter?mode=memory&cache=shared"
 

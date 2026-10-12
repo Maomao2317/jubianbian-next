@@ -694,17 +694,33 @@ async def admin_approve_task(request: Request, task_id: str) -> dict[str, Any]:
     row = task_row(task_id)
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在")
+    # Approval requests can be repeated when a browser retries a slow POST or
+    # when an administrator double-clicks.  Treat an already-approved row as
+    # success so the UI cannot turn a successful first click into a confusing
+    # conflict message on the second request.
+    existing_quality: dict[str, Any] = {}
+    if row["quality_json"]:
+        try:
+            parsed_quality = json.loads(row["quality_json"])
+            if isinstance(parsed_quality, dict):
+                existing_quality = parsed_quality
+        except (TypeError, ValueError):
+            pass
+    if (
+        row["status"] == "done"
+        and existing_quality.get("deliveryStatus") == "approved"
+        and existing_quality.get("approvedAt")
+    ):
+        return {
+            "id": task_id,
+            "status": "done",
+            "alreadyApproved": True,
+            "message": "管理员复核已通过",
+        }
     if row["status"] != "review":
         raise HTTPException(status_code=409, detail="只有管理员复核中的任务可以确认通过")
     approved_at = now_iso()
-    quality = {}
-    if row["quality_json"]:
-        try:
-            quality = json.loads(row["quality_json"])
-        except (TypeError, ValueError):
-            quality = {}
-    if not isinstance(quality, dict):
-        quality = {}
+    quality = existing_quality
     quality["deliveryStatus"] = "approved"
     quality["approvedAt"] = approved_at
     with db() as connection:
