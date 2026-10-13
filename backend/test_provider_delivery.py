@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 import sqlite3
 import unittest
@@ -120,6 +121,85 @@ class ProviderDeliveryTests(unittest.TestCase):
             with self.assertRaises(ArkError):
                 providers.ark_recognize(Path("source.mp4"), "第2集", 131,
                     prepared_video={"api_key": "key", "video_url": "https://cos.test/video"})
+        upload.assert_not_called()
+
+    def test_temporary_url_timeout_refreshes_link_and_review_reuses_it_without_upload(self):
+        callback = Mock()
+        prepared = {"api_key": "key", "video_url": "https://cos.test/old?signature=private",
+                    "_video_uri": "s3://bucket/video", "_progress_callback": callback}
+        requests = []
+
+        def model(payload, key):
+            requests.append(deepcopy(payload))
+            if len(requests) == 1:
+                raise ArkError("Timeout while processing video_url", status_code=400, provider_code="InvalidParameter")
+            return self.completed()
+
+        with (
+            patch.object(providers, "ARK_VIDEO_URL_ATTEMPTS", 2),
+            patch.object(providers, "presigned_get", side_effect=["https://cos.test/first", "https://cos.test/retry", "https://cos.test/review"]),
+            patch.object(providers, "ark_stream_response", side_effect=model),
+            patch.object(providers, "ark_prepare_video") as upload,
+            patch.object(providers.time, "sleep") as delay,
+        ):
+            script, _ = providers.ark_recognize(Path("source.mp4"), "第2集", 60, prepared_video=prepared)
+            providers.ark_recognize(Path("source.mp4"), "第2集", 60, prepared_video=prepared,
+                                    review_context={"issues": []})
+        upload.assert_not_called()
+        delay.assert_called_once_with(1.0)
+        self.assertEqual([r["input"][0]["content"][0]["video_url"] for r in requests],
+                         ["https://cos.test/first", "https://cos.test/retry", "https://cos.test/review"])
+        self.assertEqual(requests[0]["input"][0]["content"][1], requests[1]["input"][0]["content"][1])
+        self.assertEqual(requests[1]["input"][0]["content"][0]["fps"], 2)
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "今天，我决定，我要留下。")
+        callback.assert_any_call("video_read_retry", None)
+        callback.assert_any_call("vision", None)
+
+    def test_persistent_url_timeouts_use_bounded_retry_then_one_files_upload(self):
+        prepared = {"api_key": "key", "video_url": "https://cos.test/video"}
+        timeout = ArkError("Timeout while processing video_url", status_code=400, provider_code="InvalidParameter")
+        with (
+            patch.object(providers, "ARK_VIDEO_URL_ATTEMPTS", 2),
+            patch.object(providers, "ark_stream_response", side_effect=[timeout, timeout, self.completed(), self.completed()]) as model,
+            patch.object(providers, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}) as upload,
+            patch.object(providers.time, "sleep"),
+        ):
+            providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared)
+            providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared, review_context={"issues": []})
+        self.assertEqual(model.call_count, 4)
+        upload.assert_called_once_with(Path("source.mp4"), 131, force_files=True)
+        self.assertEqual(prepared, {"api_key": "key", "file_id": "file"})
+
+    def test_permission_and_format_errors_skip_url_retries(self):
+        for error in (ArkError("video_url forbidden", status_code=403),
+                      ArkError("unsupported media format in video_url", status_code=400)):
+            with (
+                self.subTest(error=error),
+                patch.object(providers, "ark_stream_response", side_effect=[error, self.completed()]) as model,
+                patch.object(providers, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}) as upload,
+                patch.object(providers.time, "sleep") as delay,
+            ):
+                providers.ark_recognize(Path("source.mp4"), "第2集", 131,
+                                        prepared_video={"api_key": "key", "video_url": "https://cos.test/video"})
+            self.assertEqual(model.call_count, 2)
+            upload.assert_called_once()
+            delay.assert_not_called()
+
+    def test_signer_failure_keeps_existing_link_and_never_logs_signature(self):
+        url = "https://cos.test/video?signature=private-secret"
+        prepared = {"api_key": "key", "video_url": url, "_video_uri": "s3://bucket/video"}
+        timeout = ArkError("Timeout while processing video_url", status_code=400, provider_code="InvalidParameter")
+        with (
+            patch.object(providers, "presigned_get", side_effect=OSError(url)),
+            patch.object(providers, "ark_stream_response", side_effect=[timeout, self.completed()]) as model,
+            patch.object(providers, "ark_prepare_video") as upload,
+            patch.object(providers, "logger") as log,
+            patch.object(providers.time, "sleep"),
+        ):
+            providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared)
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(model.call_args.args[0]["input"][0]["content"][0]["video_url"], url)
+        self.assertNotIn("private-secret", str(log.mock_calls))
         upload.assert_not_called()
 
     def test_upload_does_not_acquire_model_capacity(self):

@@ -39,4 +39,9 @@ for (const [stage, label] of [["video_upload_retry", "识别视频上传重试�
   assert.ok(ui.pipeline(waiting).includes(label));
   assert.ok(ui.pipeline(waiting).includes("原片已保留"));
 }
+const reading = { ...task, stage: "video_read_retry", progressPercent: 62, stageProgressPercent: null };
+assert.ok(ui.statusBadge(reading).includes("正在重新读取识别视频"));
+assert.ok(ui.pipeline(reading).includes("正在重新读取识别视频"));
+assert.match(ui.pipeline(reading), /pipeline-step active/);
+assert.doesNotMatch(ui.pipeline(reading), /压缩 0%|上传重试/);
 console.log("Compression progress UI checks passed");

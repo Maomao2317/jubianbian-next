@@ -49,6 +49,7 @@ from .config import (
     ARK_MAX_IN_FLIGHT,
     ARK_VIDEO_FPS,
     ARK_VIDEO_SOURCE_MODE,
+    ARK_VIDEO_URL_ATTEMPTS,
     ARK_VIDEO_SAFE_BYTES,
     DATA_DIR,
     OPENAI_API_KEY,
@@ -848,6 +849,46 @@ def _is_video_url_error(error: ArkError) -> bool:
     ) and not any(marker in message for marker in ("modelnotopen", "model_not_open", "not active"))
 
 
+def _ark_response_with_url_retry(payload: dict[str, Any], api_key: str, prepared: dict[str, Any]) -> Any:
+    """Retry temporary URL ingestion failures before the slower Files route.
+
+    Ark can reject an accessible video with HTTP 400 / InvalidParameter when
+    its URL reader times out. This happens before a response is created, so
+    retrying does not duplicate a stored generation. Other provider errors
+    retain their existing recovery policy.
+    """
+    video_input = payload["input"][0]["content"][0]
+    for attempt in range(1, ARK_VIDEO_URL_ATTEMPTS + 1):
+        try:
+            response = ark_stream_response(payload, api_key)
+            if attempt > 1:
+                _report_media_progress(prepared.get("_progress_callback"), "vision", None)
+            return response
+        except ArkError as exc:
+            message = str(exc).casefold()
+            temporary = _is_video_url_error(exc) and any(
+                marker in message for marker in ("timeout", "timed out", "temporarily", "超时")
+            )
+            if not video_input.get("video_url") or not temporary or attempt >= ARK_VIDEO_URL_ATTEMPTS:
+                raise
+            uri = prepared.get("_video_uri")
+            if uri:
+                try:
+                    refreshed = presigned_get(uri)
+                    prepared["video_url"] = refreshed
+                    video_input["video_url"] = refreshed
+                except Exception:
+                    # The existing scoped link is still usable; do not expose
+                    # a signer/storage exception or discard it unnecessarily.
+                    logger.warning("provider_step provider=ark operation=object_url_refresh_unavailable")
+            logger.warning(
+                "provider_step provider=ark operation=object_url_retry attempt=%s max_attempts=%s status_code=%s code=%s",
+                attempt, ARK_VIDEO_URL_ATTEMPTS, exc.status_code, exc.provider_code,
+            )
+            _report_media_progress(prepared.get("_progress_callback"), "video_read_retry", None)
+            time.sleep(min(2.0, float(attempt)))
+
+
 def ark_script_format() -> dict[str, Any]:
     """Constrain structure without dropping optional fidelity/emotion fields."""
     return {"type": "json_schema", "name": "screenplay", "strict": False, "schema": {
@@ -1045,7 +1086,7 @@ def ark_recognize(
     for attempt in range(1, ARK_RESPONSE_CREATE_ATTEMPTS + 1):
         try:
             try:
-                payload = ark_stream_response(response_payload, api_key)
+                payload = _ark_response_with_url_retry(response_payload, api_key, prepared)
             except ArkError as exc:
                 if not video_url or not _is_video_url_error(exc):
                     raise

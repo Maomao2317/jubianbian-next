@@ -355,6 +355,7 @@ def _media_progress_callback(task_id: str):
         "compressing": (16, "正在服务器压缩视频"),
         "video_upload": (32, "正在提交识别视频"),
         "video_upload_retry": (32, "识别视频上传重试中"),
+        "video_read_retry": (62, "正在重新读取识别视频"),
         "video_preparing": (36, "正在准备识别视频"),
         "evidence_wait": (40, "正在等待语音和字幕采集完成"),
         "vision": (62, "正在识别画面、人物与对白"),

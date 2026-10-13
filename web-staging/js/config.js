@@ -59,6 +59,7 @@ window.APP_CONFIG = {
     compressing: "服务器压缩中",
     video_upload: "提交识别视频",
     video_upload_retry: "识别视频上传重试中",
+    video_read_retry: "正在重新读取识别视频",
     video_preparing: "准备识别视频",
     evidence_wait: "采集语音和字幕中",
     transcribing: "提取台词",
