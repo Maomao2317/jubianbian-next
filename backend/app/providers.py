@@ -962,6 +962,27 @@ def ark_review_windows(ranges: list[dict[str, Any]]) -> list[tuple[float, float]
     return windows
 
 
+def _ark_review_anchor_hint(correction: dict[str, Any], script: dict[str, Any]) -> str:
+    """Suggest a nearby original anchor without moving or accepting a patch."""
+    scene_index = correction["sceneIndex"]
+    start, end = correction["block"]["startSec"], correction["block"]["endSec"]
+    candidates = []
+    for block_index, block in enumerate(script["scenes"][scene_index]["blocks"]):
+        left, right = block.get("startSec"), block.get("endSec")
+        if type(left) not in {int, float} or type(right) not in {int, float} or not 0 <= left <= right:
+            continue
+        for operation, distance, valid in (
+            ("insert_before", abs(end - left), start <= left + 0.5),
+            ("insert_after", abs(start - right), end >= right - 0.5),
+        ):
+            if valid and distance <= 2.0:
+                candidates.append((distance, abs(block_index - correction["blockIndex"]), block_index, operation))
+    if not candidates:
+        return ""
+    _, _, block_index, operation = min(candidates)
+    return f"; suggested original anchor sceneIndex={scene_index} blockIndex={block_index} operation={operation}"
+
+
 def _validate_ark_review_correction(
     correction: dict[str, Any], script: dict[str, Any],
     windows: list[tuple[float, float]], duration_sec: float,
@@ -1048,6 +1069,8 @@ def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float
                 entry.setdefault(operation, []).append(block)
             except (KeyError, IndexError, TypeError, ValueError, ArkError) as exc:
                 reason = str(exc) if str(exc) in reasons else "invalid correction structure"
+                if reason in {"insertion after target", "insertion before target"}:
+                    reason += _ark_review_anchor_hint(correction, script)
                 errors.append(f"corrections[{index}]: {reason}")
         if errors:
             # Fixed reason codes only: model text, keys and private URLs must
