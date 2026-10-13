@@ -401,9 +401,11 @@ class ProviderDeliveryTests(unittest.TestCase):
             script, _ = providers.ark_recognize(Path("source.mp4"), "第2集", 10, review_context=context,
                                               prepared_video={"api_key": "key", "video_url": "https://cos.test/video"})
         upload.assert_not_called()
-        self.assertEqual(requests[1]["input"][1]["role"], "assistant")
-        self.assertEqual(requests[1]["input"][1]["content"][0]["text"], invalid["output_text"])
-        self.assertIn("corrections[0]: replacement outside target block", requests[1]["input"][2]["content"][0]["text"])
+        self.assertEqual(len(requests[1]["input"]), 1)
+        self.assertEqual(requests[1]["input"][0]["role"], "user")
+        feedback = requests[1]["input"][0]["content"][1]["text"]
+        self.assertIn(invalid["output_text"], feedback)
+        self.assertIn("corrections[0]: replacement outside target block", feedback)
         required = requests[0]["text"]["format"]["schema"]["properties"]["corrections"]["items"]["properties"]["block"]["required"]
         self.assertTrue({"startSec", "endSec"} <= set(required))
         self.assertEqual(script["scenes"][0]["blocks"][0]["text"], block["text"])
