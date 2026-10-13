@@ -333,6 +333,95 @@ class ProviderDeliveryTests(unittest.TestCase):
         reviewed = providers._apply_ark_review({"output_text": json.dumps({"corrections": corrections})}, context, 10)
         self.assertEqual([b["text"] for b in reviewed["scenes"][0]["blocks"]], ["今天", "决定", "我", "留下"])
 
+    def test_review_allows_full_sentence_across_adjacent_asr_ranges_but_not_a_gap(self):
+        context = {"ranges": [{"startSec": 137.37, "endSec": 138.13},
+                              {"startSec": 138.13, "endSec": 139.73}],
+                   "draft": {"scenes": [{"blocks": [
+                       {"type": "dialogue", "speaker": "甲", "text": "张主任。", "startSec": 138, "endSec": 139.5},
+                   ]}]}}
+        correction = {"sceneIndex": 0, "blockIndex": 0, "operation": "insert_before", "block": {
+            "type": "dialogue", "speaker": "乙", "text": "还聊啥，要不换个地方。",
+            "startSec": 137.37, "endSec": 139.73,
+        }}
+        payload = {"output_text": json.dumps({"corrections": [correction]})}
+        result = providers._apply_ark_review(payload, context, 200)
+        self.assertEqual(result["scenes"][0]["blocks"][0]["text"], correction["block"]["text"])
+        separated = {**context, "ranges": [{"startSec": 137, "endSec": 138}, {"startSec": 140, "endSec": 141}]}
+        with self.assertRaises(ArkError):
+            providers._apply_ark_review(payload, separated, 200)
+
+    def test_review_can_repair_a_word_inside_original_sentence_without_touching_neighbors(self):
+        first = {"type": "dialogue", "speaker": "甲", "text": "我决定。", "performance": "坚定",
+                 "startSec": 118, "endSec": 125.5}
+        other = {"type": "dialogue", "speaker": "乙", "text": "好。", "startSec": 126, "endSec": 127}
+        context = {"ranges": [{"startSec": 122.87, "endSec": 124.11}],
+                   "draft": {"scenes": [{"blocks": [first, other]}]}}
+        corrected = {**first, "text": "今天，我决定。"}
+        correction = {"sceneIndex": 0, "blockIndex": 0, "operation": "replace", "block": corrected}
+        result = providers._apply_ark_review({"output_text": json.dumps({"corrections": [correction]})}, context, 200)
+        self.assertEqual(result["scenes"][0]["blocks"], [corrected, other])
+        self.assertEqual(context["draft"]["scenes"][0]["blocks"], [first, other])
+        for invalid in ({**correction, "blockIndex": 1},
+                        {**correction, "block": {**corrected, "endSec": 128}},
+                        {**correction, "operation": "insert_after"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ArkError):
+                providers._apply_ark_review({"output_text": json.dumps({"corrections": [invalid]})}, context, 200)
+
+    def test_review_reports_all_invalid_patches_atomically_without_model_text_in_errors(self):
+        context = {"ranges": [{"startSec": 1, "endSec": 3}],
+                   "draft": {"scenes": [{"blocks": [{"type": "dialogue", "speaker": "甲", "text": "我。",
+                                                     "startSec": 1, "endSec": 3}]}]}}
+        correction = {"sceneIndex": 0, "blockIndex": 0, "operation": "replace", "block": {
+            "type": "dialogue", "speaker": "甲", "text": "private-signature-secret", "startSec": 1, "endSec": 3,
+        }}
+        corrections = [correction, correction, {**correction, "block": {**correction["block"], "visibleSpeaker": True}}]
+        with self.assertRaises(ArkError) as caught:
+            providers._apply_ark_review({"output_text": json.dumps({"corrections": corrections})}, context, 10)
+        self.assertIn("corrections[1]: duplicate replacement", str(caught.exception))
+        self.assertIn("corrections[2]: invalid visible speaker", str(caught.exception))
+        self.assertNotIn("private-signature-secret", str(caught.exception))
+        self.assertEqual(context["draft"]["scenes"][0]["blocks"][0]["text"], "我。")
+
+    def test_review_retry_receives_prior_patches_and_precise_error_without_reupload(self):
+        block = {"type": "dialogue", "speaker": "甲", "text": "今天，我决定。", "startSec": 1, "endSec": 3}
+        context = {"scope": "issue_patches", "ranges": [{"startSec": 1, "endSec": 3}],
+                   "draft": {"scenes": [{"blocks": [block]}]}}
+        repair = {"sceneIndex": 0, "blockIndex": 0, "operation": "replace", "block": block}
+        invalid = {"output_text": json.dumps({"corrections": [{**repair, "block": {**block, "startSec": 8, "endSec": 9}}]})}
+        valid = {"output_text": json.dumps({"corrections": [repair]})}
+        requests = []
+
+        def create(payload, key):
+            requests.append(deepcopy(payload))
+            return invalid if len(requests) == 1 else valid
+
+        with (patch.object(providers, "ark_stream_response", side_effect=create),
+              patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+              patch.object(providers.time, "sleep"), patch.object(providers, "ark_prepare_video") as upload):
+            script, _ = providers.ark_recognize(Path("source.mp4"), "第2集", 10, review_context=context,
+                                              prepared_video={"api_key": "key", "video_url": "https://cos.test/video"})
+        upload.assert_not_called()
+        self.assertEqual(requests[1]["input"][1]["role"], "assistant")
+        self.assertEqual(requests[1]["input"][1]["content"][0]["text"], invalid["output_text"])
+        self.assertIn("corrections[0]: replacement outside target block", requests[1]["input"][2]["content"][0]["text"])
+        required = requests[0]["text"]["format"]["schema"]["properties"]["corrections"]["items"]["properties"]["block"]["required"]
+        self.assertTrue({"startSec", "endSec"} <= set(required))
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], block["text"])
+
+    def test_review_context_provides_original_sentence_and_insertion_anchors(self):
+        script = json.loads(self.completed()["output_text"])
+        script["scenes"][0]["blocks"].append({"type": "dialogue", "speaker": "乙", "text": "好。",
+                                               "startSec": 6, "endSec": 7})
+        context = processing._automated_review_context(script, [{"startSec": 2, "endSec": 2.5}])
+        target = context["ranges"][0]["replacementTargets"][0]
+        self.assertEqual(target, {"sceneIndex": 0, "blockIndex": 0, "startSec": 1, "endSec": 4})
+        for anchor in context["ranges"][0]["insertionAnchors"]:
+            block = script["scenes"][anchor["sceneIndex"]]["blocks"][anchor["blockIndex"]]
+            if anchor["operation"] == "insert_before":
+                self.assertLessEqual(2, block["startSec"] + 0.5)
+            else:
+                self.assertGreaterEqual(2.5, block["endSec"] - 0.5)
+
     def test_patch_retains_source_metadata_and_survives_normalization(self):
         script = providers.normalize_script(json.loads(self.completed()["output_text"]), "第2集")
         original = script["scenes"][0]["blocks"][0]

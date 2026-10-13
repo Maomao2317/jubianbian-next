@@ -684,6 +684,11 @@ def ark_prompt(
             "每个修改包含sceneIndex和blockIndex（直接复制draft中该场次和该段的编号，不要自行计数）、operation（replace、insert_before、insert_after）"
             "及完整block。block包含type、text、startSec、endSec，以及该类型必需的说话人、口型、声音、情绪证据字段。"
             "修正的时间必须属于ranges。对白逐字保留，不可概括，今天、我、决定等短词不可删减或去重。"
+            "相邻ranges的0.5秒容差连续时，可跨段保留完整台词；replace可沿用与问题相交的原block完整起止时间，"
+            "不能延伸到该原block和连续问题范围以外。contextStartSec/contextEndSec仅供回看，不能据此改无关正文。"
+            "ranges中的replacementTargets和insertionAnchors提供原稿编号；替换用replace，补独立漏句才用insert。"
+            "insert_before的新段startSec不得晚于锚点startSec+0.5，insert_after的新段endSec不得早于锚点endSec-0.5；"
+            "所有编号始终指原稿，不受前面插入影响。补词要保留原句，避免插入已有台词的重复副本。"
             "人物规范姓名沿用draft及前集人物表，仅统一出场人物和speaker标签，台词、字幕和动作原文中的称谓不能替换。"
             "先结合范围前后contextStartSec/contextEndSec的声源和说话切换核对；A未说完切到B的反应画面，仍归A，speechContinuity=true。"
             "嘴未动或动画口型不足不能证明OS；只有明确内心声才voKind=os，场内画外对白为offscreen，旁白narration，电话phone，回忆memory，无法区分unknown。"
@@ -925,17 +930,94 @@ def ark_script_format() -> dict[str, Any]:
 
 
 def ark_review_format() -> dict[str, Any]:
+    block_properties = {
+        **ark_script_format()["schema"]["properties"]["scenes"]["items"]["properties"]["blocks"]["items"]["properties"],
+        "startSec": {"type": "number", "minimum": 0},
+        "endSec": {"type": "number", "minimum": 0},
+    }
     return {"type": "json_schema", "name": "screenplay_review", "strict": False, "schema": {
         "type": "object", "properties": {"corrections": {"type": "array", "items": {
             "type": "object", "properties": {
                 "sceneIndex": {"type": "integer", "minimum": 0},
                 "blockIndex": {"type": "integer", "minimum": 0},
                 "operation": {"type": "string", "enum": ["replace", "insert_before", "insert_after"]},
-                "block": {"type": "object", "properties": ark_script_format()["schema"]["properties"]["scenes"]["items"]["properties"]["blocks"]["items"]["properties"],
-                          "required": ["type", "text"], "additionalProperties": True},
+                "block": {"type": "object", "properties": block_properties,
+                          "required": ["type", "text", "startSec", "endSec"], "additionalProperties": True},
             }, "required": ["sceneIndex", "blockIndex", "operation", "block"], "additionalProperties": False,
         }}}, "required": ["corrections"], "additionalProperties": False,
     }}
+
+
+def ark_review_windows(ranges: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """Union existing half-second tolerances without widening separated issues."""
+    windows: list[tuple[float, float]] = []
+    for window in sorted(ranges, key=lambda item: float(item["startSec"])):
+        start, end = float(window["startSec"]) - 0.5, float(window["endSec"]) + 0.5
+        if not math.isfinite(start) or not math.isfinite(end) or start > end:
+            raise ValueError("invalid issue ranges")
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(end, windows[-1][1]))
+        else:
+            windows.append((start, end))
+    return windows
+
+
+def _validate_ark_review_correction(
+    correction: dict[str, Any], script: dict[str, Any],
+    windows: list[tuple[float, float]], duration_sec: float,
+) -> tuple[int, int, str, dict[str, Any]]:
+    scene_index, block_index = correction["sceneIndex"], correction["blockIndex"]
+    if type(scene_index) is not int or type(block_index) is not int or min(scene_index, block_index) < 0:
+        raise ValueError("invalid indices")
+    target = script["scenes"][scene_index]["blocks"][block_index]
+    operation, block = correction["operation"], correction["block"]
+    if operation not in {"replace", "insert_before", "insert_after"}:
+        raise ValueError("invalid operation")
+    _parse_ark_script({"output_text": json.dumps({"scenes": [{"blocks": [block]}]})})
+    start, end = block["startSec"], block["endSec"]
+    if type(start) not in {int, float} or type(end) not in {int, float} or not 0 <= start <= end <= duration_sec:
+        raise ValueError("invalid time")
+    target_start, target_end = target.get("startSec"), target.get("endSec")
+    timed_target = (
+        type(target_start) in {int, float} and type(target_end) in {int, float}
+        and 0 <= target_start <= target_end <= duration_sec
+    )
+    allowed_windows = windows
+    if operation == "replace" and timed_target:
+        overlapping = [(left, right) for left, right in windows if target_start <= right and target_end >= left]
+        if not overlapping:
+            raise ValueError("target outside issue ranges")
+        if start > target_end + 0.5 or end < target_start - 0.5:
+            raise ValueError("replacement outside target block")
+        # A missing word can sit inside a longer, already timed sentence.
+        # Allow that sentence's original span; never use the viewing context
+        # as authority to rewrite neighboring, unaffected blocks.
+        if target["type"] in {"dialogue", "vo"}:
+            allowed_windows = [(min(left, target_start - 0.5), max(right, target_end + 0.5))
+                               for left, right in overlapping]
+    if not any(start >= left and end <= right for left, right in allowed_windows):
+        raise ValueError("repair outside issue ranges")
+    if operation == "insert_before" and timed_target and start > target_start + 0.5:
+        raise ValueError("insertion after target")
+    if operation == "insert_after" and timed_target and end < target_end - 0.5:
+        raise ValueError("insertion before target")
+    if block["type"] in {"dialogue", "vo"} and not character_label(block.get("speaker")):
+        raise ValueError("missing speaker")
+    if "visibleSpeaker" in block and not isinstance(block["visibleSpeaker"], str):
+        raise ValueError("invalid visible speaker")
+    if block["type"] == "vo" and block.get("voKind") not in {"os", "offscreen", "narration", "memory", "phone", "unknown"}:
+        raise ValueError("missing voice classification")
+    if operation == "replace":
+        replacement = block
+        block = {**target, **replacement}
+        if target["type"] != replacement["type"]:
+            for key in ("voKind", "voiceSource", "visibleSpeaker", "mouthMoving", "speechContinuity"):
+                if key not in replacement:
+                    block.pop(key, None)
+        for key in ("sourceText", "verbatimText", "rawText", "finalText"):
+            if key in block:
+                block[key] = block["text"]
+    return scene_index, block_index, operation, block
 
 
 def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float) -> dict[str, Any]:
@@ -946,59 +1028,31 @@ def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float
         if not isinstance(corrections, list):
             raise ValueError("corrections must be an array")
         script = deepcopy(context.get("_sourceScript") or context["draft"])
-        ranges = context["ranges"]
+        windows = ark_review_windows(context["ranges"])
         edits: dict[tuple[int, int], dict[str, list[dict[str, Any]]]] = {}
-        for correction in corrections:
-            scene_index, block_index = correction["sceneIndex"], correction["blockIndex"]
-            if type(scene_index) is not int or type(block_index) is not int or min(scene_index, block_index) < 0:
-                raise ValueError("invalid indices")
-            target = script["scenes"][scene_index]["blocks"][block_index]
-            operation, block = correction["operation"], correction["block"]
-            if operation not in {"replace", "insert_before", "insert_after"}:
-                raise ValueError("invalid operation")
-            # Validate type/text without silently fixing an empty model output.
-            _parse_ark_script({"output_text": json.dumps({"scenes": [{"blocks": [block]}]})})
-            start, end = block["startSec"], block["endSec"]
-            if type(start) not in {int, float} or type(end) not in {int, float} or not 0 <= start <= end <= duration_sec:
-                raise ValueError("invalid time")
-            if not any(
-                start >= float(window["startSec"]) - 0.5 and end <= float(window["endSec"]) + 0.5
-                for window in ranges
-            ):
-                raise ValueError("repair outside issue ranges")
-            target_start, target_end = target.get("startSec"), target.get("endSec")
-            if operation == "replace" and isinstance(target_start, (int, float)) and isinstance(target_end, (int, float)):
-                if not any(target_start <= float(window["endSec"]) + 0.5 and target_end >= float(window["startSec"]) - 0.5 for window in ranges):
-                    raise ValueError("target outside issue ranges")
-                if start > target_end + 0.5 or end < target_start - 0.5:
-                    raise ValueError("replacement outside target block")
-            elif operation == "insert_before" and isinstance(target_start, (int, float)) and start > target_start + 0.5:
-                raise ValueError("insertion after target")
-            elif operation == "insert_after" and isinstance(target_end, (int, float)) and end < target_end - 0.5:
-                raise ValueError("insertion before target")
-            entry = edits.setdefault((scene_index, block_index), {})
-            if operation == "replace" and entry.get(operation):
-                raise ValueError("duplicate replacement")
-            if block["type"] in {"dialogue", "vo"} and not character_label(block.get("speaker")):
-                raise ValueError("missing speaker")
-            if "visibleSpeaker" in block and not isinstance(block["visibleSpeaker"], str):
-                raise ValueError("invalid visible speaker")
-            if block["type"] == "vo" and block.get("voKind") not in {"os", "offscreen", "narration", "memory", "phone", "unknown"}:
-                raise ValueError("missing voice classification")
-            if operation == "replace":
-                # Keep established emotion/visual evidence when a word repair
-                # only supplies the changed fields. Replace the normalized
-                # source copies too so normalization retains the word repair.
-                replacement = block
-                block = {**target, **replacement}
-                if target["type"] != replacement["type"]:
-                    for key in ("voKind", "voiceSource", "visibleSpeaker", "mouthMoving", "speechContinuity"):
-                        if key not in replacement:
-                            block.pop(key, None)
-                for key in ("sourceText", "verbatimText", "rawText", "finalText"):
-                    if key in block:
-                        block[key] = block["text"]
-            entry.setdefault(operation, []).append(block)
+        errors = []
+        reasons = {
+            "invalid indices", "invalid operation", "invalid time", "repair outside issue ranges",
+            "target outside issue ranges", "replacement outside target block", "insertion after target",
+            "insertion before target", "duplicate replacement", "missing speaker",
+            "invalid visible speaker", "missing voice classification",
+        }
+        for index, correction in enumerate(corrections):
+            try:
+                scene_index, block_index, operation, block = _validate_ark_review_correction(
+                    correction, script, windows, duration_sec,
+                )
+                entry = edits.setdefault((scene_index, block_index), {})
+                if operation == "replace" and entry.get(operation):
+                    raise ValueError("duplicate replacement")
+                entry.setdefault(operation, []).append(block)
+            except (KeyError, IndexError, TypeError, ValueError, ArkError) as exc:
+                reason = str(exc) if str(exc) in reasons else "invalid correction structure"
+                errors.append(f"corrections[{index}]: {reason}")
+        if errors:
+            # Fixed reason codes only: model text, keys and private URLs must
+            # never enter logs through validation errors. Reject atomically.
+            raise ArkError("方舟复核修正无效：" + "; ".join(errors[:12]), provider_code="invalid_script_response")
         # Indices always refer to the original draft, regardless of insertions.
         for scene_index, scene in enumerate(script["scenes"]):
             revised = []
@@ -1125,10 +1179,19 @@ def ark_recognize(
             if exc.provider_code == "invalid_script_response":
                 # Regenerate once with the same source. Never turn a truncated
                 # prefix into an apparently successful empty screenplay.
-                response_payload["input"][0]["content"][1]["text"] += (
-                    "\n前次接口输出不完整。请重新生成符合指定JSON结构的完整对象，"
-                    "必须正常结束整个对象，不得省略真实台词或越过问题范围。"
-                )
+                if patch_review:
+                    response_payload["input"].extend([
+                        {"role": "assistant", "content": [{"type": "output_text", "text": ark_response_text(payload)}]},
+                        {"role": "user", "content": [{"type": "input_text", "text":
+                            "前次修正未应用，所有编号仍指原稿。请保留合法修正，修好下列错误后返回完整corrections。"
+                            "越界的插入改用合适锚点，已有句内补词用replace，不得丢失原句或改写无关段。校验原因："
+                            + safe_error_text(exc)}]},
+                    ])
+                else:
+                    response_payload["input"][0]["content"][1]["text"] += (
+                        "\n前次接口输出不完整。请重新生成符合指定JSON结构的完整对象，"
+                        "必须正常结束整个对象，不得省略真实台词或越过问题范围。"
+                    )
             logger.warning(
                 "provider_step provider=ark operation=response_create_retry file=%s attempt=%s error=%s",
                 path.name,

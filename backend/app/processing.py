@@ -246,6 +246,37 @@ def _automated_review_context(
                 compact_block["text"] = block.get("sourceText") or block.get("rawText") or block.get("text") or ""
             compact_scene["blocks"].append(compact_block)
         draft["scenes"].append(compact_scene)
+    # Give the reviewer explicit original indices near each issue, including
+    # the whole sentence eligible for replacement and valid insertion sides.
+    timed_blocks = [
+        (scene_index, block_index, block)
+        for scene_index, scene in enumerate(script.get("scenes") or [])
+        for block_index, block in enumerate(scene.get("blocks") or [])
+        if type(block.get("startSec")) in {int, float} and type(block.get("endSec")) in {int, float}
+        and 0 <= block["startSec"] <= block["endSec"]
+    ]
+    for window in ranges[:40]:
+        left, right = window["startSec"] - 0.5, window["endSec"] + 0.5
+        window["replacementTargets"] = [
+            {"sceneIndex": scene_index, "blockIndex": block_index,
+             "startSec": block["startSec"], "endSec": block["endSec"]}
+            for scene_index, block_index, block in timed_blocks
+            if block.get("type") in {"dialogue", "vo"}
+            and block["startSec"] <= right and block["endSec"] >= left
+        ]
+        anchors = []
+        for operation, key, bound in (
+            ("insert_before", "startSec", window["startSec"] - 0.5),
+            ("insert_after", "endSec", window["endSec"] + 0.5),
+        ):
+            eligible = [item for item in timed_blocks if (
+                item[2][key] >= bound if operation == "insert_before" else item[2][key] <= bound
+            )]
+            if eligible:
+                scene_index, block_index, block = min(eligible, key=lambda item: abs(item[2][key] - bound))
+                anchors.append({"sceneIndex": scene_index, "blockIndex": block_index, "operation": operation,
+                                "startSec": block["startSec"], "endSec": block["endSec"]})
+        window["insertionAnchors"] = anchors
     return {
         "scope": "issue_patches" if ranges else "full_video_with_issue_ranges",
         "issues": blocking[:40],
