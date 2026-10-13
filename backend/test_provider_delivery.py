@@ -410,7 +410,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertTrue({"startSec", "endSec"} <= set(required))
         self.assertEqual(script["scenes"][0]["blocks"][0]["text"], block["text"])
 
-    def test_review_rejects_bad_insertion_with_nearby_original_anchor_hint(self):
+    def test_review_reanchors_only_valid_timed_insertion_inside_same_scene(self):
         blocks = [
             {"type": "dialogue", "speaker": "甲", "text": "你听。", "startSec": 77.5, "endSec": 79},
             {"type": "dialogue", "speaker": "乙", "text": "凭什么。", "startSec": 77.5, "endSec": 80.5},
@@ -420,12 +420,18 @@ class ProviderDeliveryTests(unittest.TestCase):
         correction = {"sceneIndex": 0, "blockIndex": 1, "operation": "insert_after", "block": {
             "type": "dialogue", "speaker": "甲", "text": "我问你。", "startSec": 79.11, "endSec": 79.71,
         }}
-        with self.assertRaises(ArkError) as caught:
-            providers._apply_ark_review({"output_text": json.dumps({"corrections": [correction]})}, context, 200)
-        self.assertIn("suggested original anchor sceneIndex=0 blockIndex=0 operation=insert_after", str(caught.exception))
+        result = providers._apply_ark_review({"output_text": json.dumps({"corrections": [correction]})}, context, 200)
+        self.assertEqual([block["text"] for block in result["scenes"][0]["blocks"]], ["你听。", "我问你。", "凭什么。", "转身。"])
         self.assertEqual(context["draft"]["scenes"][0]["blocks"], blocks)
-        hint = providers._ark_review_anchor_hint({**correction, "block": {**correction["block"], "startSec": 90, "endSec": 91}}, context["draft"])
-        self.assertEqual(hint, "")
+        distant = {**correction, "block": {**correction["block"], "startSec": 70, "endSec": 71}}
+        distant_context = {**context, "ranges": [{"startSec": 70, "endSec": 71}],
+                           "draft": {"scenes": [{"blocks": blocks}, {"blocks": [{**blocks[0], "startSec": 70, "endSec": 71}]}]}}
+        self.assertIsNone(providers._ark_review_insertion_anchor(distant, distant_context["draft"], 200))
+        for bad_correction, bad_context in ((distant, distant_context),
+                                            ({**correction, "block": {**correction["block"], "startSec": 78}}, context),
+                                            ({**correction, "block": {**correction["block"], "visibleSpeaker": True}}, context)):
+            with self.subTest(correction=bad_correction), self.assertRaises(ArkError):
+                providers._apply_ark_review({"output_text": json.dumps({"corrections": [bad_correction]})}, bad_context, 200)
 
     def test_review_context_provides_original_sentence_and_insertion_anchors(self):
         script = json.loads(self.completed()["output_text"])

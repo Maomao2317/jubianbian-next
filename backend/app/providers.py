@@ -962,14 +962,16 @@ def ark_review_windows(ranges: list[dict[str, Any]]) -> list[tuple[float, float]
     return windows
 
 
-def _ark_review_anchor_hint(correction: dict[str, Any], script: dict[str, Any]) -> str:
-    """Suggest a nearby original anchor without moving or accepting a patch."""
+def _ark_review_insertion_anchor(
+    correction: dict[str, Any], script: dict[str, Any], duration_sec: float,
+) -> tuple[int, str] | None:
+    """Find a nearby original anchor in the same scene for a timed insertion."""
     scene_index = correction["sceneIndex"]
     start, end = correction["block"]["startSec"], correction["block"]["endSec"]
     candidates = []
     for block_index, block in enumerate(script["scenes"][scene_index]["blocks"]):
         left, right = block.get("startSec"), block.get("endSec")
-        if type(left) not in {int, float} or type(right) not in {int, float} or not 0 <= left <= right:
+        if type(left) not in {int, float} or type(right) not in {int, float} or not 0 <= left <= right <= duration_sec:
             continue
         for operation, distance, valid in (
             ("insert_before", abs(end - left), start <= left + 0.5),
@@ -978,9 +980,9 @@ def _ark_review_anchor_hint(correction: dict[str, Any], script: dict[str, Any]) 
             if valid and distance <= 2.0:
                 candidates.append((distance, abs(block_index - correction["blockIndex"]), block_index, operation))
     if not candidates:
-        return ""
+        return None
     _, _, block_index, operation = min(candidates)
-    return f"; suggested original anchor sceneIndex={scene_index} blockIndex={block_index} operation={operation}"
+    return block_index, operation
 
 
 def _validate_ark_review_correction(
@@ -1018,10 +1020,22 @@ def _validate_ark_review_correction(
                                for left, right in overlapping]
     if not any(start >= left and end <= right for left, right in allowed_windows):
         raise ValueError("repair outside issue ranges")
-    if operation == "insert_before" and timed_target and start > target_start + 0.5:
-        raise ValueError("insertion after target")
-    if operation == "insert_after" and timed_target and end < target_end - 0.5:
-        raise ValueError("insertion before target")
+    anchor_error = (
+        "insertion after target" if operation == "insert_before" and timed_target and start > target_start + 0.5
+        else "insertion before target" if operation == "insert_after" and timed_target and end < target_end - 0.5
+        else None
+    )
+    if anchor_error:
+        anchor = _ark_review_insertion_anchor(correction, script, duration_sec)
+        if anchor is None:
+            raise ValueError(anchor_error)
+        original_index, original_operation = block_index, operation
+        block_index, operation = anchor
+        logger.info(
+            "provider_step provider=ark operation=review_insertion_anchor_adjusted scene=%s "
+            "from_block=%s from_operation=%s to_block=%s to_operation=%s",
+            scene_index, original_index, original_operation, block_index, operation,
+        )
     if block["type"] in {"dialogue", "vo"} and not character_label(block.get("speaker")):
         raise ValueError("missing speaker")
     if "visibleSpeaker" in block and not isinstance(block["visibleSpeaker"], str):
@@ -1069,8 +1083,6 @@ def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float
                 entry.setdefault(operation, []).append(block)
             except (KeyError, IndexError, TypeError, ValueError, ArkError) as exc:
                 reason = str(exc) if str(exc) in reasons else "invalid correction structure"
-                if reason in {"insertion after target", "insertion before target"}:
-                    reason += _ark_review_anchor_hint(correction, script)
                 errors.append(f"corrections[{index}]: {reason}")
         if errors:
             # Fixed reason codes only: model text, keys and private URLs must
