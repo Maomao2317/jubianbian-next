@@ -559,7 +559,7 @@
 
   function pipeline(task) {
     const compressing = task.stage === "compressing";
-    const preparing = ["compression_queued", "compressing", "video_upload", "video_preparing"].includes(task.stage);
+    const preparing = ["compression_queued", "compressing", "video_upload", "video_upload_retry", "video_preparing", "evidence_wait"].includes(task.stage);
     const steps = preparing ? [cfg.pipeline[0], cfg.pipeline[1], { id: task.stage, label: cfg.stageText[task.stage] }, ...cfg.pipeline.slice(2)] : cfg.pipeline;
     const currentIndex = steps.findIndex((item) => item.id === task.stage);
     const percent = compressing ? compressionPercent(task) : (task.progressPercent || 0);

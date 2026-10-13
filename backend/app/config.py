@@ -94,8 +94,9 @@ ARK_UPLOAD_PROXY_MAX_IN_FLIGHT = max(1, min(4, int(os.getenv("JBB_ARK_PROXY_MAX_
 ARK_UPLOAD_PROXY_THREADS = max(1, min(8, int(os.getenv("ARK_UPLOAD_PROXY_THREADS", "2"))))
 # Uploads can be slow on a small cloud instance, but the upload itself should
 # still have a bounded wait before the task can fail over.
-ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "240")))
-ARK_UPLOAD_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_UPLOAD_ATTEMPTS", "3"))))
+ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "120")))
+ARK_UPLOAD_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_UPLOAD_ATTEMPTS", "2"))))
+ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS", "240")))
 ARK_UPLOAD_MAX_IN_FLIGHT = max(
     1,
     min(ARK_MAX_IN_FLIGHT, int(os.getenv("JBB_ARK_UPLOAD_MAX_IN_FLIGHT", "2"))),

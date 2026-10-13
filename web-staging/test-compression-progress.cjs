@@ -33,4 +33,10 @@ assert.match(ui.taskRow({ ...task, status: "done", stage: "done" }), /已完成/
 assert.doesNotMatch(ui.taskRow({ ...task, status: "failed", stage: "failed" }), /role="progressbar"/);
 assert.notEqual(ui.listDataSignature([task], {}), ui.listDataSignature([{ ...task, stageProgressPercent: 13 }], {}));
 assert.match(ui.statusBadge({ ...task, stageProgressPercent: null }), /0%/);
+for (const [stage, label] of [["video_upload_retry", "识别视频上传重试中"], ["evidence_wait", "采集语音和字幕中"]]) {
+  const waiting = { ...task, stage, stageProgressPercent: null };
+  assert.ok(ui.statusBadge(waiting).includes(label));
+  assert.ok(ui.pipeline(waiting).includes(label));
+  assert.ok(ui.pipeline(waiting).includes("原片已保留"));
+}
 console.log("Compression progress UI checks passed");

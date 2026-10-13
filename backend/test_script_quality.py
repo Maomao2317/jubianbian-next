@@ -844,6 +844,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         }
         row = {"id": "task-1", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30}
         with (
+            patch.object(processing, "recognition_cache", return_value=None),
             patch.object(processing, "ARK_API_KEYS", ("key",)),
             patch.object(processing, "ARK_LITE_MODEL", "lite"),
             patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -894,6 +895,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         # second pass when a real P0 remains; the review is never recursive.
         row = {"id": "task-2", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 210}
         with (
+            patch.object(processing, "recognition_cache", return_value=None),
             patch.object(processing, "ARK_API_KEYS", ("key",)),
             patch.object(processing, "ARK_LITE_MODEL", "lite"),
             patch.object(processing, "ARK_TURBO_MODEL", "turbo"),

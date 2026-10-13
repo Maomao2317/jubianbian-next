@@ -28,6 +28,7 @@ from .errors import ArkError
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
 from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, openai_script, openai_transcribe
+from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import (
     normalize_script,
@@ -353,7 +354,10 @@ def _media_progress_callback(task_id: str):
         "compression_queued": (16, "等待服务器压缩"),
         "compressing": (16, "正在服务器压缩视频"),
         "video_upload": (32, "正在提交识别视频"),
+        "video_upload_retry": (32, "识别视频上传重试中"),
         "video_preparing": (36, "正在准备识别视频"),
+        "evidence_wait": (40, "正在等待语音和字幕采集完成"),
+        "vision": (62, "正在识别画面、人物与对白"),
     }
 
     def progress(stage: str, percent: int | None) -> None:
@@ -379,8 +383,17 @@ def _media_progress_callback(task_id: str):
     return progress
 
 
+def _collect_task_evidence(path: Path, title: str, duration: float, cache: RecognitionCache | None) -> dict[str, Any]:
+    cached = cache.load("evidence") if cache is not None else None
+    evidence = collect_evidence(path, title, duration, **({"cached_evidence": cached} if cached else {}))
+    if cache is not None:
+        cache.save("evidence", evidence)
+    return evidence
+
+
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Collect evidence, then use Ark with an explicit OpenAI fallback."""
+    cache = await asyncio.to_thread(recognition_cache, row["id"], row["stored_path"])
     path, materialized_dir = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"])
     duration = float(row["duration_sec"] or 0)
     try:
@@ -395,13 +408,21 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         # alongside evidence collection hides the network latency, and the
         # resulting file_id is reused by a possible Turbo review.
         mark_task_stage(row["id"], status="running", stage="transcribing", progress_percent=16, message="正在采集语音和字幕证据")
-        evidence_task = asyncio.create_task(asyncio.to_thread(collect_evidence, path, row["title"], duration))
-        prepare_task = (
-            asyncio.create_task(asyncio.to_thread(
+        evidence_task = asyncio.create_task(asyncio.to_thread(_collect_task_evidence, path, row["title"], duration, cache))
+        progress = _media_progress_callback(row["id"])
+
+        async def prepare_media() -> dict[str, Any]:
+            prepared = await asyncio.to_thread(
                 ark_prepare_video, path, duration,
-                progress_callback=_media_progress_callback(row["id"]),
+                progress_callback=progress, cache=cache,
                 **({"source_uri": row["stored_path"]} if is_object_uri(row["stored_path"]) else {}),
-            ))
+            )
+            if not evidence_task.done():
+                progress("evidence_wait", None)
+            return prepared
+
+        prepare_task = (
+            asyncio.create_task(prepare_media())
             if ARK_API_KEYS
             else None
         )
@@ -414,7 +435,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         cast_context = await asyncio.to_thread(batch_character_context, row)
         if cast_context:
             evidence = {**evidence, "batchCharacterContext": cast_context}
-        prepared_video: dict[str, str] | None = None
+        prepared_video: dict[str, Any] | None = None
         prepare_error: ArkError | None = None
         if prepare_task is not None:
             try:
@@ -424,7 +445,6 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             except ArkError as exc:
                 prepare_error = exc
         route = select_ark_route(duration, evidence)
-        mark_task_stage(row["id"], status="running", stage="vision", progress_percent=62, message="正在识别画面、人物与对白")
         return await _run_recognizer_with_media(
             row,
             path,
@@ -444,11 +464,12 @@ async def _run_recognizer_with_media(
     duration: float,
     evidence: dict[str, Any],
     route: dict[str, Any],
-    prepared_video: dict[str, str] | None,
+    prepared_video: dict[str, Any] | None,
     prepare_error: ArkError | None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     ark_error: ArkError | None = prepare_error
     if ARK_API_KEYS and prepared_video is not None:
+        mark_task_stage(row["id"], status="running", stage="vision", progress_percent=62, message="正在识别画面、人物与对白")
         ark_script: dict[str, Any] | None = None
         ark_usage_data: dict[str, Any] | None = None
         try:
@@ -699,6 +720,7 @@ async def process_task(task_id: str) -> None:
             api_cost_rmb=usage.get("api_cost_rmb", 0),
             completed_at=now_iso(),
         )
+        await asyncio.to_thread(discard_local_proxy, task_id)
         if row["batch_id"]:
             try:
                 continuity_changes = reconcile_batch_character_continuity(row["batch_id"])

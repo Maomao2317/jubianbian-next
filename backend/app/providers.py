@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from contextlib import contextmanager
 from copy import deepcopy
 import re
 import shutil
@@ -42,6 +43,7 @@ from .config import (
     ARK_UPLOAD_ATTEMPTS,
     ARK_UPLOAD_MAX_IN_FLIGHT,
     ARK_UPLOAD_TIMEOUT_SECONDS,
+    ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_MAX_IN_FLIGHT,
@@ -59,7 +61,8 @@ from .evidence import evidence_summary
 from .logging_setup import logger, safe_error_text
 from .media import multipart_body, probe_duration
 from .script import character_label, normalize_script
-from .storage import is_object_uri, presigned_get
+from .storage import is_object_uri, media_info, object_storage_enabled, presigned_get, upload_recognition_proxy
+from .recognition_cache import RecognitionCache
 
 # Ark is the preferred video-understanding provider.  OpenAI remains an
 # optional transcription/text fallback when the primary provider is unavailable.
@@ -124,6 +127,22 @@ def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
     )
 
 
+@contextmanager
+def _ark_http_capacity(upload: bool, deadline: float | None):
+    semaphore = _ark_upload_semaphore if upload else _ark_request_semaphore
+    if deadline is None:
+        with semaphore:
+            yield
+        return
+    if not semaphore.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
+                       provider_code="video_upload_retry_exhausted")
+    try:
+        yield
+    finally:
+        semaphore.release()
+
+
 def ark_http(
     method: str,
     path: str,
@@ -133,6 +152,7 @@ def ark_http(
     api_key: str | None = None,
     timeout: float | None = None,
     upload: bool = False,
+    upload_deadline: float | None = None,
 ) -> Any:
     api_key = api_key or ARK_API_KEY
     if not api_key:
@@ -148,8 +168,15 @@ def ark_http(
     )
     try:
         # Slow multipart transfers must not consume model-generation slots.
-        with (_ark_upload_semaphore if upload else _ark_request_semaphore):
-            with urlopen(request, timeout=timeout or ARK_RESPONSE_TIMEOUT_SECONDS) as response:
+        with _ark_http_capacity(upload, upload_deadline):
+            request_timeout = timeout or ARK_RESPONSE_TIMEOUT_SECONDS
+            if upload_deadline is not None:
+                remaining = upload_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
+                                   provider_code="video_upload_retry_exhausted")
+                request_timeout = min(request_timeout, remaining)
+            with urlopen(request, timeout=request_timeout) as response:
                 raw = response.read()
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
@@ -446,20 +473,34 @@ def ark_sampling_fps(duration_sec: float) -> float:
     return ARK_VIDEO_FPS
 
 
-def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0, *, progress_callback: MediaProgress | None = None) -> tuple[str, str]:
+def _delivery_video(path: Path, duration_sec: float, progress_callback: MediaProgress | None,
+                    cache: RecognitionCache | None) -> tuple[Path, Path | None]:
+    cached = cache.proxy() if cache is not None else None
+    if cached is not None:
+        logger.info("provider_step provider=ark operation=proxy_cache_hit file=%s", path.name)
+        return cached, None
+    upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec, **({"progress_callback": progress_callback} if progress_callback else {}))
+    if cache is not None and proxy_dir is not None:
+        upload_path = cache.save_proxy(upload_path)
+    return upload_path, proxy_dir
+
+
+def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0, *, progress_callback: MediaProgress | None = None,
+                     cache: RecognitionCache | None = None) -> tuple[str, str]:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
-    upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec, **({"progress_callback": progress_callback} if progress_callback else {}))
+    upload_path, proxy_dir = _delivery_video(path, duration_sec, progress_callback, cache)
     try:
         _report_media_progress(progress_callback, "video_upload", None)
         with _ark_upload_body_semaphore:
-            return _ark_upload_prepared_video(upload_path, api_key, duration_sec)
+            return _ark_upload_prepared_video(upload_path, api_key, duration_sec, progress_callback=progress_callback)
     finally:
         if proxy_dir is not None:
             shutil.rmtree(proxy_dir, ignore_errors=True)
 
 
-def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_sec: float) -> tuple[str, str]:
+def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_sec: float, *,
+                               progress_callback: MediaProgress | None = None) -> tuple[str, str]:
     """Build/retry one bounded request; caller owns the proxy and memory lane."""
     try:
         # Defence in depth: never allocate a huge multipart request or send an
@@ -481,11 +522,18 @@ def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_
     body, boundary = multipart_body(fields, "file", upload_path.name, video_bytes, "video/mp4")
     del video_bytes
     selected_key = api_key or ark_account_key()
+    deadline = time.monotonic() + ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS
     for attempt in range(1, ARK_UPLOAD_ATTEMPTS + 1):
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
+                               provider_code="video_upload_retry_exhausted")
+            _report_media_progress(progress_callback, "video_upload" if attempt == 1 else "video_upload_retry", None)
             payload = ark_http(
                 "POST", "/files", body, f"multipart/form-data; boundary={boundary}",
-                api_key=selected_key, timeout=ARK_UPLOAD_TIMEOUT_SECONDS, upload=True,
+                api_key=selected_key, timeout=min(ARK_UPLOAD_TIMEOUT_SECONDS, remaining), upload=True,
+                upload_deadline=deadline,
             )
             file_id = None
             if isinstance(payload, dict):
@@ -498,15 +546,19 @@ def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_
                 exc.provider_code == "transient_network"
                 or exc.status_code in {408, 425, 429, 500, 502, 503, 504}
             )
-            if not retryable or attempt >= ARK_UPLOAD_ATTEMPTS:
+            if not retryable:
                 raise
+            if attempt >= ARK_UPLOAD_ATTEMPTS or time.monotonic() >= deadline:
+                raise ArkError("识别视频上传多次失败，已停止重复上传；原视频和已完成的采集结果已保留，请稍后重试。",
+                               status_code=exc.status_code, provider_code="video_upload_retry_exhausted") from exc
             if exc.status_code == 429 and len(ARK_API_KEYS) > 1:
                 selected_key = ark_account_key()
             logger.warning(
                 "provider_step provider=ark operation=upload_retry file=%s attempt=%s error=%s",
                 upload_path.name, attempt, safe_error_text(exc),
             )
-            time.sleep(min(5.0, float(attempt)))
+            _report_media_progress(progress_callback, "video_upload_retry", None)
+            time.sleep(min(5.0, float(attempt), max(0.0, deadline - time.monotonic())))
     raise ArkError("方舟视频上传重试耗尽")
 
 
@@ -526,14 +578,21 @@ def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
         time.sleep(ARK_FILE_POLL_SECONDS)
 
 
-def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | None = None, progress_callback: MediaProgress | None = None) -> dict[str, str]:
-    """Use URL inputs below our safety budget, otherwise a validated Files proxy.
+def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | None = None,
+                      progress_callback: MediaProgress | None = None, cache: RecognitionCache | None = None,
+                      force_files: bool = False) -> dict[str, Any]:
+    """Prefer private URLs for validated delivery copies, with bounded Files fallback.
 
     URL inputs above 50 MiB have been rejected in production. The 45 MiB budget
     leaves headroom; it does not assert that Files has the same provider limit.
     """
     api_key = ark_account_key()
-    if ARK_VIDEO_SOURCE_MODE != "files" and source_uri and is_object_uri(source_uri):
+    context: dict[str, Any] = {}
+    if cache is not None:
+        context["_cache"] = cache
+    if progress_callback is not None:
+        context["_progress_callback"] = progress_callback
+    if not force_files and ARK_VIDEO_SOURCE_MODE != "files" and source_uri and is_object_uri(source_uri):
         try:
             source_size = path.stat().st_size
         except OSError:
@@ -548,7 +607,8 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
                     "provider_step provider=ark operation=object_url file=%s source_bytes=%s",
                     path.name, source_size,
                 )
-                return {"api_key": api_key, "video_url": video_url}
+                return {"api_key": api_key, "video_url": video_url,
+                        **({"_video_uri": source_uri} if cache is not None else {}), **context}
             except Exception as exc:
                 logger.warning("provider_step provider=ark operation=object_url_unavailable file=%s error_type=%s", path.name, type(exc).__name__)
         else:
@@ -556,13 +616,48 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
                 "provider_step provider=ark operation=object_url_skipped file=%s source_bytes=%s reason=%s",
                 path.name, source_size, "size_unknown" if not source_size else "source_over_url_limit",
             )
-    upload_started = time.perf_counter()
-    file_id, api_key = ark_upload_video(path, api_key, duration_sec, **({"progress_callback": progress_callback} if progress_callback else {}))
-    logger.info(
-        "provider_step provider=ark operation=upload file=%s duration_ms=%.1f",
-        path.name,
-        (time.perf_counter() - upload_started) * 1000,
-    )
+    if not force_files and ARK_VIDEO_SOURCE_MODE != "files" and object_storage_enabled() and cache is not None:
+        cached_delivery = cache.load("delivery")
+        if cached_delivery:
+            uri = str(cached_delivery.get("uri") or "")
+            info = media_info(uri) if is_object_uri(uri) else None
+            if info and 0 < info["size"] <= ARK_VIDEO_SAFE_BYTES and info["size"] == cached_delivery.get("size"):
+                try:
+                    video_url = presigned_get(uri)
+                    logger.info("provider_step provider=ark operation=object_proxy_cache_hit file=%s", path.name)
+                    return {"api_key": api_key, "video_url": video_url, "_video_uri": uri, **context}
+                except Exception:
+                    logger.warning("provider_step provider=ark operation=object_proxy_cache_unavailable file=%s", path.name)
+        upload_path, proxy_dir = _delivery_video(path, duration_sec, progress_callback, cache)
+        try:
+            _report_media_progress(progress_callback, "video_upload", None)
+            started = time.perf_counter()
+            uri = upload_recognition_proxy(upload_path, cache.identity)
+            cache.save("delivery", {"uri": uri, "size": upload_path.stat().st_size})
+            video_url = presigned_get(uri)
+            logger.info("provider_step provider=ark operation=object_proxy_upload file=%s proxy_bytes=%s duration_ms=%.1f",
+                        path.name, upload_path.stat().st_size, (time.perf_counter() - started) * 1000)
+            return {"api_key": api_key, "video_url": video_url, "_video_uri": uri, **context}
+        except Exception as exc:
+            # Never log storage errors which may echo credentials/signed URLs.
+            logger.warning("provider_step provider=ark operation=object_proxy_unavailable file=%s error_type=%s", path.name, type(exc).__name__)
+            _report_media_progress(progress_callback, "video_upload_retry", None)
+            # Reuse the exact validated proxy, including when disk checkpointing failed.
+            with _ark_upload_body_semaphore:
+                file_id, api_key = _ark_upload_prepared_video(upload_path, api_key, duration_sec, progress_callback=progress_callback)
+        finally:
+            if proxy_dir is not None:
+                shutil.rmtree(proxy_dir, ignore_errors=True)
+    else:
+        upload_started = time.perf_counter()
+        options: dict[str, Any] = {}
+        if progress_callback is not None:
+            options["progress_callback"] = progress_callback
+        if cache is not None:
+            options["cache"] = cache
+        file_id, api_key = ark_upload_video(path, api_key, duration_sec, **options)
+        logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name,
+                    (time.perf_counter() - upload_started) * 1000)
     wait_started = time.perf_counter()
     _report_media_progress(progress_callback, "video_preparing", None)
     ark_wait_for_file(file_id, api_key)
@@ -571,7 +666,7 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
         path.name,
         (time.perf_counter() - wait_started) * 1000,
     )
-    return {"api_key": api_key, "file_id": file_id}
+    return {"api_key": api_key, "file_id": file_id, **context}
 
 
 def ark_prompt(
@@ -907,12 +1002,19 @@ def ark_recognize(
     model: str | None = None,
     *,
     review_context: dict[str, Any] | None = None,
-    prepared_video: dict[str, str] | None = None,
+    prepared_video: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
     selected_model = (model or ARK_MODEL).strip() or ARK_MODEL
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s model=%s duration_sec=%.1f", path.name, selected_model, duration_sec)
     prepared = prepared_video or ark_prepare_video(path, duration_sec)
+    if prepared.get("_video_uri"):
+        try:
+            prepared["video_url"] = presigned_get(prepared["_video_uri"])
+        except Exception:
+            # A still-valid URL can be used; an explicit download failure below
+            # switches once to Files without re-encoding the source.
+            logger.warning("provider_step provider=ark operation=object_url_refresh_unavailable file=%s", path.name)
     api_key = str(prepared.get("api_key") or "")
     file_id = str(prepared.get("file_id") or "")
     video_url = str(prepared.get("video_url") or "")
@@ -951,7 +1053,12 @@ def ark_recognize(
                     "provider_step provider=ark operation=object_url_fallback file=%s status_code=%s code=%s error=%s",
                     path.name, exc.status_code, exc.provider_code, safe_error_text(exc),
                 )
-                fallback = ark_prepare_video(path, duration_sec)
+                options = {"force_files": True}
+                if prepared.get("_cache") is not None:
+                    options["cache"] = prepared["_cache"]
+                if prepared.get("_progress_callback") is not None:
+                    options["progress_callback"] = prepared["_progress_callback"]
+                fallback = ark_prepare_video(path, duration_sec, **options)
                 # Share the uploaded file with the subsequent quality review.
                 # No second URL failure/upload is needed for the same episode.
                 prepared.clear()
@@ -959,6 +1066,7 @@ def ark_recognize(
                 api_key = str(fallback["api_key"])
                 video_url = ""
                 response_payload["input"][0]["content"][0] = {"type": "input_video", "file_id": fallback["file_id"]}
+                _report_media_progress(prepared.get("_progress_callback"), "vision", None)
                 payload = ark_stream_response(response_payload, api_key)
             response_usages.append(ark_usage(payload))
             raw_script = (

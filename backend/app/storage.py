@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
@@ -47,7 +48,7 @@ def _object_parts(uri: str | Path) -> tuple[str, str]:
     return parsed.netloc, unquote(parsed.path.lstrip("/"))
 
 
-def _client() -> Any:
+def _client(*, delivery: bool = False) -> Any:
     if not OBJECT_STORAGE_ENABLED:
         raise RuntimeError("对象存储尚未配置")
     try:
@@ -64,7 +65,9 @@ def _client() -> Any:
         config=Config(
             signature_version="s3v4",
             s3={"addressing_style": OBJECT_STORAGE_ADDRESSING_STYLE},
-            retries={"max_attempts": 4, "mode": "adaptive"},
+            connect_timeout=10 if delivery else 60,
+            read_timeout=60,
+            retries={"total_max_attempts": 2, "mode": "standard"} if delivery else {"max_attempts": 4, "mode": "adaptive"},
         ),
     )
 
@@ -101,13 +104,29 @@ def media_info(uri: str | Path) -> dict[str, Any] | None:
             return None
     path = Path(uri)
     try:
-        return {"size": path.stat().st_size, "etag": ""} if path.is_file() else None
+        stat = path.stat()
+        return {"size": stat.st_size, "etag": "", "mtime_ns": stat.st_mtime_ns} if path.is_file() else None
     except OSError:
         return None
 
 
 def media_exists(uri: str | Path) -> bool:
     return media_info(uri) is not None
+
+
+def upload_recognition_proxy(path: Path, identity: str) -> str:
+    """Store a private, immutable delivery copy under a separate object prefix."""
+    from .config import ARK_VIDEO_SAFE_BYTES
+    size = path.stat().st_size
+    if not 0 < size <= ARK_VIDEO_SAFE_BYTES:
+        raise ValueError("识别副本超过安全大小上限")
+    key = "/".join(part for part in (OBJECT_STORAGE_PREFIX, "recognition", hashlib.sha256(identity.encode()).hexdigest() + ".mp4") if part)
+    # A streaming body avoids another 40 MiB multipart allocation. These
+    # objects inherit the bucket's private policy; only scoped URLs are shared.
+    with path.open("rb") as body:
+        _client(delivery=True).put_object(Bucket=OBJECT_STORAGE_BUCKET, Key=key, Body=body,
+                                          ContentLength=size, ContentType="video/mp4")
+    return f"s3://{OBJECT_STORAGE_BUCKET}/{quote(key, safe='/')}"
 
 
 def delete_media(uri: str | Path) -> None:

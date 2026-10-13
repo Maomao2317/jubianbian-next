@@ -108,7 +108,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         ):
             providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared)
             providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared, review_context={"issues": []})
-        upload.assert_called_once_with(Path("source.mp4"), 131)
+        upload.assert_called_once_with(Path("source.mp4"), 131, force_files=True)
         self.assertEqual(prepared, {"api_key": "key", "file_id": "file"})
         self.assertEqual(create.call_args.args[0]["input"][0]["content"][0], {"type": "input_video", "file_id": "file"})
 

@@ -485,6 +485,7 @@ def collect_evidence(
     duration_sec: float,
     *,
     transcribe: Callable[[Path], str] | None = None,
+    cached_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect independent evidence and return a JSON-safe record."""
     del title  # reserved for future provider metadata; never used to infer content
@@ -493,8 +494,20 @@ def collect_evidence(
     # episode slower.  Keep a small evidence lane so throughput stays stable
     # while video upload/model requests continue in parallel.
     started = time.perf_counter()
+    cached_sources = {
+        source["kind"]: source for source in (cached_evidence or {}).get("sources", [])
+        if isinstance(source, dict) and source.get("kind") in {"audio", "ocr", "keyframes"}
+        and source.get("status") == "available" and isinstance(source.get("items"), list)
+    }
+    if len(cached_sources) == 3:
+        logger.info("evidence_step file=%s kind=all operation=cache_hit", path.name)
+        return {**cached_evidence, "cacheHitSources": sorted(cached_sources),
+                "timingsMs": {"queue": 0, "audio": 0, "ocr": 0, "total": 0}}
 
     def timed_source(kind: str, function: Callable[..., dict[str, Any]], **kwargs: Any) -> tuple[dict[str, Any], float]:
+        if kind in cached_sources:
+            logger.info("evidence_step file=%s kind=%s operation=cache_hit", path.name, kind)
+            return cached_sources[kind], 0
         source_started = time.perf_counter()
         source = function(path, duration_sec, **kwargs)
         elapsed_ms = round((time.perf_counter() - source_started) * 1000, 1)
@@ -506,7 +519,7 @@ def collect_evidence(
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="jbb-evidence") as executor:
             audio_future = executor.submit(timed_source, "audio", _audio_evidence, transcribe=transcribe)
             ocr_future = executor.submit(timed_source, "ocr", _ocr_evidence)
-            keyframes = _keyframe_evidence(path, duration_sec)
+            keyframes = cached_sources.get("keyframes") or _keyframe_evidence(path, duration_sec)
             audio, audio_ms = audio_future.result()
             ocr, ocr_ms = ocr_future.result()
     sources = [audio, ocr, keyframes]
@@ -520,6 +533,8 @@ def collect_evidence(
         "sources": sources,
         "timingsMs": {"queue": queue_ms, "audio": audio_ms, "ocr": ocr_ms, "total": round((time.perf_counter() - started) * 1000, 1)},
     }
+    if cached_sources:
+        result["cacheHitSources"] = sorted(cached_sources)
     result["summary"] = evidence_summary(result)
     return result
 

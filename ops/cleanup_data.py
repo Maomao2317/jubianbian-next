@@ -19,6 +19,7 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from app.storage import delete_media, is_object_uri
+from app.recognition_cache import cleanup_task_cache
 
 
 data_dir = Path(os.getenv("JBB_DATA_DIR", "/app/data"))
@@ -55,6 +56,7 @@ if db_path.exists():
                     # a remote object was already deleted or is unavailable.
                     pass
             connection.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
+            cleanup_task_cache(row["id"])
             deleted_tasks += 1
         connection.commit()
 
