@@ -307,6 +307,8 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
+    if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
+        return True
     text = str(error).casefold()
     status_code = getattr(error, "status_code", None)
     size_limit_failure = status_code in {400, 413} and any(
@@ -327,6 +329,8 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
 
 
 def _task_error_message(error: BaseException) -> str:
+    if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
+        return safe_error_text(error)
     text = str(error).casefold()
     if getattr(error, "status_code", None) in {400, 413} and any(
         marker in text
@@ -341,6 +345,40 @@ def _task_error_message(error: BaseException) -> str:
 
 
 # Provider selection and fallback policy live here; HTTP routes only enqueue work.
+def _media_progress_callback(task_id: str):
+    last_stage = ""
+    last_percent = -1
+    last_write = 0.0
+    stages = {
+        "compression_queued": (16, "等待服务器压缩"),
+        "compressing": (16, "正在服务器压缩视频"),
+        "video_upload": (32, "正在提交识别视频"),
+        "video_preparing": (36, "正在准备识别视频"),
+    }
+
+    def progress(stage: str, percent: int | None) -> None:
+        nonlocal last_stage, last_percent, last_write
+        if stage not in stages:
+            return
+        now = time.monotonic()
+        value = max(0, min(100, int(percent or 0)))
+        changed_stage = stage != last_stage
+        if not changed_stage and (value <= last_percent or (value < 100 and now - last_write < 1.0)):
+            return
+        overall, message = stages[stage]
+        if stage == "compressing":
+            overall += int(value * 0.14)
+        # Stage percentages are real encoding progress, not the whole task's
+        # progress. Keep writes to at most once/second and events to transitions.
+        update_task(task_id, stage=stage, progress_percent=overall,
+                    stage_progress_percent=value if stage == "compressing" else None)
+        if changed_stage:
+            record_task_event(task_id, "stage", message, status="running", stage=stage, progress_percent=overall)
+        last_stage, last_percent, last_write = stage, value, now
+
+    return progress
+
+
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Collect evidence, then use Ark with an explicit OpenAI fallback."""
     path, materialized_dir = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"])
@@ -356,16 +394,23 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         # Video upload/preprocessing does not depend on ASR/OCR.  Starting it
         # alongside evidence collection hides the network latency, and the
         # resulting file_id is reused by a possible Turbo review.
+        mark_task_stage(row["id"], status="running", stage="transcribing", progress_percent=16, message="正在采集语音和字幕证据")
         evidence_task = asyncio.create_task(asyncio.to_thread(collect_evidence, path, row["title"], duration))
         prepare_task = (
             asyncio.create_task(asyncio.to_thread(
                 ark_prepare_video, path, duration,
+                progress_callback=_media_progress_callback(row["id"]),
                 **({"source_uri": row["stored_path"]} if is_object_uri(row["stored_path"]) else {}),
             ))
             if ARK_API_KEYS
             else None
         )
-        evidence = await evidence_task
+        # Both workers own the materialized source until they finish, including
+        # failures. Never clean it up while compression is still using it.
+        results = await asyncio.gather(evidence_task, *([prepare_task] if prepare_task else []), return_exceptions=True)
+        if isinstance(results[0], BaseException):
+            raise results[0]
+        evidence = results[0]
         cast_context = await asyncio.to_thread(batch_character_context, row)
         if cast_context:
             evidence = {**evidence, "batchCharacterContext": cast_context}
@@ -373,10 +418,13 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         prepare_error: ArkError | None = None
         if prepare_task is not None:
             try:
-                prepared_video = await prepare_task
+                if isinstance(results[1], BaseException):
+                    raise results[1]
+                prepared_video = results[1]
             except ArkError as exc:
                 prepare_error = exc
         route = select_ark_route(duration, evidence)
+        mark_task_stage(row["id"], status="running", stage="vision", progress_percent=62, message="正在识别画面、人物与对白")
         return await _run_recognizer_with_media(
             row,
             path,
@@ -610,8 +658,6 @@ async def process_task(task_id: str) -> None:
     logger.info("task_start task_id=%s title=%s file=%s", task_id, row["title"], row["file_name"])
     try:
         mark_task_stage(task_id, status="running", stage="probing", progress_percent=12, message="正在读取视频信息")
-        mark_task_stage(task_id, status="running", stage="transcribing", progress_percent=34, message="正在整理语音和对白")
-        mark_task_stage(task_id, status="running", stage="vision", progress_percent=62, message="正在识别画面与动作")
         script, quality, usage, evidence = await run_recognizer(task_row(task_id))
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")

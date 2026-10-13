@@ -24,7 +24,7 @@ docker compose --env-file fangzhou.env up -d --build
 
 服务仍然通过 http://127.0.0.1:8000/ 访问。上传文件和 SQLite 数据保存在 Docker volume `jbb-data`，容器重建不会丢失。生产环境建议在前面接 Nginx/Caddy 提供 HTTPS，并限制上传接口的访问范围。
 
-配置根目录 `fangzhou.env` 中的 `ARK_API_KEY` 后，通过方舟 Responses API 生成结构化剧本。对象存储中的视频默认使用单对象临时 GET 签名直读，省去再次转码和上传；ASR/OCR 仍使用原视频核对台词和字幕。无法读取视频 URL 时回退到 Files API，初次生成和自动复核复用同一份上传。签名不会改变存储桶权限，也不会写入任务错误日志。
+配置根目录 `fangzhou.env` 中的 `ARK_API_KEY` 后，通过方舟 Responses API 生成结构化剧本。小于 45 MiB 的对象存储视频可使用单对象临时 GET 签名直读；大视频默认生成不超过 40 MiB 的临时识别副本，通过 Files API 提交，ASR/OCR 仍使用未修改的原视频。横竖屏等比缩放、不主动降低帧率，压缩并发默认 1、编解码线程 2；压缩失败或副本超标不会退回提交超预算原片。无法读取视频 URL 时回退到 Files API，初次生成和自动复核复用同一份上传。签名不会改变存储桶权限，也不会写入任务错误日志。完整配置及旧环境迁移见根目录 README 的“大视频自动处理”。
 
 `ARK_VIDEO_SOURCE_MODE=auto` 启用对象存储直读，设为 `files` 可切回原上传方式。`ARK_MAX_OUTPUT_TOKENS=32768` 为长剧本和复核设置显式输出上限（不是目标长度）；输出省去空字段和重复台词副本，仍保留完整对白、字幕、动作、人物与情绪证据。两项配置在正式和测试 Compose 中保持一致。
 

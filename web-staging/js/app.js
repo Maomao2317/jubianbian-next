@@ -128,14 +128,19 @@
   function statusBadge(task) {
     const displayStatus = task.status === "review" ? "running" : task.status;
     const displayStage = task.status === "review" ? "exporting" : task.stage;
-    const text = displayStatus === "running"
+    let text = displayStatus === "running"
       ? cfg.stageText[displayStage]
       : cfg.statusText[displayStatus] || displayStatus;
+    if (displayStatus === "running" && displayStage === "compressing") text += ` ${compressionPercent(task)}%`;
     return `<span class="badge ${displayStatus}"><span class="badge-dot"></span>${escapeHtml(text)}</span>`;
   }
 
   function isCompletedTask(task) {
     return task.status === "done";
+  }
+
+  function compressionPercent(task) {
+    return Math.max(0, Math.min(100, Math.floor(Number(task.stageProgressPercent) || 0)));
   }
 
   function normalizeUserTask(task) {
@@ -351,8 +356,11 @@
       `${(Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE).toFixed(1)} 积分`,
       timeAgo(task.createdAt),
     ];
+    const compressing = task.status === "running" && task.stage === "compressing";
+    const percent = compressing ? compressionPercent(task) : (task.progressPercent || 0);
+    const progressLabel = compressing ? "服务器压缩进度" : "处理进度";
     const progress = task.status === "running" || task.status === "queued"
-      ? `<div class="row-progress" aria-label="处理进度 ${task.progressPercent || 0}%"><span style="width:${task.progressPercent || 0}%"></span></div>`
+      ? `<div class="row-progress ${compressing ? "compression-progress" : ""}" role="progressbar" aria-label="${progressLabel}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`
       : "";
     const quickAction = isCompletedTask(task)
       ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>`
@@ -418,6 +426,8 @@
   function batchRow(group) {
     const done = group.tasks.filter((task) => isCompletedTask(task)).length;
     const running = group.tasks.filter((task) => task.status === "running").length;
+    const compressing = group.tasks.filter((task) => task.status === "running" && task.stage === "compressing").length;
+    const compressionQueued = group.tasks.filter((task) => task.status === "running" && task.stage === "compression_queued").length;
     const failed = group.tasks.filter((task) => task.status === "failed").length;
     const expanded = Boolean(state.expandedBatches[group.id]);
     const remaining = group.tasks.reduce((sum, task) => isCompletedTask(task) ? sum : sum + Number(task.estimatedMinutes || 1) * Math.max(0.05, 1 - Number(task.progressPercent || 0) / 100), 0);
@@ -425,7 +435,8 @@
     const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     const downloads = done ? `<span class="batch-downloads"><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button></span>` : "";
     const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (task.status === "failed" ? 0 : isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
-    return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
+    const compressionSummary = `${compressing ? ` · 压缩中 ${compressing} 集` : ""}${compressionQueued ? ` · 等待压缩 ${compressionQueued} 集` : ""}`;
+    return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""}${compressionSummary} · ${percent}% · ${eta}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
   function captureListViewport() {
@@ -484,7 +495,7 @@
     const active = [];
     tasks.forEach((task) => {
       if (task.status === "queued" || task.status === "running") {
-        active.push(`${task.id}:${task.status}:${task.stage || ""}:${task.progressPercent || 0}:${task.updatedAt || ""}:${task.error || ""}`);
+        active.push(`${task.id}:${task.status}:${task.stage || ""}:${task.progressPercent || 0}:${task.stageProgressPercent ?? ""}:${task.updatedAt || ""}:${task.error || ""}`);
       }
     });
     return [
@@ -547,14 +558,19 @@
   }
 
   function pipeline(task) {
-    const currentIndex = cfg.pipeline.findIndex((item) => item.id === task.stage);
+    const compressing = task.stage === "compressing";
+    const preparing = ["compression_queued", "compressing", "video_upload", "video_preparing"].includes(task.stage);
+    const steps = preparing ? [cfg.pipeline[0], cfg.pipeline[1], { id: task.stage, label: cfg.stageText[task.stage] }, ...cfg.pipeline.slice(2)] : cfg.pipeline;
+    const currentIndex = steps.findIndex((item) => item.id === task.stage);
+    const percent = compressing ? compressionPercent(task) : (task.progressPercent || 0);
+    const note = preparing ? "服务器后台处理中，原片已保留，可以离开本页" : "后台处理中，可以离开本页";
     return `<div class="progress-panel">
       <div class="progress-head">
-        <div><strong>${escapeHtml(cfg.stageText[task.stage] || "正在处理")}</strong><span>后台处理中，可以离开本页</span></div>
-        <b>${task.progressPercent || 0}%</b>
+        <div><strong>${escapeHtml(cfg.stageText[task.stage] || "正在处理")}</strong><span>${note}</span></div>
+        <b>${compressing ? `压缩 ${percent}%` : `${percent}%`}</b>
       </div>
-      <div class="main-progress"><span style="width:${task.progressPercent || 0}%"></span></div>
-      <div class="pipeline">${cfg.pipeline.map((step, index) => {
+      <div class="main-progress" role="progressbar" aria-label="${compressing ? "服务器压缩进度" : "处理进度"}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>
+      <div class="pipeline">${steps.map((step, index) => {
         const className = index < currentIndex ? "done" : index === currentIndex ? "active" : "";
         return `<div class="pipeline-step ${className}"><i>${index < currentIndex ? "✓" : index + 1}</i><span>${step.label}</span></div>`;
       }).join("")}</div>

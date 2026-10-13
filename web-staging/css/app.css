@@ -550,6 +550,7 @@ a { color: inherit; text-decoration: none; }
 
 .row-progress { width: min(360px, 100%); height: 3px; margin-top: 12px; overflow: hidden; border-radius: 3px; background: #ece9e3; }
 .row-progress span, .main-progress span { display: block; height: 100%; background: var(--gold-strong); transition: width 0.35s ease; }
+.row-progress.compression-progress { height: 6px; }
 
 .task-state { display: flex; align-items: center; gap: 12px; }
 

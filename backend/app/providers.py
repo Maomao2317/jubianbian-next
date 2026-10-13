@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from copy import deepcopy
 import re
 import shutil
@@ -11,7 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
@@ -29,9 +30,12 @@ from .config import (
     ARK_RESPONSE_CREATE_ATTEMPTS,
     ARK_UPLOAD_PROXY_AUDIO_BITRATE,
     ARK_UPLOAD_PROXY_MAX_HEIGHT,
+    ARK_UPLOAD_PROXY_MAX_IN_FLIGHT,
     ARK_UPLOAD_PROXY_MAX_MB,
     ARK_UPLOAD_PROXY_PRESET,
     ARK_UPLOAD_PROXY_TIMEOUT_SECONDS,
+    ARK_UPLOAD_PROXY_THREADS,
+    ARK_UPLOAD_PROXY_TRIGGER_MB,
     ARK_UPLOAD_PROXY_VIDEO_BITRATE,
     ARK_RESPONSE_TIMEOUT_SECONDS,
     ARK_THINKING_TYPE,
@@ -43,6 +47,7 @@ from .config import (
     ARK_MAX_IN_FLIGHT,
     ARK_VIDEO_FPS,
     ARK_VIDEO_SOURCE_MODE,
+    ARK_VIDEO_SAFE_BYTES,
     DATA_DIR,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
@@ -70,6 +75,10 @@ _ark_pool_index = 0
 _ark_cooldowns: dict[str, float] = {}
 _ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
 _ark_upload_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
+# Bound multipart allocation as well as network transfers; workers otherwise
+# retain several ~40 MiB bodies while waiting for a free HTTP upload slot.
+_ark_upload_body_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
+_ark_proxy_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_PROXY_MAX_IN_FLIGHT)
 
 
 def ark_account_key() -> str:
@@ -261,11 +270,12 @@ def _bitrate_bps(value: str) -> int:
 
 def _ark_proxy_profile(duration_sec: float) -> tuple[str, int]:
     """Fit the proxy near the configured MB ceiling without crushing short clips."""
-    configured_video_bps = _bitrate_bps(ARK_UPLOAD_PROXY_VIDEO_BITRATE) or 400_000
-    audio_bps = _bitrate_bps(ARK_UPLOAD_PROXY_AUDIO_BITRATE) or 32_000
+    configured_video_bps = _bitrate_bps(ARK_UPLOAD_PROXY_VIDEO_BITRATE) or 2_500_000
+    audio_bps = _bitrate_bps(ARK_UPLOAD_PROXY_AUDIO_BITRATE) or 96_000
     if duration_sec <= 0 or ARK_UPLOAD_PROXY_MAX_MB <= 0:
         return ARK_UPLOAD_PROXY_VIDEO_BITRATE, ARK_UPLOAD_PROXY_MAX_HEIGHT
-    target_total_bps = int(ARK_UPLOAD_PROXY_MAX_MB * 1024 * 1024 * 8 * 0.92 / duration_sec)
+    target_bytes = min(ARK_UPLOAD_PROXY_MAX_MB * 1024 * 1024, ARK_VIDEO_SAFE_BYTES)
+    target_total_bps = int(target_bytes * 8 * 0.92 / duration_sec)
     target_video_bps = max(96_000, target_total_bps - audio_bps - 16_000)
     video_bps = min(configured_video_bps, target_video_bps)
     max_height = ARK_UPLOAD_PROXY_MAX_HEIGHT
@@ -276,86 +286,154 @@ def _ark_proxy_profile(duration_sec: float) -> tuple[str, int]:
     return f"{max(1, video_bps // 1000)}k", max_height
 
 
-def _ark_upload_proxy(path: Path, duration_sec: float = 0) -> tuple[Path, Path | None]:
-    """Create a temporary smaller MP4 when the source is expensive to upload.
+MediaProgress = Callable[[str, int | None], None]
 
-    The original file remains untouched.  If ffmpeg is unavailable or the
-    proxy cannot be produced, callers fall back to the source transparently.
-    """
-    if ARK_UPLOAD_PROXY_MAX_MB <= 0:
-        return path, None
+
+def _report_media_progress(callback: MediaProgress | None, stage: str, percent: int | None) -> None:
+    if callback is not None:
+        try:
+            callback(stage, percent)
+        except Exception:
+            # A temporarily unavailable progress store must not break encoding.
+            logger.exception("media_progress_failed stage=%s", stage)
+
+
+def _ffmpeg_progress_percent(line: str, duration: float) -> int | None:
+    key, separator, value = line.strip().partition("=")
+    if not separator or duration <= 0 or not math.isfinite(duration):
+        return None
+    try:
+        if key in {"out_time_us", "out_time_ms"}:
+            # ffmpeg's legacy out_time_ms is also expressed in microseconds.
+            seconds = float(value) / 1_000_000
+        elif key == "out_time":
+            hours, minutes, seconds_text = value.split(":")
+            seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds_text)
+        else:
+            return None
+        if not math.isfinite(seconds):
+            return None
+        return max(0, min(99, int(seconds / duration * 100)))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _run_ffmpeg_proxy(command: list[str], duration: float, callback: MediaProgress | None) -> None:
+    # Drain stdout continuously; stderr goes to a temporary file so neither pipe
+    # can deadlock. The worker retains a hard timeout even if no progress arrives.
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors,
+                                   text=True, encoding="utf-8", errors="replace")
+
+        def read_progress() -> None:
+            previous = -1
+            for line in process.stdout:
+                percent = _ffmpeg_progress_percent(line, duration)
+                if percent is not None and percent > previous:
+                    previous = percent
+                    _report_media_progress(callback, "compressing", percent)
+
+        reader = threading.Thread(target=read_progress, name="jbb-compression-progress", daemon=True)
+        reader.start()
+        try:
+            returncode = process.wait(timeout=ARK_UPLOAD_PROXY_TIMEOUT_SECONDS)
+            if returncode:
+                errors.seek(0)
+                raise subprocess.CalledProcessError(returncode, command, stderr=errors.read(4096))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            reader.join()
+            process.stdout.close()
+
+
+def _ark_upload_proxy(path: Path, duration_sec: float = 0, *, progress_callback: MediaProgress | None = None) -> tuple[Path, Path | None]:
+    """Make a validated delivery proxy without altering the ASR/OCR source."""
     try:
         source_size = path.stat().st_size
-    except OSError:
+    except OSError as exc:
+        raise ArkError("原视频无法读取，请重新上传。", provider_code="video_source_unreadable") from exc
+    if source_size <= 0:
+        raise ArkError("原视频为空，请重新上传。", provider_code="video_source_unreadable")
+    trigger_bytes = min(ARK_UPLOAD_PROXY_TRIGGER_MB * 1024 * 1024, ARK_VIDEO_SAFE_BYTES)
+    if source_size <= trigger_bytes:
         return path, None
-    if source_size <= ARK_UPLOAD_PROXY_MAX_MB * 1024 * 1024:
-        return path, None
+    if ARK_UPLOAD_PROXY_MAX_MB <= 0:
+        if source_size <= ARK_VIDEO_SAFE_BYTES:
+            return path, None
+        raise ArkError("大视频自动压缩未启用，已保留原片且未提交方舟；请启用压缩或上传较小视频。",
+                       provider_code="video_proxy_disabled")
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         logger.warning("provider_step provider=ark operation=proxy_unavailable file=%s reason=ffmpeg_missing", path.name)
-        return path, None
+        if source_size <= ARK_VIDEO_SAFE_BYTES:
+            return path, None
+        raise ArkError("服务器缺少视频压缩工具，已保留原片且未提交方舟；请联系管理员或上传较小视频。",
+                       provider_code="video_proxy_unavailable")
 
-    proxy_dir = Path(tempfile.mkdtemp(prefix="jbb-ark-upload-", dir=DATA_DIR))
-    proxy_path = proxy_dir / f"{path.stem}.ark.mp4"
-    started = time.perf_counter()
-    duration = duration_sec or probe_duration(path)
-    video_bitrate, max_height = _ark_proxy_profile(duration)
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        str(path),
-        "-vf",
-        f"scale='min({max_height},iw)':-2",
-        "-c:v",
-        "libx264",
-        "-preset",
-        ARK_UPLOAD_PROXY_PRESET,
-        "-b:v",
-        video_bitrate,
-        "-maxrate",
-        video_bitrate,
-        "-bufsize",
-        video_bitrate,
-        "-c:a",
-        "aac",
-        "-b:a",
-        ARK_UPLOAD_PROXY_AUDIO_BITRATE,
-        "-movflags",
-        "+faststart",
-        "-y",
-        str(proxy_path),
-    ]
+    proxy_dir: Path | None = None
+    ready = False
+    queued_at = time.perf_counter()
+    _report_media_progress(progress_callback, "compression_queued", 0)
     try:
-        subprocess.run(
-            command,
-            capture_output=True,
-            timeout=ARK_UPLOAD_PROXY_TIMEOUT_SECONDS,
-            check=True,
-        )
-        proxy_size = proxy_path.stat().st_size
-        if proxy_size <= 0 or proxy_size >= source_size:
-            raise OSError("proxy_not_smaller")
-        logger.info(
-            "provider_step provider=ark operation=proxy file=%s source_bytes=%s proxy_bytes=%s bitrate=%s height=%s duration_ms=%.1f",
-            path.name,
-            source_size,
-            proxy_size,
-            video_bitrate,
-            max_height,
-            (time.perf_counter() - started) * 1000,
-        )
-        return proxy_path, proxy_dir
+        # Limit both encoding jobs and their decoder/encoder threads, separately
+        # from uploads/model calls. Queue wait does not use the encoding timeout.
+        with _ark_proxy_semaphore:
+            started = time.perf_counter()
+            _report_media_progress(progress_callback, "compressing", 0)
+            duration = duration_sec if duration_sec > 0 and math.isfinite(duration_sec) else probe_duration(path)
+            if duration <= 0 or not math.isfinite(duration):
+                raise ArkError("无法确认大视频时长，已保留原片且未提交方舟；请检查视频或重新上传。",
+                               provider_code="video_proxy_duration_unknown")
+            proxy_dir = Path(tempfile.mkdtemp(prefix="jbb-ark-upload-", dir=DATA_DIR))
+            proxy_path = proxy_dir / f"{path.stem}.ark.mp4"
+            video_bitrate, max_edge = _ark_proxy_profile(duration)
+            command = [
+                ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+                "-threads", str(ARK_UPLOAD_PROXY_THREADS), "-i", str(path),
+                "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+                "-vf", f"scale=w='min(iw,{max_edge})':h='min(ih,{max_edge})':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                "-filter_threads", "1", "-c:v", "libx264", "-preset", ARK_UPLOAD_PROXY_PRESET,
+                "-threads", str(ARK_UPLOAD_PROXY_THREADS), "-pix_fmt", "yuv420p",
+                "-fps_mode:v", "passthrough",
+                "-b:v", video_bitrate, "-maxrate", video_bitrate, "-bufsize", video_bitrate,
+                "-c:a", "aac", "-b:a", ARK_UPLOAD_PROXY_AUDIO_BITRATE,
+                "-movflags", "+faststart", "-y", str(proxy_path),
+            ]
+            _run_ffmpeg_proxy(command, duration, progress_callback)
+            proxy_size = proxy_path.stat().st_size
+            target_bytes = min(ARK_UPLOAD_PROXY_MAX_MB * 1024 * 1024, ARK_VIDEO_SAFE_BYTES)
+            if proxy_size > target_bytes:
+                raise ArkError("视频压缩后仍超过识别副本大小上限，已保留原片且未提交方舟；请上传较小视频。",
+                               provider_code="video_proxy_oversize")
+            if proxy_size <= 0 or proxy_size >= source_size:
+                raise OSError("proxy_empty_or_not_smaller")
+            logger.info(
+                "provider_step provider=ark operation=proxy file=%s source_bytes=%s proxy_bytes=%s bitrate=%s max_edge=%s queue_ms=%.1f duration_ms=%.1f",
+                path.name, source_size, proxy_size, video_bitrate, max_edge,
+                (started - queued_at) * 1000, (time.perf_counter() - started) * 1000,
+            )
+            ready = True
+            _report_media_progress(progress_callback, "compressing", 100)
+            return proxy_path, proxy_dir
+    except ArkError as exc:
+        logger.warning("provider_step provider=ark operation=proxy_rejected file=%s code=%s error=%s",
+                       path.name, exc.provider_code, safe_error_text(exc))
+        raise
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(
             "provider_step provider=ark operation=proxy_failed file=%s error=%s",
             path.name,
             safe_error_text(exc),
         )
-        shutil.rmtree(proxy_dir, ignore_errors=True)
-        return path, None
+        if source_size <= ARK_VIDEO_SAFE_BYTES:
+            return path, None
+        raise ArkError("大视频自动压缩失败，已保留原片且未提交方舟；请重试或上传较小视频。",
+                       provider_code="video_proxy_failed") from exc
+    finally:
+        if proxy_dir is not None and not ready:
+            shutil.rmtree(proxy_dir, ignore_errors=True)
 
 
 def ark_sampling_fps(duration_sec: float) -> float:
@@ -368,60 +446,68 @@ def ark_sampling_fps(duration_sec: float) -> float:
     return ARK_VIDEO_FPS
 
 
-def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0) -> tuple[str, str]:
+def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0, *, progress_callback: MediaProgress | None = None) -> tuple[str, str]:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
-    upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec)
+    upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec, **({"progress_callback": progress_callback} if progress_callback else {}))
     try:
-        fields = {
-            "purpose": "user_data",
-            "preprocess_configs": json.dumps({"video": {"fps": ark_sampling_fps(duration_sec)}}, separators=(",", ":")),
-        }
-        body, boundary = multipart_body(
-            fields,
-            "file",
-            upload_path.name,
-            upload_path.read_bytes(),
-            "video/mp4",
-        )
-        selected_key = api_key or ark_account_key()
-        for attempt in range(1, ARK_UPLOAD_ATTEMPTS + 1):
-            try:
-                payload = ark_http(
-                    "POST",
-                    "/files",
-                    body,
-                    f"multipart/form-data; boundary={boundary}",
-                    api_key=selected_key,
-                    timeout=ARK_UPLOAD_TIMEOUT_SECONDS,
-                    upload=True,
-                )
-                file_id = None
-                if isinstance(payload, dict):
-                    file_id = payload.get("id") or payload.get("file_id")
-                if not file_id:
-                    raise ArkError("方舟上传成功但没有返回 file_id")
-                return str(file_id), selected_key
-            except ArkError as exc:
-                retryable = (
-                    exc.provider_code == "transient_network"
-                    or exc.status_code in {408, 425, 429, 500, 502, 503, 504}
-                )
-                if not retryable or attempt >= ARK_UPLOAD_ATTEMPTS:
-                    raise
-                if exc.status_code == 429 and len(ARK_API_KEYS) > 1:
-                    selected_key = ark_account_key()
-                logger.warning(
-                    "provider_step provider=ark operation=upload_retry file=%s attempt=%s error=%s",
-                    path.name,
-                    attempt,
-                    safe_error_text(exc),
-                )
-                time.sleep(min(5.0, float(attempt)))
-        raise ArkError("方舟视频上传重试耗尽")
+        _report_media_progress(progress_callback, "video_upload", None)
+        with _ark_upload_body_semaphore:
+            return _ark_upload_prepared_video(upload_path, api_key, duration_sec)
     finally:
         if proxy_dir is not None:
             shutil.rmtree(proxy_dir, ignore_errors=True)
+
+
+def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_sec: float) -> tuple[str, str]:
+    """Build/retry one bounded request; caller owns the proxy and memory lane."""
+    try:
+        # Defence in depth: never allocate a huge multipart request or send an
+        # unchecked original when proxy preparation failed or was bypassed.
+        if not 0 < upload_path.stat().st_size <= ARK_VIDEO_SAFE_BYTES:
+            raise ArkError("识别视频大小超出安全上限，已停止上传；原视频未修改。",
+                           provider_code="video_upload_too_large")
+        video_bytes = upload_path.read_bytes()
+    except OSError as exc:
+        raise ArkError("识别视频无法读取，请检查原视频或重新上传。",
+                       provider_code="video_source_unreadable") from exc
+    if not 0 < len(video_bytes) <= ARK_VIDEO_SAFE_BYTES:
+        raise ArkError("识别视频大小超出安全上限，已停止上传；原视频未修改。",
+                       provider_code="video_upload_too_large")
+    fields = {
+        "purpose": "user_data",
+        "preprocess_configs": json.dumps({"video": {"fps": ark_sampling_fps(duration_sec)}}, separators=(",", ":")),
+    }
+    body, boundary = multipart_body(fields, "file", upload_path.name, video_bytes, "video/mp4")
+    del video_bytes
+    selected_key = api_key or ark_account_key()
+    for attempt in range(1, ARK_UPLOAD_ATTEMPTS + 1):
+        try:
+            payload = ark_http(
+                "POST", "/files", body, f"multipart/form-data; boundary={boundary}",
+                api_key=selected_key, timeout=ARK_UPLOAD_TIMEOUT_SECONDS, upload=True,
+            )
+            file_id = None
+            if isinstance(payload, dict):
+                file_id = payload.get("id") or payload.get("file_id")
+            if not file_id:
+                raise ArkError("方舟上传成功但没有返回 file_id")
+            return str(file_id), selected_key
+        except ArkError as exc:
+            retryable = (
+                exc.provider_code == "transient_network"
+                or exc.status_code in {408, 425, 429, 500, 502, 503, 504}
+            )
+            if not retryable or attempt >= ARK_UPLOAD_ATTEMPTS:
+                raise
+            if exc.status_code == 429 and len(ARK_API_KEYS) > 1:
+                selected_key = ark_account_key()
+            logger.warning(
+                "provider_step provider=ark operation=upload_retry file=%s attempt=%s error=%s",
+                upload_path.name, attempt, safe_error_text(exc),
+            )
+            time.sleep(min(5.0, float(attempt)))
+    raise ArkError("方舟视频上传重试耗尽")
 
 
 def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
@@ -440,12 +526,11 @@ def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
         time.sleep(ARK_FILE_POLL_SECONDS)
 
 
-def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | None = None) -> dict[str, str]:
-    """Use object URLs only when their source size is under Ark's video limit.
+def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | None = None, progress_callback: MediaProgress | None = None) -> dict[str, str]:
+    """Use URL inputs below our safety budget, otherwise a validated Files proxy.
 
-    Ark currently rejects URL-backed inputs above 50 MiB before recognition. The
-    local upload path already makes a small, visually faithful proxy when needed,
-    so large object-backed sources must use that path instead of bypassing it.
+    URL inputs above 50 MiB have been rejected in production. The 45 MiB budget
+    leaves headroom; it does not assert that Files has the same provider limit.
     """
     api_key = ark_account_key()
     if ARK_VIDEO_SOURCE_MODE != "files" and source_uri and is_object_uri(source_uri):
@@ -453,10 +538,10 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
             source_size = path.stat().st_size
         except OSError:
             source_size = 0
-        # Stay comfortably under the documented 50 MiB endpoint limit. When
+        # Stay comfortably under the observed 50 MiB URL input limit. When
         # object metadata is unavailable, prefer the known-good upload/proxy
         # route rather than risking a non-retryable provider 400.
-        if source_size and source_size < 45 * 1024 * 1024:
+        if source_size and source_size < ARK_VIDEO_SAFE_BYTES:
             try:
                 video_url = presigned_get(source_uri)
                 logger.info(
@@ -472,13 +557,14 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
                 path.name, source_size, "size_unknown" if not source_size else "source_over_url_limit",
             )
     upload_started = time.perf_counter()
-    file_id, api_key = ark_upload_video(path, api_key, duration_sec)
+    file_id, api_key = ark_upload_video(path, api_key, duration_sec, **({"progress_callback": progress_callback} if progress_callback else {}))
     logger.info(
         "provider_step provider=ark operation=upload file=%s duration_ms=%.1f",
         path.name,
         (time.perf_counter() - upload_started) * 1000,
     )
     wait_started = time.perf_counter()
+    _report_media_progress(progress_callback, "video_preparing", None)
     ark_wait_for_file(file_id, api_key)
     logger.info(
         "provider_step provider=ark operation=file_ready file=%s duration_ms=%.1f",

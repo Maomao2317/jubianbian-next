@@ -43,6 +43,8 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
     task["estimatedMinutes"] = task.pop("estimated_minutes", 0)
     task["creditsUsed"] = task.pop("credits_used", 0)
     task["progressPercent"] = task.pop("progress_percent", 0)
+    stage_progress = task.pop("stage_progress_percent", None)
+    task["stageProgressPercent"] = stage_progress if task.get("stage") == "compressing" and task.get("status") == "running" else None
     task["createdAt"] = task.pop("created_at", None)
     task["updatedAt"] = task.pop("updated_at", None)
     task["completedAt"] = task.pop("completed_at", None)
@@ -88,6 +90,8 @@ def get_task(task_id: str, user_id: str | None = None) -> dict[str, Any] | None:
 def update_task(task_id: str, **values: Any) -> None:
     if not values:
         return
+    if "stage" in values:
+        values.setdefault("stage_progress_percent", None)
     values["updated_at"] = now_iso()
     assignments = ", ".join(f"{key} = ?" for key in values)
     with db() as connection:

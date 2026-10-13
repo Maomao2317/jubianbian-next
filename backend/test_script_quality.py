@@ -852,6 +852,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(processing, "probe_duration", return_value=30),
             patch.object(processing, "collect_evidence", return_value=evidence),
             patch.object(processing, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}),
+            patch.object(processing, "mark_task_stage"),
             patch.object(processing, "update_task"),
             patch.object(
                 processing,
@@ -901,6 +902,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(processing, "probe_duration", return_value=210),
             patch.object(processing, "collect_evidence", return_value=evidence),
             patch.object(processing, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file"}),
+            patch.object(processing, "mark_task_stage"),
             patch.object(processing, "update_task"),
             patch.object(
                 processing,

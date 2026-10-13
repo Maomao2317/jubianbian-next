@@ -79,16 +79,19 @@ ARK_VIDEO_SOURCE_MODE = os.getenv("ARK_VIDEO_SOURCE_MODE", "auto").strip().lower
 ARK_MAX_OUTPUT_TOKENS = max(4096, min(32768, int(os.getenv("ARK_MAX_OUTPUT_TOKENS", "32768"))))
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
-# The Ark Files endpoint is reached from the app container.  On the staging
-# host an 8+ MB source can spend more than a minute in transit before the
-# actual model request even starts.  Larger files get a temporary, visually
-# faithful proxy for upload; the original remains untouched on disk.
-ARK_UPLOAD_PROXY_MAX_MB = max(0.0, float(os.getenv("ARK_UPLOAD_PROXY_MAX_MB", "4")))
-ARK_UPLOAD_PROXY_MAX_HEIGHT = max(360, int(os.getenv("ARK_UPLOAD_PROXY_MAX_HEIGHT", "540")))
-ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "400k").strip() or "400k"
-ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "32k").strip() or "32k"
+# This is our conservative delivery budget, not a claim about Files API limits.
+# Only large sources need a proxy; ASR/OCR always keep using the untouched source.
+ARK_VIDEO_SAFE_BYTES = 45 * 1024 * 1024
+ARK_UPLOAD_PROXY_TRIGGER_MB = max(0.0, min(45.0, float(os.getenv("ARK_UPLOAD_PROXY_TRIGGER_MB", "45"))))
+ARK_UPLOAD_PROXY_MAX_MB = max(0.0, min(45.0, float(os.getenv("ARK_UPLOAD_PROXY_MAX_MB", "40"))))
+# Fit either orientation in this square without upscaling (e.g. 720 x 1280).
+ARK_UPLOAD_PROXY_MAX_HEIGHT = max(360, int(os.getenv("ARK_UPLOAD_PROXY_MAX_HEIGHT", "1280")))
+ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "2500k").strip() or "2500k"
+ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "96k").strip() or "96k"
 ARK_UPLOAD_PROXY_PRESET = os.getenv("ARK_UPLOAD_PROXY_PRESET", "veryfast").strip() or "veryfast"
-ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_TIMEOUT_SECONDS", "180")))
+ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_TIMEOUT_SECONDS", "300")))
+ARK_UPLOAD_PROXY_MAX_IN_FLIGHT = max(1, min(4, int(os.getenv("JBB_ARK_PROXY_MAX_IN_FLIGHT", "1"))))
+ARK_UPLOAD_PROXY_THREADS = max(1, min(8, int(os.getenv("ARK_UPLOAD_PROXY_THREADS", "2"))))
 # Uploads can be slow on a small cloud instance, but the upload itself should
 # still have a bounded wait before the task can fail over.
 ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "240")))

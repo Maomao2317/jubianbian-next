@@ -390,6 +390,7 @@ def init_db() -> None:
             ("batch_title", "TEXT"),
             ("batch_index", "INTEGER"),
             ("batch_total", "INTEGER"),
+            ("stage_progress_percent", "INTEGER"),
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")

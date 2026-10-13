@@ -873,7 +873,7 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
     # the detail endpoint only when the user opens a task.
     list_columns = """
         id, title, file_name, duration_sec, estimated_minutes, credits_used,
-        status, stage, progress_percent, error, created_at, updated_at,
+        status, stage, progress_percent, stage_progress_percent, error, created_at, updated_at,
         completed_at, batch_id, batch_title, batch_index, batch_total
     """
     with db() as connection:

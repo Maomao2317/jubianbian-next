@@ -59,7 +59,7 @@ class ParallelUploadFlowTests(unittest.TestCase):
                     CREATE TABLE tasks (
                         id TEXT PRIMARY KEY, user_id TEXT, title TEXT, file_name TEXT,
                         duration_sec REAL, estimated_minutes INTEGER, credits_used INTEGER,
-                        status TEXT, stage TEXT, progress_percent INTEGER, error TEXT,
+                        status TEXT, stage TEXT, progress_percent INTEGER, stage_progress_percent INTEGER, error TEXT,
                         created_at TEXT, updated_at TEXT, completed_at TEXT,
                         batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER
                     )
@@ -109,7 +109,7 @@ class ParallelUploadFlowTests(unittest.TestCase):
                         id TEXT PRIMARY KEY, user_id TEXT, title TEXT, file_name TEXT,
                         stored_path TEXT NOT NULL, file_size INTEGER NOT NULL,
                         mime_type TEXT, duration_sec REAL, estimated_minutes INTEGER,
-                        credits_used INTEGER, status TEXT, stage TEXT, progress_percent INTEGER,
+                        credits_used INTEGER, status TEXT, stage TEXT, progress_percent INTEGER, stage_progress_percent INTEGER,
                         error TEXT, result_json TEXT, quality_json TEXT, evidence_json TEXT,
                         provider TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
                         total_tokens INTEGER, api_cost_rmb REAL DEFAULT 0, attempts INTEGER DEFAULT 0,
