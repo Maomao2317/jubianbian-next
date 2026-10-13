@@ -2,6 +2,7 @@ import json
 import sqlite3
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app import processing, providers, storage, task_store
@@ -31,16 +32,47 @@ class ProviderDeliveryTests(unittest.TestCase):
         )
 
     def test_object_prepare_skips_proxy_and_upload(self):
+        source = SimpleNamespace(name="source.mp4", stat=lambda: SimpleNamespace(st_size=1024))
         with (
             patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),
             patch.object(providers, "ark_account_key", return_value="key"),
             patch.object(providers, "presigned_get", return_value="https://cos.test/video") as sign,
             patch.object(providers, "ark_upload_video") as upload,
         ):
-            result = providers.ark_prepare_video(Path("source.mp4"), 131, source_uri="s3://bucket/video")
+            result = providers.ark_prepare_video(source, 131, source_uri="s3://bucket/video")
         sign.assert_called_once_with("s3://bucket/video")
         upload.assert_not_called()
         self.assertEqual(result, {"api_key": "key", "video_url": "https://cos.test/video"})
+
+    def test_object_prepare_uploads_large_object_instead_of_using_video_url(self):
+        source = SimpleNamespace(name="large.mp4", stat=lambda: SimpleNamespace(st_size=50 * 1024 * 1024))
+        with (
+            patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),
+            patch.object(providers, "ark_account_key", return_value="key"),
+            patch.object(providers, "presigned_get") as sign,
+            patch.object(providers, "ark_upload_video", return_value=("file-id", "key")) as upload,
+            patch.object(providers, "ark_wait_for_file") as wait,
+        ):
+            result = providers.ark_prepare_video(source, 131, source_uri="s3://bucket/large")
+        sign.assert_not_called()
+        upload.assert_called_once_with(source, "key", 131)
+        wait.assert_called_once_with("file-id", "key")
+        self.assertEqual(result, {"api_key": "key", "file_id": "file-id"})
+
+    def test_object_prepare_uploads_when_local_size_is_unknown(self):
+        missing = SimpleNamespace(name="missing.mp4", stat=Mock(side_effect=OSError("missing")))
+        with (
+            patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),
+            patch.object(providers, "ark_account_key", return_value="key"),
+            patch.object(providers, "presigned_get") as sign,
+            patch.object(providers, "ark_upload_video", return_value=("file-id", "key")) as upload,
+            patch.object(providers, "ark_wait_for_file") as wait,
+        ):
+            result = providers.ark_prepare_video(missing, 131, source_uri="s3://bucket/unknown")
+        sign.assert_not_called()
+        upload.assert_called_once_with(missing, "key", 131)
+        wait.assert_called_once_with("file-id", "key")
+        self.assertEqual(result, {"api_key": "key", "file_id": "file-id"})
 
     def test_direct_input_retains_sampling_short_words_and_emotion(self):
         with (

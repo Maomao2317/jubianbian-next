@@ -372,6 +372,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                         "type": "dialogue",
                         "speaker": "甲",
                         "mouthMoving": False,
+                        "voiceSource": "internal",
                         "text": "今天，我一定要离开",
                     }],
                 }],

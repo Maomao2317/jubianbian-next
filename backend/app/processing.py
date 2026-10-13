@@ -173,7 +173,10 @@ def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any])
     """Do not replace a draft with a review that loses independent evidence."""
     if len(quality_gate(reviewed)[1]) > len(quality_gate(initial)[1]):
         return "more_blocking_issues"
-    for key in ("transcriptCoverage", "dialogueEvidencePrecision"):
+    before_tags = {issue.get("tag") for issue in quality_gate(initial)[1]}
+    if any(issue.get("tag") not in before_tags for issue in quality_gate(reviewed)[1]):
+        return "new_blocking_issue_type"
+    for key in ("transcriptCoverage", "dialogueEvidencePrecision", "ocrCoverage"):
         before, after = initial.get(key), reviewed.get(key)
         if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after < before:
             return f"lower_{key}"
@@ -189,6 +192,14 @@ def _automated_review_context(
         start = issue.get("startSec")
         end = issue.get("endSec")
         if not isinstance(start, (int, float)) and not isinstance(end, (int, float)):
+            scene_number, block_number = issue.get("scene"), issue.get("block")
+            if type(scene_number) is int and type(block_number) is int and scene_number > 0 and block_number > 0:
+                try:
+                    block = script["scenes"][scene_number - 1]["blocks"][block_number - 1]
+                    start, end = block.get("startSec"), block.get("endSec")
+                except (IndexError, KeyError, TypeError):
+                    pass
+        if not isinstance(start, (int, float)) and not isinstance(end, (int, float)):
             continue
         if not isinstance(start, (int, float)):
             start = max(0.0, end - 3.0)
@@ -199,6 +210,8 @@ def _automated_review_context(
         ranges.append({
             "startSec": start,
             "endSec": end,
+            "contextStartSec": max(0.0, start - 2.0),
+            "contextEndSec": end + 2.0,
             "tag": issue.get("tag"),
             "severity": issue.get("severity"),
         })
@@ -207,6 +220,7 @@ def _automated_review_context(
     # spends its context on the video/issues rather than repeated JSON.
     block_keys = {
         "type", "text", "speaker", "visibleSpeaker", "mouthMoving", "speakerEvidence",
+        "speechContinuity", "voiceSource",
         "voKind", "confidence", "uncertain", "inferred", "startSec", "endSec",
         "object", "result", "performance", "emotionType", "emotionEvidence",
         "emotionIntensity", "emotionTrigger", "emotionChange", "emotionTarget",
@@ -252,6 +266,7 @@ def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
         "疑似漏台词片段",
         "正文混入校对备注",
         "事实臆造",
+        "疑似漏画面文字片段", "字幕对白遗漏",
     }
     return any(
         isinstance(issue, dict)
@@ -274,6 +289,7 @@ def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
     critical_tags = {
         "台词归属错", "漏台词", "OS漏标", "OS/VO混淆", "音频对白不一致",
         "音频对白需核对", "疑似漏台词片段", "正文混入校对备注", "事实臆造",
+        "疑似漏画面文字片段", "字幕对白遗漏",
     }
     return [
         issue
@@ -292,6 +308,13 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
     text = str(error).casefold()
+    status_code = getattr(error, "status_code", None)
+    size_limit_failure = status_code in {400, 413} and any(
+        marker in text
+        for marker in ("exceeds the limit", "exceeds limit", "input video", "video size", "request entity too large", "50 mib", "50 mb")
+    )
+    if size_limit_failure:
+        return True
     return any(
         marker in text
         for marker in (
@@ -305,6 +328,11 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
 
 def _task_error_message(error: BaseException) -> str:
     text = str(error).casefold()
+    if getattr(error, "status_code", None) in {400, 413} and any(
+        marker in text
+        for marker in ("exceeds the limit", "exceeds limit", "input video", "video size", "request entity too large", "50 mib", "50 mb")
+    ):
+        return "视频文件超过方舟单次输入上限，已停止无效重试；请重新处理（系统将先压缩大视频再提交）。"
     if _is_non_retryable_provider_error(error):
         return "当前 Lite 模型未启用，已停止重复重试；请启用该模型或改用 Turbo 后再识别。"
     if any(marker in text for marker in ("timed out", "timeout", "超时")):

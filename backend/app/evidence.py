@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,9 +37,9 @@ from .config import (
 )
 from .logging_setup import logger, safe_error_text
 
-EVIDENCE_VERSION = "1.0"
+EVIDENCE_VERSION = "1.1"
 MAX_TRANSCRIPT_CHARS = 12_000
-MAX_OCR_ITEMS = 80
+MAX_OCR_ITEMS = 1440
 MAX_KEYFRAMES = 24
 
 _local_asr_model: Any | None = None
@@ -70,11 +71,11 @@ def _time(value: Any, fallback: float = 0.0) -> float:
     return max(0.0, round(number, 3))
 
 
-def _sample_times(duration_sec: float, count: int = MAX_KEYFRAMES, *, limit: int = MAX_KEYFRAMES) -> list[float]:
+def _sample_times(duration_sec: float, count: int = MAX_KEYFRAMES, *, limit: int = MAX_KEYFRAMES, min_interval: float = 0.5) -> list[float]:
     duration = max(0.0, float(duration_sec or 0))
     if duration <= 0:
         return [0.0]
-    count = max(1, min(count, int(duration / 0.5) + 1, limit))
+    count = max(1, min(count, int(duration / min_interval) + 1, limit))
     if count == 1:
         return [0.0]
     step = duration / count
@@ -87,7 +88,8 @@ def _adaptive_ocr_times(duration_sec: float) -> list[float]:
     if duration <= 0:
         return [0.0]
     desired = int(duration / OCR_SAMPLE_INTERVAL_SECONDS) + 1
-    return _sample_times(duration, count=min(OCR_MAX_FRAMES, max(1, desired)), limit=OCR_MAX_FRAMES)
+    return _sample_times(duration, count=min(OCR_MAX_FRAMES, max(1, desired)), limit=OCR_MAX_FRAMES,
+                         min_interval=OCR_SAMPLE_INTERVAL_SECONDS)
 
 
 def _get_local_asr_model() -> Any:
@@ -170,6 +172,7 @@ def _local_asr_items(path: Path) -> list[dict[str, Any]]:
                 "speech_pad_ms": LOCAL_ASR_VAD_SPEECH_PAD_MS,
             },
             condition_on_previous_text=False,
+            word_timestamps=True,
         )
         for segment in segments:
             text = _bounded_text(str(getattr(segment, "text", "") or ""), 1500)
@@ -179,15 +182,27 @@ def _local_asr_items(path: Path) -> list[dict[str, Any]]:
             if remaining <= 0:
                 break
             text = _bounded_text(text, remaining)
-            items.append(
-                {
+            item = {
                     "type": "transcript_segment",
                     "text": text,
                     "startSec": _time(getattr(segment, "start", 0.0)),
                     "endSec": _time(getattr(segment, "end", 0.0)),
                     "confidence": "local_asr",
                 }
-            )
+            # Keep the original segment, with finer anchors for cut-spanning
+            # lines and very short interjections. Words are never deduplicated.
+            words = []
+            for word in getattr(segment, "words", None) or []:
+                word_text = str(getattr(word, "word", "") or "").strip()
+                if word_text:
+                    words.append({"text": word_text, "startSec": _time(getattr(word, "start", 0)),
+                                  "endSec": _time(getattr(word, "end", 0))})
+            # Whisper words can include a leading space or trailing comma;
+            # compare actual characters before trusting their time anchors.
+            comparable = lambda value: re.sub(r"[\W_]+", "", value, flags=re.UNICODE)
+            if words and comparable("".join(word["text"] for word in words)) == comparable(text):
+                item["words"] = words
+            items.append(item)
             captured_chars += len(text)
     return items
 
@@ -279,17 +294,19 @@ def _keyframe_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     return _source("keyframes", "available", provider=Path(ffmpeg).name, items=items)
 
 
-def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: str, duration_sec: float) -> list[Path]:
+def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: str, duration_sec: float, *, probe: bool = False) -> list[Path]:
     """Decode dense short-video samples once without changing their timestamps.
 
     Each selected frame is the first frame at or after the same timestamp used
     by the individual seek path. Sparse samples of long videos retain seeking
     so we do not decode an entire movie to obtain a handful of frames.
     """
-    images = [temp_dir / f"frame-{index:03d}.png" for index in range(len(times))]
+    extension = "pgm" if probe else "png"
+    images = [temp_dir / f"frame-{index:03d}.{extension}" for index in range(len(times))]
+    probe_filter = "scale=w='min(iw,960)':h=-2,format=gray" if probe else ""
     step = duration_sec / len(times) if len(times) > 1 else 0.0
     uniform = times == [round(index * step, 3) for index in range(len(times))]
-    if times and times[0] == 0 and uniform and times[-1] <= 300 and step <= 3:
+    if times and times[0] == 0 and uniform and times[-1] <= 600 and step <= 3:
         started = time.perf_counter()
         try:
             subprocess.run(
@@ -298,12 +315,12 @@ def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: 
                     # Accurate seeks round target times to the stream's time
                     # base. Comparing raw seconds can drop a boundary frame
                     # whose PTS is a few microseconds before the millisecond.
-                    "-vf", f"select=gte(pts\\,floor(floor(selected_n*{step:.12f}*1000+0.5)/1000/TB+0.5))",
+                    "-vf", f"select=gte(pts\\,floor(floor(selected_n*{step:.12f}*1000+0.5)/1000/TB+0.5))" + ("," + probe_filter if probe else ""),
                     "-fps_mode", "passthrough", "-frames:v", str(len(times)),
-                    "-start_number", "0", "-y", str(temp_dir / "frame-%03d.png"),
+                    "-start_number", "0", "-y", str(temp_dir / f"frame-%03d.{extension}"),
                 ],
                 capture_output=True,
-                timeout=max(60.0, min(240.0, times[-1] * 1.5 + 30)),
+                timeout=max(60.0, min(900.0, times[-1] * 1.5 + 30)),
                 check=True,
             )
             if all(image.exists() for image in images):
@@ -316,12 +333,44 @@ def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: 
             logger.warning("evidence_frame_batch_failed file=%s error=%s", path.name, safe_error_text(exc))
     for image, timestamp in zip(images, times):
         subprocess.run(
-            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", str(timestamp), "-i", str(path), "-frames:v", "1", "-y", str(image)],
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", str(timestamp), "-i", str(path), "-frames:v", "1"]
+            + (["-vf", probe_filter] if probe else []) + ["-y", str(image)],
             capture_output=True,
             timeout=30,
             check=True,
         )
     return images
+
+
+def _subtitle_band(image_path: Path) -> tuple[Path, bytes]:
+    """Crop losslessly from ffmpeg's gray PGM without an imaging dependency."""
+    data = image_path.read_bytes()
+    header = re.match(rb"P5\s+(\d+)\s+(\d+)\s+255\s", data)
+    if not header:
+        raise ValueError("Unsupported OCR probe image")
+    width, height = int(header[1]), int(header[2])
+    pixels = data[header.end():]
+    if len(pixels) != width * height:
+        raise ValueError("Incomplete OCR probe image")
+    band_height = max(1, (height * 45 + 99) // 100)
+    band = pixels[-width * band_height:]
+    cropped = image_path.with_name(image_path.stem + "-subtitle.pgm")
+    cropped.write_bytes(f"P5\n{width} {band_height}\n255\n".encode("ascii") + band)
+    return cropped, band
+
+
+def _append_ocr_sample(items: list[dict[str, Any]], text: str, timestamp: float, end: float,
+                       previous: dict[str, Any] | None, *, region: str) -> dict[str, Any] | None:
+    """Extend adjacent observations; a blank ends the occurrence."""
+    if not text:
+        return None
+    if previous and previous["text"] == text:
+        previous["endSec"] = end
+        return previous
+    item = {"type": "screen_text", "text": text, "startSec": timestamp, "endSec": end,
+            "confidence": "ocr", "region": region}
+    items.append(item)
+    return item
 
 
 def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
@@ -340,37 +389,62 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     successful_frames = 0
     errors: list[str] = []
-    previous_text = ""
+    previous_items: dict[str, dict[str, Any] | None] = {"subtitle_band": None, "full": None}
     # Tesseract's OpenMP workers otherwise compete with ASR and other episodes.
     # One OCR thread keeps the same recognition settings and sampled pixels.
     ocr_env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
     try:
         with tempfile.TemporaryDirectory(prefix="jbb-ocr-") as temp_name:
             temp_dir = Path(temp_name)
-            images = _extract_ocr_frames(path, temp_dir, times, ffmpeg, duration_sec)
-            for timestamp, image_path in zip(times, images):
-                result = subprocess.run(
-                    [tesseract, str(image_path), "stdout", "-l", OCR_LANG],
-                    capture_output=True,
-                    timeout=30,
-                    check=False,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    env=ocr_env,
-                )
-                text = _bounded_text(result.stdout, 1000)
-                if result.returncode == 0:
-                    successful_frames += 1
-                elif len(errors) < 3:
-                    errors.append(_bounded_text(result.stderr, 300) or f"tesseract exit {result.returncode}")
-                # Collapse the same subtitle seen in adjacent samples while
-                # keeping the first timestamp that proves it appeared.
-                if result.returncode == 0 and text and text != previous_text:
-                    items.append({"type": "screen_text", "text": text, "startSec": timestamp, "endSec": min(float(duration_sec or timestamp), timestamp + OCR_SAMPLE_INTERVAL_SECONDS), "confidence": "ocr"})
-                    previous_text = text
-                if len(items) >= MAX_OCR_ITEMS:
-                    break
+            images = _extract_ocr_frames(path, temp_dir, times, ffmpeg, duration_sec, probe=True)
+            previous_band: bytes | None = None
+            band_text = ""
+            next_full = 0.0
+            ocr_calls = 0
+            for index, (timestamp, image_path) in enumerate(zip(times, images)):
+                # Dense subtitle crops capture fast words cheaply. Full-screen
+                # scans still capture name cards, titles and system overlays.
+                # Only identical pixels skip OCR; no similarity threshold can
+                # erase a one-character subtitle change.
+                cropped, band = _subtitle_band(image_path)
+                samples = []
+                if band != previous_band:
+                    samples.append(("subtitle_band", cropped))
+                else:
+                    previous_items["subtitle_band"] = _append_ocr_sample(
+                        items, band_text, timestamp, times[index + 1] if index + 1 < len(times) else float(duration_sec),
+                        previous_items["subtitle_band"], region="subtitle_band")
+                if timestamp >= next_full or index == len(times) - 1:
+                    samples.append(("full", image_path))
+                    next_full = timestamp + max(1.0, OCR_SAMPLE_INTERVAL_SECONDS)
+                previous_band = band
+                for region, sample_path in samples:
+                    result = subprocess.run(
+                        [tesseract, str(sample_path), "stdout", "-l", OCR_LANG, "--psm", "11"],
+                        capture_output=True, timeout=30, check=False,
+                        text=True, encoding="utf-8", errors="replace", env=ocr_env,
+                    )
+                    ocr_calls += 1
+                    text = _bounded_text(result.stdout, 1000) if result.returncode == 0 else ""
+                    if result.returncode == 0:
+                        successful_frames += 1
+                    elif len(errors) < 3:
+                        errors.append(_bounded_text(result.stderr, 300) or f"tesseract exit {result.returncode}")
+                    if result.returncode != 0 and region == "subtitle_band":
+                        # Failed recognition must be retried even for identical pixels.
+                        previous_band = None
+                    if region == "subtitle_band":
+                        band_text = text
+                        end = times[index + 1] if index + 1 < len(times) else max(timestamp, float(duration_sec))
+                    else:
+                        # A full-frame sample proves only this observation,
+                        # not the whole interval until the next sparse scan.
+                        end = timestamp
+                        if text and text == band_text:
+                            previous_items[region] = None
+                            continue
+                    previous_items[region] = _append_ocr_sample(items, text, timestamp, end, previous_items[region], region=region)
+            logger.info("evidence_ocr_sampling file=%s frames=%s ocr_calls=%s", path.name, len(images), ocr_calls)
     except Exception as exc:
         logger.warning("evidence_ocr_failed file=%s error=%s", path.name, safe_error_text(exc))
         return _source("ocr", "unavailable", provider="tesseract", reason=f"OCR 失败：{safe_error_text(exc)}")
@@ -378,7 +452,7 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
         return _source("ocr", "unavailable", provider="tesseract", reason=f"OCR 引擎不可用：{errors[0]}")
     if not items:
         return _source("ocr", "available", provider="tesseract", reason="采样帧未识别到可确认的画面文字")
-    return _source("ocr", "available", provider="tesseract", items=items)
+    return _source("ocr", "available", provider="tesseract", items=sorted(items, key=lambda item: item["startSec"]))
 
 
 def evidence_summary(evidence: dict[str, Any] | None) -> str:
@@ -393,7 +467,10 @@ def evidence_summary(evidence: dict[str, Any] | None) -> str:
         status = source.get("status") or "unavailable"
         reason = source.get("reason") or ""
         lines.append(f"- {kind}: {status}{('；' + reason) if reason else ''}")
-        for item in (source.get("items") or [])[:MAX_OCR_ITEMS]:
+        source_items = source.get("items") or []
+        # Audio and OCR have different budgets; never truncate ASR to the
+        # former 80-item subtitle limit. Preserve one-character occurrences.
+        for item in source_items:
             if not isinstance(item, dict):
                 continue
             text = _bounded_text(str(item.get("text") or item.get("visualText") or ""), 1500)

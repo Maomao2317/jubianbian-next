@@ -98,30 +98,45 @@ def update_task(task_id: str, **values: Any) -> None:
 
 
 def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any] | None:
-    """Read only the actual first episode's cast; never wait for other workers."""
+    """Read completed earlier episodes in order; never wait for other workers."""
     if not {"batch_id", "user_id"}.issubset(row.keys()) or not row["batch_id"] or not row["user_id"]:
         return None
     with db() as connection:
-        first = connection.execute(
+        rows = connection.execute(
             """SELECT id, title, status, result_json FROM tasks
                WHERE batch_id = ? AND user_id = ?
-               ORDER BY COALESCE(batch_index, 2147483647), created_at, id LIMIT 1""",
+               ORDER BY COALESCE(batch_index, 2147483647), created_at, id""",
             (row["batch_id"], row["user_id"]),
-        ).fetchone()
-    if not first or first["id"] == row["id"] or first["status"] not in {"done", "review"}:
+        ).fetchall()
+    if not rows or rows[0]["id"] == row["id"] or rows[0]["status"] not in {"done", "review"}:
         return None
-    try:
-        script = json.loads(first["result_json"] or "")
-    except (TypeError, ValueError):
+    current_index = next((index for index, item in enumerate(rows) if item["id"] == row["id"]), None)
+    if current_index is None:
         return None
-    if not isinstance(script, dict):
-        return None
-    profiles = [
-        {key: profile[key] for key in ("name", "aliases", "appearance", "clothing") if key in profile}
-        for profile in script.get("characterProfiles") or []
-        if isinstance(profile, dict) and profile.get("name")
-    ]
-    return {"referenceTitle": first["title"], "characterProfiles": profiles} if profiles else None
+    scripts = []
+    for earlier in rows[:current_index]:
+        if earlier["status"] not in {"done", "review"}:
+            continue
+        try:
+            script = json.loads(earlier["result_json"] or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(script, dict):
+            scripts.append(script)
+    apply_batch_character_continuity(scripts)
+    profiles: dict[str, dict[str, Any]] = {}
+    for script in scripts:
+        for profile in script.get("characterProfiles") or []:
+            if not isinstance(profile, dict) or not isinstance(profile.get("name"), str) or not profile["name"].strip():
+                continue
+            compact = {key: profile[key] for key in ("name", "aliases", "appearance", "clothing", "species",
+                                                     "nameEvidence", "identityEvidence", "relationships") if key in profile}
+            existing = profiles.setdefault(profile["name"], compact)
+            existing["aliases"] = list(dict.fromkeys(existing.get("aliases", []) + compact.get("aliases", [])))
+            for key, value in compact.items():
+                if not existing.get(key):
+                    existing[key] = value
+    return {"referenceTitle": rows[0]["title"], "characterProfiles": list(profiles.values())} if profiles else None
 
 
 def reconcile_batch_character_continuity(batch_id: str | None) -> int:
