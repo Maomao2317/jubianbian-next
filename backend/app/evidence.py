@@ -391,7 +391,9 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     errors: list[str] = []
     previous_items: dict[str, dict[str, Any] | None] = {"subtitle_band": None, "full": None}
     # Tesseract's OpenMP workers otherwise compete with ASR and other episodes.
-    # One OCR thread keeps the same recognition settings and sampled pixels.
+    # Each process remains single-threaded, while independent sampled images
+    # run in a small pool. Output is consumed in timestamp order below, so the
+    # deduplication and interval semantics remain identical to serial OCR.
     ocr_env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
     try:
         with tempfile.TemporaryDirectory(prefix="jbb-ocr-") as temp_name:
@@ -401,49 +403,70 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
             band_text = ""
             next_full = 0.0
             ocr_calls = 0
+            jobs: list[tuple[int, str, Path]] = []
+            band_jobs: dict[int, int | None] = {}
+            full_jobs: dict[int, int] = {}
+            previous_band_job: int | None = None
             for index, (timestamp, image_path) in enumerate(zip(times, images)):
                 # Dense subtitle crops capture fast words cheaply. Full-screen
                 # scans still capture name cards, titles and system overlays.
                 # Only identical pixels skip OCR; no similarity threshold can
                 # erase a one-character subtitle change.
                 cropped, band = _subtitle_band(image_path)
-                samples = []
                 if band != previous_band:
-                    samples.append(("subtitle_band", cropped))
-                else:
-                    previous_items["subtitle_band"] = _append_ocr_sample(
-                        items, band_text, timestamp, times[index + 1] if index + 1 < len(times) else float(duration_sec),
-                        previous_items["subtitle_band"], region="subtitle_band")
+                    job_index = len(jobs)
+                    jobs.append((index, "subtitle_band", cropped))
+                    previous_band_job = job_index
+                band_jobs[index] = previous_band_job
                 if timestamp >= next_full or index == len(times) - 1:
-                    samples.append(("full", image_path))
+                    full_jobs[index] = len(jobs)
+                    jobs.append((index, "full", image_path))
                     next_full = timestamp + max(1.0, OCR_SAMPLE_INTERVAL_SECONDS)
                 previous_band = band
-                for region, sample_path in samples:
-                    result = subprocess.run(
+            def run_ocr(job: tuple[int, str, Path]) -> tuple[int, str, str]:
+                _index, _region, sample_path = job
+                result = subprocess.run(
                         [tesseract, str(sample_path), "stdout", "-l", OCR_LANG, "--psm", "11"],
                         capture_output=True, timeout=30, check=False,
                         text=True, encoding="utf-8", errors="replace", env=ocr_env,
                     )
+                return result.returncode, (_bounded_text(result.stdout, 1000) if result.returncode == 0 else ""), _bounded_text(result.stderr, 300)
+
+            with ThreadPoolExecutor(max_workers=min(4, max(1, len(jobs))), thread_name_prefix="jbb-ocr") as executor:
+                results = list(executor.map(run_ocr, jobs))
+            for index, (timestamp, image_path) in enumerate(zip(times, images)):
+                band_job = band_jobs.get(index)
+                band_result = results[band_job] if band_job is not None else None
+                if band_result is not None and jobs[band_job][0] == index:
+                    returncode, band_text, stderr = band_result
                     ocr_calls += 1
-                    text = _bounded_text(result.stdout, 1000) if result.returncode == 0 else ""
-                    if result.returncode == 0:
+                    if returncode == 0:
                         successful_frames += 1
                     elif len(errors) < 3:
-                        errors.append(_bounded_text(result.stderr, 300) or f"tesseract exit {result.returncode}")
-                    if result.returncode != 0 and region == "subtitle_band":
-                        # Failed recognition must be retried even for identical pixels.
-                        previous_band = None
-                    if region == "subtitle_band":
-                        band_text = text
-                        end = times[index + 1] if index + 1 < len(times) else max(timestamp, float(duration_sec))
-                    else:
-                        # A full-frame sample proves only this observation,
-                        # not the whole interval until the next sparse scan.
-                        end = timestamp
-                        if text and text == band_text:
-                            previous_items[region] = None
-                            continue
-                    previous_items[region] = _append_ocr_sample(items, text, timestamp, end, previous_items[region], region=region)
+                        errors.append(stderr or f"tesseract exit {returncode}")
+                    if returncode != 0:
+                        band_text = ""
+                    end = times[index + 1] if index + 1 < len(times) else max(timestamp, float(duration_sec))
+                    previous_items["subtitle_band"] = _append_ocr_sample(
+                        items, band_text, timestamp, end, previous_items["subtitle_band"], region="subtitle_band")
+                elif band_result is not None:
+                    previous_items["subtitle_band"] = _append_ocr_sample(
+                        items, band_text, timestamp, times[index + 1] if index + 1 < len(times) else float(duration_sec),
+                        previous_items["subtitle_band"], region="subtitle_band")
+                full_job = full_jobs.get(index)
+                if full_job is not None:
+                    returncode, text, stderr = results[full_job]
+                    ocr_calls += 1
+                    if returncode == 0:
+                        successful_frames += 1
+                    elif len(errors) < 3:
+                        errors.append(stderr or f"tesseract exit {returncode}")
+                    if text and text == band_text:
+                        previous_items["full"] = None
+                        continue
+                    previous_items["full"] = _append_ocr_sample(
+                        items, text if returncode == 0 else "", timestamp, timestamp,
+                        previous_items["full"], region="full")
             logger.info("evidence_ocr_sampling file=%s frames=%s ocr_calls=%s", path.name, len(images), ocr_calls)
     except Exception as exc:
         logger.warning("evidence_ocr_failed file=%s error=%s", path.name, safe_error_text(exc))
