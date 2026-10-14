@@ -256,6 +256,40 @@ class ProviderDeliveryTests(unittest.TestCase):
         context = processing._automated_review_context(script, [{"tag": "漏台词"}])
         self.assertNotIn("source-only-marker", providers.ark_prompt("第2集", 10, review_context=context))
 
+    def test_review_prompt_keeps_evidence_near_issue_ranges(self):
+        evidence = {"sources": [
+            {"kind": "audio", "status": "available", "items": [
+                {"text": "near-audio", "startSec": 1, "endSec": 2},
+                {"text": "far-audio", "startSec": 100, "endSec": 101},
+            ]},
+            {"kind": "ocr", "status": "available", "items": [
+                {"text": "near-subtitle", "startSec": 3, "endSec": 4},
+                {"text": "far-subtitle", "startSec": 200, "endSec": 201},
+            ]},
+        ]}
+        context = {"scope": "issue_patches", "ranges": [{"startSec": 1, "endSec": 2,
+                   "contextStartSec": 0, "contextEndSec": 4}], "draft": {}, "issues": []}
+        prompt = providers.ark_prompt("episode", 210, evidence, context)
+        self.assertIn("near-audio", prompt)
+        self.assertIn("near-subtitle", prompt)
+        self.assertNotIn("far-audio", prompt)
+        self.assertNotIn("far-subtitle", prompt)
+        full_prompt = providers.ark_prompt("episode", 210, evidence)
+        self.assertIn("far-audio", full_prompt)
+        self.assertIn("far-subtitle", full_prompt)
+        self.assertEqual(len(evidence["sources"][0]["items"]), 2)
+
+    def test_review_prompt_preserves_spanning_and_untimed_evidence(self):
+        evidence = {"sources": [{"kind": "audio", "status": "available", "items": [
+            {"text": "whole-transcript", "startSec": 0, "endSec": 300},
+            {"text": "untimed-name"},
+        ]}]}
+        context = {"scope": "issue_patches", "ranges": [{"contextStartSec": 250, "contextEndSec": 255}],
+                   "draft": {}, "issues": []}
+        prompt = providers.ark_prompt("episode", 300, evidence, context)
+        self.assertIn("whole-transcript", prompt)
+        self.assertIn("untimed-name", prompt)
+
     def test_empty_or_incomplete_body_is_never_accepted_as_success(self):
         for value in ({"scenes": []}, {"scenes": [{"blocks": []}]},
                       {"scenes": [{"blocks": [{"type": "dialogue", "text": ""}]}]}, []):
@@ -382,6 +416,41 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertNotIn("private-signature-secret", str(caught.exception))
         self.assertEqual(context["draft"]["scenes"][0]["blocks"][0]["text"], "我。")
 
+    def test_many_review_ranges_retain_full_output_allowance(self):
+        script = json.loads(self.completed()["output_text"])
+        context = {"scope": "issue_patches", "ranges": [
+            {"startSec": index, "endSec": index + .1} for index in range(20)
+        ], "draft": script}
+        with (patch.object(providers, "ARK_MAX_OUTPUT_TOKENS", 32768),
+              patch.object(providers, "ARK_REVIEW_MAX_OUTPUT_TOKENS", 8192),
+              patch.object(providers, "ark_stream_response", return_value={"output_text": '{"corrections": []}'}) as create):
+            providers.ark_recognize(Path("source.mp4"), "episode", 30, review_context=context,
+                                    prepared_video={"api_key": "key", "file_id": "file"})
+        self.assertEqual(create.call_args.args[0]["max_output_tokens"], 32768)
+
+    def test_review_retries_with_full_budget_only_after_output_limit(self):
+        script = json.loads(self.completed()["output_text"])
+        context = {"scope": "issue_patches", "ranges": [{"startSec": 1, "endSec": 3}],
+                   "draft": script}
+        requests = []
+
+        def create(payload, key):
+            requests.append(deepcopy(payload))
+            if len(requests) == 1:
+                raise providers._ark_incomplete_error({
+                    "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}})
+            return {"output_text": '{"corrections": []}'}
+
+        with (patch.object(providers, "ark_stream_response", side_effect=create),
+              patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+              patch.object(providers, "ARK_MAX_OUTPUT_TOKENS", 32768),
+              patch.object(providers, "ARK_REVIEW_MAX_OUTPUT_TOKENS", 8192)):
+            result, _ = providers.ark_recognize(Path("source.mp4"), "episode", 30,
+                                               review_context=context,
+                                               prepared_video={"api_key": "key", "file_id": "file"})
+        self.assertEqual([request["max_output_tokens"] for request in requests], [8192, 32768])
+        self.assertEqual(result["scenes"][0]["blocks"][0]["text"], "今天，我决定，我要留下。")
+
     def test_review_retry_receives_prior_patches_and_precise_error_without_reupload(self):
         block = {"type": "dialogue", "speaker": "甲", "text": "今天，我决定。", "startSec": 1, "endSec": 3}
         context = {"scope": "issue_patches", "ranges": [{"startSec": 1, "endSec": 3}],
@@ -397,12 +466,15 @@ class ProviderDeliveryTests(unittest.TestCase):
 
         with (patch.object(providers, "ark_stream_response", side_effect=create),
               patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+              patch.object(providers, "ARK_REVIEW_MAX_OUTPUT_TOKENS", 4096),
               patch.object(providers.time, "sleep"), patch.object(providers, "ark_prepare_video") as upload):
             script, _ = providers.ark_recognize(Path("source.mp4"), "第2集", 10, review_context=context,
                                               prepared_video={"api_key": "key", "video_url": "https://cos.test/video"})
         upload.assert_not_called()
         self.assertEqual(len(requests[1]["input"]), 1)
         self.assertEqual(requests[1]["input"][0]["role"], "user")
+        self.assertEqual(requests[0]["max_output_tokens"], 4096)
+        self.assertEqual(requests[1]["max_output_tokens"], 4096)
         feedback = requests[1]["input"][0]["content"][1]["text"]
         self.assertIn(invalid["output_text"], feedback)
         self.assertIn("corrections[0]: replacement outside target block", feedback)

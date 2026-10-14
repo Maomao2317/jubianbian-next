@@ -78,6 +78,45 @@ class RecognitionRegressions(unittest.TestCase):
         self.assertEqual(second["scenes"][0]["blocks"][0]["speaker"], "周向东父亲")
         self.assertEqual(second["scenes"][0]["blocks"][1]["speaker"], "周向东哥哥")
 
+    def test_named_relationship_owner_resolves_later_bare_kinship_label(self):
+        first = episode(["林婉怡", "王浩"], [
+            {"type": "dialogue", "speaker": "林婉怡", "text": "好"},
+            {"type": "dialogue", "speaker": "王浩", "text": "婉怡，回家"},
+        ], [
+            {"name": "林婉怡"},
+            {"name": "王浩", "relationships": [{"target": "林婉怡", "relation": "丈夫"}]},
+        ])
+        second = episode(["林婉怡", "丈夫"], [
+            {"type": "dialogue", "speaker": "林婉怡", "text": "好"},
+            {"type": "dialogue", "speaker": "丈夫", "text": "我在这"},
+        ], [
+            {"name": "林婉怡"},
+            {"name": "丈夫", "relationships": [{"target": "林婉怡", "relation": "丈夫"}]},
+        ])
+        apply_batch_character_continuity([first, second])
+        self.assertEqual(second["characters"], ["林婉怡", "王浩"])
+        self.assertEqual(second["scenes"][0]["blocks"][1]["speaker"], "王浩")
+        self.assertEqual(second["scenes"][0]["blocks"][1]["text"], "我在这。")
+
+    def test_bare_kinship_label_requires_same_named_counterpart_and_role(self):
+        first = episode(["林婉怡", "王浩", "李芸"], [
+            {"type": "dialogue", "speaker": name, "text": "好"}
+            for name in ("林婉怡", "王浩", "李芸")
+        ], [{"name": "王浩", "relationships": [{"target": "林婉怡", "relation": "丈夫"}]}])
+        second = episode(["李芸", "丈夫"], [
+            {"type": "dialogue", "speaker": "李芸", "text": "别走"},
+            {"type": "dialogue", "speaker": "丈夫", "text": "好"},
+        ], [{"name": "丈夫", "relationships": [{"target": "李芸", "relation": "丈夫"}]}])
+        apply_batch_character_continuity([first, second])
+        self.assertEqual(second["scenes"][0]["blocks"][1]["speaker"], "丈夫")
+
+    def test_blocking_review_includes_only_corroborated_missing_line_advisories(self):
+        blocking = {"tag": "台词归属错", "severity": "P0", "scene": 1, "block": 1}
+        supported = {"tag": "疑似漏台词片段", "severity": "P1", "ocrConfirmed": True}
+        unsupported = {"tag": "疑似漏台词片段", "severity": "P1"}
+        quality = {"issues": [blocking, supported, unsupported]}
+        self.assertEqual(processing._automated_review_issues(quality), [blocking, supported])
+
     def test_name_first_established_in_second_episode_is_used_in_third(self):
         first = episode(["周向东"], [{"type": "dialogue", "speaker": "周向东", "text": "走"}])
         second = episode(["丁大旺"], [{"type": "dialogue", "speaker": "丁大旺", "text": "来了"}],

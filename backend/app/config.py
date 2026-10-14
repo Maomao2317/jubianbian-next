@@ -78,6 +78,13 @@ ARK_VIDEO_URL_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_VIDEO_URL_ATTEMPTS", "
 # full-video review off after minutes of generation. This is a ceiling, not
 # a target: the prompt omits repeated text and unused metadata.
 ARK_MAX_OUTPUT_TOKENS = max(4096, min(32768, int(os.getenv("ARK_MAX_OUTPUT_TOKENS", "32768"))))
+# A patch review returns bounded corrections, so it does not need the full
+# screenplay output budget. Keep this separate so initial recognition retains
+# its allowance for dialogue, subtitles, and character metadata.
+ARK_REVIEW_MAX_OUTPUT_TOKENS = max(
+    2048,
+    min(16384, int(os.getenv("ARK_REVIEW_MAX_OUTPUT_TOKENS", "8192"))),
+)
 ARK_FILE_POLL_SECONDS = max(0.5, float(os.getenv("ARK_FILE_POLL_SECONDS", "1")))
 ARK_FILE_POLL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_FILE_POLL_TIMEOUT_SECONDS", "300")))
 # This is our conservative delivery budget, not a claim about Files API limits.

@@ -45,6 +45,33 @@ class RecognitionCheckpointTests(unittest.TestCase):
         self.assertIsNone(self.cache.proxy())
         self.assertEqual(self.original.read_bytes(), b"original-video")
 
+    def test_adopt_proxy_moves_fresh_file_without_copying_original(self):
+        proxy_dir = self.root / "encoded"
+        proxy_dir.mkdir()
+        proxy = proxy_dir / "delivery.mp4"
+        proxy.write_bytes(b"compressed")
+        with patch.object(checkpoints.shutil, "copyfile", side_effect=AssertionError("proxy was copied")):
+            saved = self.cache.adopt_proxy(proxy)
+        self.assertEqual(saved.read_bytes(), b"compressed")
+        self.assertFalse(proxy.exists())
+        self.assertEqual(self.cache.proxy(), saved)
+
+    def test_adopt_proxy_falls_back_to_copy_when_move_fails(self):
+        proxy = self.root / "encoded.mp4"
+        proxy.write_bytes(b"compressed")
+        original_replace = checkpoints.os.replace
+
+        def reject_source_move(source, target):
+            if Path(source) == proxy:
+                raise OSError("cross-device move")
+            return original_replace(source, target)
+
+        with patch.object(checkpoints.os, "replace", side_effect=reject_source_move):
+            saved = self.cache.adopt_proxy(proxy)
+        self.assertEqual(saved.read_bytes(), b"compressed")
+        self.assertTrue(proxy.exists())
+        self.assertEqual(self.cache.proxy(), saved)
+
     def test_disk_checkpoint_failure_is_optional(self):
         with patch.object(checkpoints.os, "replace", side_effect=OSError("disk full")):
             self.cache.save("evidence", {"sources": []})

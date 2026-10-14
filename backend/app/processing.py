@@ -318,10 +318,17 @@ def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
     issues = [issue for issue in (quality.get("issues") or []) if isinstance(issue, dict)]
     blocking = [issue for issue in issues if str(issue.get("severity") or "").upper() == "P0"]
     if blocking:
-        # Repair delivery blockers first. Mixing advisory ASR disagreements
-        # into the same patch can alter correct words and reject a useful
-        # missing-line repair through the regression guard.
-        return blocking
+        # Repair delivery blockers first. If the patch still has room, include
+        # at most four subtitle-backed missing beats in the same review call.
+        # Uncorroborated ASR disagreements can alter correct words, so they
+        # stay advisory and never displace a blocking issue.
+        if len(blocking) >= 40:
+            return blocking
+        corroborated = [issue for issue in issues if issue.get("severity") == "P1" and (
+            (issue.get("tag") == "疑似漏台词片段" and issue.get("ocrConfirmed") is True)
+            or (issue.get("tag") == "字幕对白遗漏" and issue.get("audioSupported") is True)
+        )]
+        return blocking + corroborated[:min(4, 40 - len(blocking))]
     critical_tags = {
         "台词归属错", "漏台词", "OS漏标", "OS/VO混淆", "音频对白不一致",
         "音频对白需核对", "疑似漏台词片段", "正文混入校对备注", "事实臆造",

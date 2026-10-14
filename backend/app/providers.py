@@ -29,6 +29,7 @@ from .config import (
     ARK_RESPONSE_POLL_SECONDS,
     ARK_RESPONSE_POLL_TIMEOUT_SECONDS,
     ARK_RESPONSE_CREATE_ATTEMPTS,
+    ARK_REVIEW_MAX_OUTPUT_TOKENS,
     ARK_UPLOAD_PROXY_AUDIO_BITRATE,
     ARK_UPLOAD_PROXY_MAX_HEIGHT,
     ARK_UPLOAD_PROXY_MAX_IN_FLIGHT,
@@ -228,11 +229,18 @@ def _ark_poll_response(response_id: str, api_key: str) -> Any:
         if status == "completed" or (not status and ark_response_text(payload)):
             return payload
         if status in {"failed", "incomplete", "cancelled", "canceled"}:
-            detail = payload.get("error") or payload.get("incomplete_details") or status
-            raise ArkError(f"方舟识别未完成：{detail}")
+            raise _ark_incomplete_error(payload)
         if time.monotonic() >= deadline:
             raise ArkError("方舟识别处理超时，已超过后台等待上限")
         time.sleep(ARK_RESPONSE_POLL_SECONDS)
+
+
+def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
+    detail = payload.get("error") or payload.get("incomplete_details") or payload.get("status") or "incomplete"
+    reason = detail.get("reason") if isinstance(detail, dict) else detail
+    if str(reason).lower() in {"max_output_tokens", "max_tokens"}:
+        return ArkError("方舟识别输出达到长度上限", provider_code="output_limit")
+    return ArkError(f"方舟识别未完成：{detail}")
 
 
 def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
@@ -268,8 +276,7 @@ def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
                     if event_type == "response.completed" or status == "completed":
                         return response_payload
                     if event_type in {"response.failed", "response.incomplete"} or status in {"failed", "incomplete"}:
-                        detail = response_payload.get("error") or response_payload.get("incomplete_details") or status
-                        raise ArkError(f"方舟识别未完成：{detail}")
+                        raise _ark_incomplete_error(response_payload)
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
     except (URLError, OSError) as exc:
@@ -482,7 +489,13 @@ def _delivery_video(path: Path, duration_sec: float, progress_callback: MediaPro
         return cached, None
     upload_path, proxy_dir = _ark_upload_proxy(path, duration_sec, **({"progress_callback": progress_callback} if progress_callback else {}))
     if cache is not None and proxy_dir is not None:
-        upload_path = cache.save_proxy(upload_path)
+        # The encoder and recognition cache share DATA_DIR. Adopt the fresh
+        # file instead of copying it, while keeping the copy fallback for
+        # injected cache implementations and cross-device filesystems.
+        if isinstance(cache, RecognitionCache):
+            upload_path = cache.adopt_proxy(upload_path)
+        else:
+            upload_path = cache.save_proxy(upload_path)
     return upload_path, proxy_dir
 
 
@@ -683,13 +696,58 @@ SUBTITLE_PRIORITY_RULE = (
 )
 
 
+def _review_evidence(evidence: dict[str, Any] | None, context: dict[str, Any]) -> dict[str, Any] | None:
+    """Keep text evidence near editable ranges without changing stored evidence.
+
+    The reviewer still receives the whole video and draft. Untimed items and
+    transcripts spanning a range remain visible; only unrelated timed ASR/OCR
+    observations are omitted from the prompt.
+    """
+    if not isinstance(evidence, dict):
+        return evidence
+    windows = []
+    for item in context.get("ranges") or []:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("contextStartSec", item.get("startSec"))
+        end = item.get("contextEndSec", item.get("endSec"))
+        if (type(start) in {int, float} and type(end) in {int, float}
+                and math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
+            windows.append((start, end))
+    if not windows:
+        return evidence
+
+    def relevant(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return True
+        start, end = item.get("startSec"), item.get("endSec")
+        if type(start) not in {int, float} or type(end) not in {int, float}:
+            return True
+        if not math.isfinite(start) or not math.isfinite(end):
+            return True
+        return any(start <= right and end >= left for left, right in windows)
+
+    return {
+        **evidence,
+        "sources": [
+            {**source, "items": [item for item in source.get("items") or [] if relevant(item)]}
+            if isinstance(source, dict) else source
+            for source in evidence.get("sources") or []
+        ],
+    }
+
+
 def ark_prompt(
     title: str,
     duration_sec: float,
     evidence: dict[str, Any] | None = None,
     review_context: dict[str, Any] | None = None,
 ) -> str:
-    evidence_fragment = evidence_summary(evidence)
+    evidence_fragment = evidence_summary(
+        _review_evidence(evidence, review_context)
+        if isinstance(review_context, dict) and review_context.get("scope") == "issue_patches"
+        else evidence
+    )
     if isinstance(review_context, dict) and review_context.get("scope") == "issue_patches":
         return (
             "你是专业视频复核员。逐一回看issues和ranges的时间范围，只修明确有视频声音/字幕证据的漏词、"
@@ -1173,9 +1231,16 @@ def ark_recognize(
     )
     response_started = time.perf_counter()
     patch_review = isinstance(review_context, dict) and review_context.get("scope") == "issue_patches"
+    review_ranges = review_context.get("ranges") or [] if patch_review else []
+    review_budget = min(
+        ARK_MAX_OUTPUT_TOKENS,
+        ARK_REVIEW_MAX_OUTPUT_TOKENS + max(0, len(review_ranges) - 2) * 2048,
+    )
     response_payload: dict[str, Any] = {
             "model": selected_model,
-            "max_output_tokens": ARK_MAX_OUTPUT_TOKENS,
+            # A few patches need less output room; numerous independent
+            # repairs scale back up to the full screenplay allowance.
+            "max_output_tokens": review_budget if patch_review else ARK_MAX_OUTPUT_TOKENS,
             "text": {"format": ark_review_format() if patch_review else ark_script_format()},
             "input": [{
                 "role": "user",
@@ -1222,6 +1287,14 @@ def ark_recognize(
             )
             break
         except ArkError as exc:
+            if (patch_review and exc.provider_code == "output_limit"
+                    and response_payload["max_output_tokens"] < ARK_MAX_OUTPUT_TOKENS
+                    and attempt < ARK_RESPONSE_CREATE_ATTEMPTS):
+                # A bounded review can still produce many real corrections.
+                # Retry the prepared video with the original allowance.
+                response_payload["max_output_tokens"] = ARK_MAX_OUTPUT_TOKENS
+                logger.info("provider_step provider=ark operation=review_budget_retry file=%s", path.name)
+                continue
             # A response with an ID is already recovered inside
             # ``ark_stream_response``.  Only retry creation when the socket
             # failed before an ID was received; reuse the prepared file so a

@@ -99,6 +99,29 @@ class RecognitionCache:
                 except OSError:
                     pass
 
+    def adopt_proxy(self, source: Path) -> Path:
+        """Move a freshly encoded proxy into the cache when possible.
+
+        Compression and the cache live under ``DATA_DIR`` in normal
+        deployments, so an atomic rename avoids copying and rereading a
+        40 MiB delivery file before the upload starts.  Fall back to the
+        original copy path for unusual cross-device or mocked filesystems.
+        """
+        target = self.directory / "proxy.mp4"
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            os.replace(source, target)
+        except OSError:
+            return self.save_proxy(source)
+        try:
+            self.save("proxy", {
+                "size": target.stat().st_size,
+                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+            })
+        except OSError:
+            logger.warning("recognition_cache_write_failed kind=proxy_metadata")
+        return target
+
 
 def discard_local_proxy(task_id: str) -> None:
     """Release bulk disk space after success; evidence/remote checkpoints remain."""

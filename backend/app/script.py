@@ -2059,6 +2059,18 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
 
     alias_map: dict[str, str] = {}
     ambiguous_aliases: set[str] = set()
+    # A later episode may use only a kinship label ("丈夫") for a person
+    # already named in an earlier episode. Require the same named counterpart
+    # and the same explicit relationship; a bare role cannot identify anyone.
+    relationship_owners: dict[tuple[str, str], set[str]] = {}
+    kinship_relations = {
+        "丈夫": {"夫妻", "丈夫", "老公"}, "老公": {"夫妻", "丈夫", "老公"},
+        "妻子": {"夫妻", "妻子", "老婆"}, "老婆": {"夫妻", "妻子", "老婆"},
+        "父亲": {"父亲", "父子", "父女"}, "爸爸": {"父亲", "父子", "父女"},
+        "爸": {"父亲", "父子", "父女"}, "爹": {"父亲", "父子", "父女"},
+        "母亲": {"母亲", "母子", "母女"}, "妈妈": {"母亲", "母子", "母女"},
+        "妈": {"母亲", "母子", "母女"}, "娘": {"母亲", "母子", "母女"},
+    }
     relation_suffixes = {
         "父亲": ("父亲", "爸爸", "爸", "爹"),
         "母亲": ("母亲", "妈妈", "妈", "娘"),
@@ -2097,6 +2109,9 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
                     continue
                 target = character_label(relationship.get("target"))
                 relation = character_label(relationship.get("relation"))
+                if target in canonical_names and canonical != target and relation:
+                    signature = (_character_key(target), _character_key(relation))
+                    relationship_owners.setdefault(signature, set()).add(canonical)
                 suffixes = next((values for values in relation_suffixes.values() if relation in values), ())
                 if not target or not suffixes:
                     continue
@@ -2154,10 +2169,23 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
         mapping: dict[str, str] = {}
         for candidate in candidates:
             resolved = resolve(candidate)
+            profile = next((p for p in script.get("characterProfiles") or []
+                            if isinstance(p, dict) and p.get("name") == candidate), {})
             if not resolved:
-                profile = next((p for p in script.get("characterProfiles") or []
-                                if isinstance(p, dict) and p.get("name") == candidate), {})
                 matches = {resolve(alias) for alias in profile.get("aliases") or [] if character_label(alias)} - {None}
+                if len(matches) == 1:
+                    resolved = matches.pop()
+            role = _character_key(candidate)
+            if not resolved and role in kinship_relations:
+                matches = set()
+                for relationship in profile.get("relationships") or []:
+                    if not isinstance(relationship, dict):
+                        continue
+                    target = character_label(relationship.get("target"))
+                    relation = character_label(relationship.get("relation"))
+                    if target not in canonical_names or relation not in kinship_relations[role]:
+                        continue
+                    matches.update(relationship_owners.get((_character_key(target), _character_key(relation)), ()))
                 if len(matches) == 1:
                     resolved = matches.pop()
             if resolved and _character_key(candidate) != _character_key(resolved):
@@ -2690,6 +2718,8 @@ def script_quality(
             severity,
             f"独立 ASR 在 {location} 的语音片段仅有 {segment_coverage}% 出现在成稿中，需逐字回听核对。",
         )
+        if ocr_confirmed:
+            issue["ocrConfirmed"] = True
         if start is not None:
             issue["startSec"] = start
         if end is not None:
@@ -2778,7 +2808,8 @@ def script_quality(
                 for item in blocks[:block_index - 1]
             )
             if audio_support or speech_support:
-                add_issue("字幕对白遗漏", "P1", f"第 {scene_index} 场第 {block_index} 条字幕有声音或开口动作佐证，但缺少对应对白；需回看确认角色和原话。", scene_index, block_index)
+                issue = add_issue("字幕对白遗漏", "P1", f"第 {scene_index} 场第 {block_index} 条字幕有声音或开口动作佐证，但缺少对应对白；需回看确认角色和原话。", scene_index, block_index)
+                issue["audioSupported"] = audio_support
 
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0
