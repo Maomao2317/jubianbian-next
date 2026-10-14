@@ -37,6 +37,7 @@ from .script import (
     restore_transcript_gap_segments,
     restore_short_transcript_segments,
     script_quality,
+    subtitle_aligned_evidence,
 )
 from .storage import cleanup_materialized, is_object_uri, materialize_media
 from .task_store import batch_character_context, mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
@@ -123,6 +124,7 @@ def _evaluate_quality(
     evidence: dict[str, Any],
     route: dict[str, Any],
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    evidence, subtitle_overrides = subtitle_aligned_evidence(script, evidence, update_script=True)
     boundary_recovered = restore_evidence_boundary_segments(script, evidence)
     gap_recovered = restore_transcript_gap_segments(script, evidence)
     short_recovered = restore_short_transcript_segments(script, evidence)
@@ -135,6 +137,7 @@ def _evaluate_quality(
     }
     quality = script_quality(script, provider, evidence)
     quality["shortDialogueRecovery"] = recovered
+    quality["subtitlePrioritySegments"] = subtitle_overrides
     approved, blocking = quality_gate(quality)
     quality["deliveryStatus"] = "approved" if approved else "review_required"
     quality["blockingIssues"] = blocking
@@ -222,6 +225,7 @@ def _automated_review_context(
     block_keys = {
         "type", "text", "speaker", "visibleSpeaker", "mouthMoving", "speakerEvidence",
         "speechContinuity", "voiceSource",
+        "textSource",
         "voKind", "confidence", "uncertain", "inferred", "startSec", "endSec",
         "object", "result", "performance", "emotionType", "emotionEvidence",
         "emotionIntensity", "emotionTrigger", "emotionChange", "emotionTarget",

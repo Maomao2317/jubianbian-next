@@ -275,6 +275,131 @@ def matching_character_counts(reference: str, candidate: str) -> tuple[int, int,
     return matched, len(reference), len(candidate)
 
 
+def subtitle_aligned_evidence(
+    script: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    *,
+    update_script: bool = False,
+) -> tuple[dict[str, Any] | None, int]:
+    """Use confirmed, corresponding subtitles as the wording reference.
+
+    Require a classified dialogue subtitle, matching independent OCR, one
+    spoken block and one ASR segment within its time span. Never substitute an
+    entire long utterance with a partial subtitle or guess between speakers.
+    Return a copy: original ASR/OCR remains available for diagnosis and review.
+    """
+    if not isinstance(evidence, dict):
+        return evidence, 0
+    sources = evidence.get("sources") or []
+    audio = next((s for s in sources if isinstance(s, dict) and s.get("kind") == "audio"
+                  and s.get("status") == "available"), None)
+    ocr = [item for s in sources if isinstance(s, dict) and s.get("kind") == "ocr"
+           and s.get("status") == "available" for item in s.get("items") or []
+           if isinstance(item, dict)]
+    if audio is None or not ocr:
+        return evidence, 0
+
+    def span(item: dict[str, Any]) -> tuple[float, float] | None:
+        start, end = item.get("startSec"), item.get("endSec", item.get("startSec"))
+        if type(start) not in {int, float} or type(end) not in {int, float}:
+            return None
+        if not (0 <= start < float("inf") and start <= end < float("inf")):
+            return None
+        return float(start), float(end)
+
+    def overlaps(left: tuple[float, float], right: tuple[float, float]) -> bool:
+        return min(left[1], right[1]) > max(left[0], right[0])
+
+    blocks = [block for scene in script.get("scenes") or [] for block in scene.get("blocks") or []
+              if isinstance(block, dict)]
+    spoken = [(b, span(b)) for b in blocks if b.get("type") in {"dialogue", "vo"} and span(b)]
+    segments = [(i, item, span(item)) for i, item in enumerate(audio.get("items") or [])
+                if isinstance(item, dict) and item.get("type") == "transcript_segment" and span(item)]
+    observations = [(evidence_comparison_text(item.get("text")), span(item)) for item in ocr if span(item)]
+    proposals: dict[int, list[tuple[dict[str, Any], str, str]]] = {}
+    for subtitle in blocks:
+        if (subtitle.get("type") != "screen_text" or subtitle.get("screenType") != "subtitle"
+                or subtitle.get("uncertain") or subtitle.get("confidence") == "low"):
+            continue
+        window = span(subtitle)
+        raw = str(subtitle.get("text") or "").strip()
+        text = evidence_comparison_text(raw)
+        if not window or not text or not any(t == text and w[0] <= window[1] and w[1] >= window[0]
+                                              for t, w in observations):
+            continue
+        targets = [(b, w) for b, w in spoken if overlaps(w, window)]
+        refs = [(i, item, w) for i, item, w in segments if overlaps(w, window)]
+        if len(targets) != 1 or len(refs) != 1:
+            continue
+        block, block_window = targets[0]
+        index, item, audio_window = refs[0]
+        # ASR may include several subtitle lines. A single partial line must
+        # not erase the rest; leave ambiguous alignment to video review.
+        if audio_window[0] < window[0] - 0.5 or audio_window[1] > window[1] + 0.5:
+            continue
+        reference = evidence_comparison_text(item.get("text"))
+        candidate = evidence_comparison_text(block.get("text"))
+        matched, ref_size, sub_size = matching_character_counts(reference, text)
+        similar = bool(ref_size and sub_size and matched / ref_size >= 0.5 and matched / sub_size >= 0.5)
+        explicit = block.get("textSource") == "subtitle" and candidate == text
+        if not similar and not explicit:
+            continue
+        # Replace just the matching utterance inside a longer dialogue block.
+        # If the model already chose the subtitle, only adjust its ASR reference.
+        if update_script and candidate == reference and candidate != text:
+            replacement = raw
+        elif candidate.count(text) == 1:
+            replacement = str(block.get("text") or "")
+        elif update_script and reference and candidate.count(reference) == 1:
+            original = str(block.get("text") or "")
+            positions = [i for i, char in enumerate(original) for _ in evidence_comparison_text(char)]
+            offset = candidate.index(reference)
+            replacement = original[:positions[offset]] + raw + original[positions[offset + len(reference) - 1] + 1:]
+        elif (update_script and block_window[0] >= window[0] - 0.5
+              and block_window[1] <= window[1] + 0.5 and candidate
+              and matching_character_counts(candidate, text)[0] >= 0.7 * max(len(candidate), len(text))):
+            replacement = raw
+        else:
+            continue
+        proposals.setdefault(index, []).append((block, raw, replacement))
+
+    replacements: dict[int, dict[str, Any]] = {}
+    for index, choices in proposals.items():
+        # Conflicting captions in one audio span are not a safe override.
+        if len({evidence_comparison_text(raw) for _, raw, _ in choices}) != 1:
+            continue
+        block, raw, replacement = choices[0]
+        if update_script:
+            # Earlier aligned segments may have repaired the same long block.
+            # Recompute this span against its current text to retain both edits.
+            reference = evidence_comparison_text(audio["items"][index].get("text"))
+            current = str(block.get("text") or "")
+            candidate = evidence_comparison_text(current)
+            subtitle_text = evidence_comparison_text(raw)
+            if candidate == reference:
+                replacement = raw
+            elif candidate.count(reference) == 1 and candidate.count(subtitle_text) != 1:
+                positions = [i for i, char in enumerate(current) for _ in evidence_comparison_text(char)]
+                offset = candidate.index(reference)
+                replacement = current[:positions[offset]] + raw + current[positions[offset + len(reference) - 1] + 1:]
+            elif candidate.count(subtitle_text) == 1:
+                replacement = current
+            replacement = normalize_dialogue_text(replacement)
+            block["text"] = replacement
+            for key in ("sourceText", "rawText", "finalText"):
+                block[key] = replacement
+            block["textSource"] = "subtitle"
+        item = audio["items"][index]
+        if evidence_comparison_text(item.get("text")) != evidence_comparison_text(raw):
+            # Word timestamps still describe the audible version. Keeping
+            # them as separate references would undo this deliberate choice.
+            replacements[index] = {**item, "text": raw, "words": []}
+    if not replacements:
+        return evidence, 0
+    aligned_audio = {**audio, "items": [replacements.get(i, item) for i, item in enumerate(audio["items"])]}
+    return {**evidence, "sources": [aligned_audio if s is audio else s for s in sources]}, len(replacements)
+
+
 def restore_short_transcript_segments(
     script: dict[str, Any],
     evidence: dict[str, Any] | None,
@@ -292,6 +417,7 @@ def restore_short_transcript_segments(
     result = {"segments": 0, "blocks": 0}
     if not isinstance(script, dict) or not isinstance(evidence, dict):
         return result
+    evidence, _ = subtitle_aligned_evidence(script, evidence)
     audio = next(
         (
             source
@@ -407,6 +533,7 @@ def restore_transcript_gap_segments(
     result = {"segments": 0, "blocks": 0}
     if not isinstance(script, dict) or not isinstance(evidence, dict):
         return result
+    evidence, _ = subtitle_aligned_evidence(script, evidence)
     audio = next(
         (
             source
@@ -514,6 +641,7 @@ def restore_evidence_boundary_segments(
     result = {"segments": 0, "blocks": 0}
     if not isinstance(script, dict) or not isinstance(evidence, dict):
         return result
+    evidence, _ = subtitle_aligned_evidence(script, evidence)
 
     scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
     timed_blocks: list[tuple[int, int, dict[str, Any], float, float]] = []
@@ -1680,6 +1808,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             elif block_type == "emotion":
                 block.update(emotion_fields(raw_block))
             if block_type in {"dialogue", "vo"}:
+                if raw_block.get("textSource") in {"subtitle", "audio"}:
+                    block["textSource"] = raw_block["textSource"]
                 visible_speaker = dedupe_character_names(character_label(raw_block.get("visibleSpeaker")))
                 if visible_speaker:
                     block["visibleSpeaker"] = alias_map.get(visible_speaker.casefold(), visible_speaker)
@@ -2161,6 +2291,7 @@ def script_quality(
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Expose deterministic P0 blockers and P1/P2 reviewable editing signals."""
+    evidence, subtitle_overrides = subtitle_aligned_evidence(script, evidence)
     scenes = [scene for scene in (script.get("scenes") or []) if isinstance(scene, dict)]
     dialogue = [
         block
@@ -2715,6 +2846,7 @@ def script_quality(
     return {
         "dialogueCoverage": coverage,
         "transcriptCoverage": transcript_coverage,
+        "subtitlePrioritySegments": subtitle_overrides,
         "dialogueEvidencePrecision": dialogue_evidence_precision,
         "ocrCoverage": ocr_coverage,
         "speakerConfidence": max(0, confidence),
