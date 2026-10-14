@@ -22,7 +22,8 @@ def summarize(directory: Path, details: bool = False) -> dict:
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
     result = {"run": directory.name, "complete": bool(report)}
     for key in ("mode", "concurrency", "count", "elapsedSec", "processCpuSec",
-                "processPeakRssMb", "minimumHostAvailableMb", "reusedEvidence"):
+                "processPeakRssMb", "minimumHostAvailableMb", "reusedEvidence",
+                "batchGroups", "independentSamples"):
         if key in report:
             result[key] = report[key]
     records = report.get("records", [])
@@ -68,7 +69,7 @@ def summarize(directory: Path, details: bool = False) -> dict:
     for path in log_files:
         for line in path.read_text(encoding="utf-8").splitlines():
             operations.update(re.findall(r"\boperation=([a-z_]+)\b", line))
-            http_429 += bool(re.search(r"\bstatus_code=429\b", line))
+            http_429 += bool(re.search(r"\bstatus_code=429\b|\bHTTP\s*429\b", line, re.IGNORECASE))
             task_retries += "task_retry_auto " in line
     result["operations"] = dict(operations)
     result["http429LogEvents"] = http_429

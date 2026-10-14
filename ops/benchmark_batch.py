@@ -7,6 +7,8 @@ Example (inside the application image):
       --manifest /bench/media.json --output /bench/batch16 --concurrency 16
 
 Manifest: [{"source": "/samples/1.mp4", "title": "第1集"}, ...].
+Only related episodes may share an explicit batchId, with batchIndex/batchTotal.
+Entries without batchId run independently to avoid unrelated cast context.
 Object storage URIs are also supported. Never put signed URLs or credentials in
 the manifest. Inputs are read, never moved/deleted. No live database is opened.
 """
@@ -18,14 +20,37 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import resource
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 
+def batch_fields(media):
+    """Never invent continuity between unrelated benchmark samples."""
+    fields, positions, counts = [], set(), {}
+    for item in media:
+        group = item.get("batchId")
+        if group is None:
+            fields.append((None, None, None))
+            continue
+        if not isinstance(group, str) or not group.strip() or len(group) > 128:
+            raise ValueError("batchId must be a nonempty string of at most 128 characters")
+        counts[group] = counts.get(group, 0) + 1
+        position = item.get("batchIndex", counts[group])
+        total = item.get("batchTotal", sum(entry.get("batchId") == group for entry in media))
+        if type(position) is not int or type(total) is not int or not 1 <= position <= total:
+            raise ValueError("batchIndex/batchTotal must be positive integers with index <= total")
+        if (group, position) in positions:
+            raise ValueError("Duplicate batchIndex within batchId")
+        positions.add((group, position))
+        fields.append((f"benchmark-{group}", position, total))
+    return fields
+
+
 def main():
+    import resource  # Linux benchmark image; helpers remain importable on Windows.
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("asr", "evidence", "batch"), required=True)
     parser.add_argument("--manifest", type=Path, required=True)
@@ -39,6 +64,10 @@ def main():
         parser.error("Manifest must contain 1..32 media entries")
     if any("://" in item["source"] and not item["source"].startswith("s3://") for item in media):
         parser.error("Only local paths and canonical s3:// URIs are accepted")
+    try:
+        groups = batch_fields(media)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.mode == "batch" and not args.allow_paid_models:
         parser.error("Batch mode calls paid models; pass --allow-paid-models")
     output = args.output.resolve()
@@ -97,9 +126,10 @@ def main():
         with auth_store.db() as connection:
             for index, item in enumerate(media):
                 identity = f"bench-{index:02d}"
+                group, position, total = groups[index]
                 connection.execute(
-                    "INSERT INTO tasks (id, user_id, title, file_name, stored_path, status, stage, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, 'benchmark', ?, ?, ?, 'queued', 'queued', ?, ?, 'benchmark-batch', '实测批次', ?, ?)",
-                    (identity, item.get("title", f"第{index + 1}集"), f"{index + 1}.mp4", item["source"], f"2026-10-14T00:00:{index:02d}+00:00", auth_store.now_iso(), index + 1, len(media)))
+                    "INSERT INTO tasks (id, user_id, title, file_name, stored_path, status, stage, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, 'benchmark', ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?)",
+                    (identity, item.get("title", f"第{index + 1}集"), f"{index + 1}.mp4", item["source"], f"2026-10-14T00:00:{index:02d}+00:00", auth_store.now_iso(), group, "实测批次" if group else None, position, total))
                 if args.evidence_from:
                     result = json.loads((args.evidence_from / f"evidence-{index:02d}.json").read_text(encoding="utf-8"))
                     recognition_cache(identity, item["source"]).save("evidence", result)
@@ -145,6 +175,8 @@ def main():
               "processCpuSec": round(time.process_time() - cpu_started, 3),
               "processPeakRssMb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
               "minimumHostAvailableMb": minimum_available_mb, "reusedEvidence": bool(args.evidence_from), "records": records}
+    report["batchGroups"] = len({group for group, _, _ in groups if group is not None})
+    report["independentSamples"] = sum(group is None for group, _, _ in groups)
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "records"}), flush=True)
     if any(record.get("status") == "failed" for record in records):
