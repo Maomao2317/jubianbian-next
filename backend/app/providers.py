@@ -64,7 +64,7 @@ from .config import (
     OPENAI_TEXT_MODEL,
     OPENAI_TRANSCRIPTION_MODEL,
 )
-from .errors import ArkError
+from .errors import ArkError, is_account_balance_error
 from .evidence import evidence_summary
 from .logging_setup import logger, safe_error_text
 from .media import multipart_body, probe_duration
@@ -77,6 +77,8 @@ from .resource_limits import capacity, provider_budget
 # optional transcription/text fallback when the primary provider is unavailable.
 def ark_fallback_message(error: ArkError) -> str:
     """Explain a provider downgrade without exposing provider credentials/details."""
+    if is_account_balance_error(error):
+        return "方舟账户欠费或余额不足，本次已切换到备用识别链路。"
     if error.status_code == 429 or error.provider_code.lower() in {"setlimitexceeded", "ratelimitexceeded"}:
         return "方舟模型当前达到推理限额（HTTP 429），本次已切换到备用识别链路。"
     return "方舟识别服务暂时不可用，本次已切换到备用识别链路。"
@@ -129,6 +131,12 @@ def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
         detail = re.sub(r"https?://[^\s\"<>]+", "[video URL]", detail)
     except (OSError, ValueError):
         pass
+    if is_account_balance_error(ArkError(detail, status_code=exc.code, provider_code=provider_code)):
+        return ArkError(
+            "方舟账户欠费或余额不足，请管理员恢复账户后重新识别；原片和已采集结果已保留。",
+            status_code=exc.code,
+            provider_code="account_balance_exhausted",
+        )
     if exc.code == 429:
         try:
             retry_after = float(exc.headers.get("Retry-After", "30")) if exc.headers else 30.0
@@ -983,6 +991,8 @@ def ark_usage(payload: Any) -> dict[str, int | float | None]:
 
 def _is_video_url_error(error: ArkError) -> bool:
     """Fall back only when the provider cannot ingest the URL, not the model."""
+    if is_account_balance_error(error):
+        return False
     message = f"{error.provider_code} {error}".casefold()
     return error.status_code in {400, 403, 404, 422} and any(
         marker in message for marker in ("video_url", "download", "fetch", "url", "media", "视频下载", "视频地址")

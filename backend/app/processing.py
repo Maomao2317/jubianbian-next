@@ -29,7 +29,7 @@ from .config import (
 )
 from .auth_store import db, now_iso
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
-from .errors import ArkError
+from .errors import ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
 from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, openai_script, openai_transcribe
@@ -372,6 +372,8 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
+    if is_account_balance_error(error):
+        return True
     if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
         return True
     text = str(error).casefold()
@@ -394,6 +396,8 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
 
 
 def _task_error_message(error: BaseException) -> str:
+    if is_account_balance_error(error):
+        return "方舟账户欠费或余额不足，已停止无效重试；请管理员恢复账户后重新识别，原片和已采集结果已保留。"
     if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
         return safe_error_text(error)
     text = str(error).casefold()
