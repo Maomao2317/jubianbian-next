@@ -442,7 +442,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertTrue(all(block.get("asrRecovered") for block in blocks))
         self.assertTrue(quality_gate(script_quality(script, "test", evidence))[0])
 
-    def test_boundary_evidence_restores_missing_opening_words(self):
+    def test_boundary_evidence_restores_independently_confirmed_subtitle(self):
         script = normalize_script(
             {
                 "characters": ["甲"],
@@ -455,7 +455,9 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                         "text": "今天已经决定离开",
                         "startSec": 0.1,
                         "endSec": 2.8,
-                    }],
+                    }, {"type": "screen_text", "screenType": "subtitle",
+                        "text": "我今天已经决定离开", "startSec": 0, "endSec": 2.5,
+                        "confidence": "high"}],
                 }],
             },
             "测试",
@@ -475,7 +477,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
 
         repaired = restore_evidence_boundary_segments(script, evidence)
 
-        block = script["scenes"][0]["blocks"][0]
+        block = next(b for b in script["scenes"][0]["blocks"] if b["type"] == "dialogue")
         self.assertEqual(repaired, {"segments": 1, "blocks": 1})
         self.assertEqual(block["text"], "我今天已经决定离开。")
         self.assertTrue(block["subtitleRecovered"])

@@ -311,6 +311,33 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual(processing._automated_review_issues({"issues": [advisory, missing, heuristic]}), [missing])
         self.assertEqual(processing._automated_review_issues({"issues": [advisory, heuristic]}), [advisory])
 
+    def test_missing_episode_tail_uses_full_review_and_keeps_final_evidence(self):
+        script = {"characters": ["甲"], "scenes": [{"heading": "1-1 日 内 客厅", "blocks": [{
+            "type": "dialogue", "speaker": "甲", "text": "五百万。", "startSec": 21, "endSec": 23,
+        }, {"type": "action", "text": "房门紧闭。", "startSec": 28, "endSec": 30}]}]}
+        missing = [{"severity": "P0", "tag": "疑似漏台词片段", "startSec": 35 + i * 2,
+                    "endSec": 36 + i * 2} for i in range(55)]
+        context = processing._automated_review_context(script, missing, quality={"transcriptCoverage": 14})
+        self.assertEqual(context["scope"], "full_video_with_issue_ranges")
+        self.assertEqual(context["reviewReason"], "extensive_content_loss")
+        self.assertEqual(context["ranges"][-1]["endSec"], 144)
+        self.assertEqual(len(context["issues"]), 55)
+        evidence = {"sources": [{"kind": "audio", "status": "available", "items": [{
+            "type": "transcript_segment", "startSec": 142, "endSec": 144, "text": "挣了八万。",
+        }]}]}
+        prompt = providers.ark_prompt("第1集", 148, evidence, context)
+        self.assertIn("挣了八万", prompt)
+        self.assertIn("必须重新查看完整视频", prompt)
+        self.assertNotIn("只返回合法JSON corrections数组", prompt)
+
+    def test_isolated_missing_line_retains_local_review(self):
+        script = {"scenes": [{"blocks": [{"type": "dialogue", "speaker": "甲", "text": "我。",
+                                           "startSec": 1, "endSec": 2}]}]}
+        issues = [{"severity": "P0", "tag": "疑似漏台词片段", "startSec": 45, "endSec": 46}]
+        context = processing._automated_review_context(script, issues, quality={"transcriptCoverage": 90})
+        self.assertEqual(context["scope"], "issue_patches")
+        self.assertNotIn("reviewReason", context)
+
     def test_first_episode_context_is_owner_scoped_and_does_not_use_later_completed_episode(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row

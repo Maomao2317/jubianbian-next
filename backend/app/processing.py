@@ -212,6 +212,8 @@ def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any])
 def _automated_review_context(
     script: dict[str, Any],
     blocking: list[dict[str, Any]],
+    *,
+    quality: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ranges = []
     for issue in blocking:
@@ -303,10 +305,23 @@ def _automated_review_context(
                 anchors.append({"sceneIndex": scene_index, "blockIndex": block_index, "operation": operation,
                                 "startSec": block["startSec"], "endSec": block["endSec"]})
         window["insertionAnchors"] = anchors
+    # A nearly empty screenplay needs its missing scenes reconstructed from
+    # the video. Local patches cannot safely create that scene structure, and
+    # truncating their ranges used to exclude the end of an episode entirely.
+    # Keep ordinary, isolated omissions on the bounded patch path.
+    coverage = (quality or {}).get("transcriptCoverage")
+    missing = [window for window in ranges if window["tag"] == "疑似漏台词片段"]
+    extensive_loss = (
+        type(coverage) in {int, float} and coverage < 55
+        and len(missing) >= 3
+        and max(window["endSec"] for window in missing) - min(window["startSec"] for window in missing) >= 20
+    )
+    full_review = not ranges or extensive_loss or len(missing) > 40
     return {
-        "scope": "issue_patches" if ranges else "full_video_with_issue_ranges",
-        "issues": blocking[:40],
-        "ranges": ranges[:40],
+        "scope": "full_video_with_issue_ranges" if full_review else "issue_patches",
+        "issues": blocking if full_review else blocking[:40],
+        "ranges": ranges if full_review else ranges[:40],
+        **({"reviewReason": "extensive_content_loss"} if extensive_loss or len(missing) > 40 else {}),
         "draft": draft,
         "_sourceScript": script,
     }
@@ -616,7 +631,7 @@ async def _run_recognizer_with_media(
             )
             if may_auto_review:
                 review_issues = _automated_review_issues(quality)
-                context = _automated_review_context(script, review_issues)
+                context = _automated_review_context(script, review_issues, quality=quality)
                 review_metadata.update({
                     "reviewModel": turbo_model,
                     "attemptCount": 2,

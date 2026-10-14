@@ -219,6 +219,15 @@ def ark_http(
                     raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
                                    provider_code="video_upload_retry_exhausted")
                 request_timeout = min(request_timeout, remaining)
+            if upload and data is not None:
+                # urllib otherwise sends the complete multipart body with one
+                # socket sendall. On a slow international route its timeout
+                # covers the whole write, even while bytes keep progressing.
+                # Fixed-length bounded writes keep that timeout meaningful as
+                # a stalled-write limit, without using HTTP chunked encoding
+                # or changing/recompressing any media bytes.
+                request.data = _ark_upload_chunks(data, upload_deadline)
+                request.add_header("Content-Length", str(len(data)))
             with urlopen(request, timeout=request_timeout) as response:
                 raw = response.read()
     except HTTPError as exc:
@@ -233,6 +242,15 @@ def ark_http(
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ArkError("方舟接口返回了无法解析的响应") from exc
+
+
+def _ark_upload_chunks(data: bytes, deadline: float | None):
+    view = memoryview(data)
+    for offset in range(0, len(view), 64 * 1024):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
+                           provider_code="video_upload_retry_exhausted")
+        yield view[offset:offset + 64 * 1024]
 
 
 def _ark_poll_response(response_id: str, api_key: str) -> Any:

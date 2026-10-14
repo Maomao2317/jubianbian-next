@@ -636,7 +636,8 @@ def restore_evidence_boundary_segments(
     repair only replaces an existing timed dialogue/VO block when the evidence
     contains the complete model text as one contiguous prefix/suffix match and
     the omitted boundary is small.  It never invents a new speaker or a new
-    line, and it accepts OCR only when it points to exactly one timed block.
+    line. OCR additionally needs a corresponding subtitle independently
+    classified by the video model; an OCR substring alone is not authority.
     """
     result = {"segments": 0, "blocks": 0}
     if not isinstance(script, dict) or not isinstance(evidence, dict):
@@ -700,6 +701,28 @@ def restore_evidence_boundary_segments(
             if len(overlapping) != 1:
                 continue
             scene_index, block_index, block, _block_start, _block_end = overlapping[0]
+            if kind == "ocr":
+                # OCR also reads textures, logos and background objects. A
+                # matching substring does not prove that its surrounding
+                # characters were spoken. Require the video model to have
+                # independently identified this *whole* observation as a
+                # reliable dialogue subtitle at the same time. Compare the
+                # surface text too: comparison_text intentionally drops
+                # punctuation, which could otherwise authorize OCR symbols.
+                confirmed = any(
+                    caption.get("type") == "screen_text"
+                    and caption.get("screenType") == "subtitle"
+                    and not caption.get("uncertain")
+                    and caption.get("confidence") != "low"
+                    and normalize_dialogue_text(caption.get("text")) == normalize_dialogue_text(raw_text)
+                    and type(caption.get("startSec")) in {int, float}
+                    and type(caption.get("endSec")) in {int, float}
+                    and min(caption["endSec"], right, _block_end) > max(caption["startSec"], left, _block_start)
+                    for scene in scenes for caption in scene.get("blocks") or []
+                    if isinstance(caption, dict)
+                )
+                if not confirmed:
+                    continue
             candidate = evidence_comparison_text(block.get("text"))
             if not boundary_match(reference, candidate):
                 continue
@@ -708,6 +731,9 @@ def restore_evidence_boundary_segments(
                 continue
             if recovered_text == block.get("text"):
                 continue
+            block.setdefault("evidenceRecoveryOriginal", {
+                key: block[key] for key in ("text", "rawText", "sourceText", "finalText") if key in block
+            })
             block["text"] = recovered_text
             if block.get("type") == "dialogue":
                 block["rawText"] = raw_text
@@ -1808,6 +1834,11 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             elif block_type == "emotion":
                 block.update(emotion_fields(raw_block))
             if block_type in {"dialogue", "vo"}:
+                for key in ("evidenceRecovered", "subtitleRecovered", "asrRecovered"):
+                    if raw_block.get(key) is True:
+                        block[key] = True
+                if isinstance(raw_block.get("evidenceRecoveryOriginal"), dict):
+                    block["evidenceRecoveryOriginal"] = dict(raw_block["evidenceRecoveryOriginal"])
                 if raw_block.get("textSource") in {"subtitle", "audio"}:
                     block["textSource"] = raw_block["textSource"]
                 visible_speaker = dedupe_character_names(character_label(raw_block.get("visibleSpeaker")))
