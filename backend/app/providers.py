@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from contextlib import contextmanager
 from copy import deepcopy
@@ -48,6 +49,11 @@ from .config import (
     ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION,
     ARK_MAX_IN_FLIGHT,
+    SHARED_MODEL_CONCURRENCY,
+    ARK_QUOTA_SCOPE,
+    ARK_QUOTA_RPM,
+    ARK_QUOTA_TPM,
+    ARK_INPUT_TOKEN_RESERVE,
     ARK_VIDEO_FPS,
     ARK_VIDEO_SOURCE_MODE,
     ARK_VIDEO_URL_ATTEMPTS,
@@ -65,6 +71,7 @@ from .media import multipart_body, probe_duration
 from .script import character_label, normalize_script
 from .storage import is_object_uri, media_info, object_storage_enabled, presigned_get, upload_recognition_proxy
 from .recognition_cache import RecognitionCache
+from .resource_limits import capacity, provider_budget
 
 # Ark is the preferred video-understanding provider.  OpenAI remains an
 # optional transcription/text fallback when the primary provider is unavailable.
@@ -79,11 +86,18 @@ _ark_pool_lock = threading.Lock()
 _ark_pool_index = 0
 _ark_cooldowns: dict[str, float] = {}
 _ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
+_ark_generation_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
 _ark_upload_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
 # Bound multipart allocation as well as network transfers; workers otherwise
 # retain several ~40 MiB bodies while waiting for a free HTTP upload slot.
 _ark_upload_body_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
 _ark_proxy_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_PROXY_MAX_IN_FLIGHT)
+
+
+def _ark_quota_scope() -> str:
+    # Both API keys may belong to the same account. Aggregate conservatively;
+    # never use credentials as quota identities or persist them to the volume.
+    return hashlib.sha256(f"{ARK_BASE_URL}|{ARK_QUOTA_SCOPE}".encode()).hexdigest()
 
 
 def ark_account_key() -> str:
@@ -116,8 +130,14 @@ def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
     except (OSError, ValueError):
         pass
     if exc.code == 429:
+        try:
+            retry_after = float(exc.headers.get("Retry-After", "30")) if exc.headers else 30.0
+        except ValueError:
+            retry_after = 30.0
+        retry_after = max(1.0, min(300.0, retry_after))
         with _ark_pool_lock:
-            _ark_cooldowns[api_key] = time.monotonic() + 30
+            _ark_cooldowns[api_key] = time.monotonic() + retry_after
+        provider_budget.cooldown(_ark_quota_scope(), retry_after)
         # Provider 429 bodies may contain account identifiers and internal
         # quota text. Keep the actionable cause without echoing that data.
         detail = "模型当前达到推理限额或已暂停，请在方舟模型激活页调整限额或关闭 Safe Experience Mode"
@@ -134,13 +154,25 @@ def _ark_http_capacity(upload: bool, deadline: float | None):
     semaphore = _ark_upload_semaphore if upload else _ark_request_semaphore
     if deadline is None:
         with semaphore:
-            yield
+            if upload:
+                with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT):
+                    yield
+            else:
+                yield
         return
     if not semaphore.acquire(timeout=max(0.0, deadline - time.monotonic())):
         raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
                        provider_code="video_upload_retry_exhausted")
     try:
-        yield
+        if upload:
+            try:
+                with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT, timeout=max(0, deadline - time.monotonic())):
+                    yield
+            except TimeoutError as exc:
+                raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
+                               provider_code="video_upload_retry_exhausted") from exc
+        else:
+            yield
     finally:
         semaphore.release()
 
@@ -169,6 +201,7 @@ def ark_http(
         method=method,
     )
     try:
+        provider_budget.wait_cooldown(_ark_quota_scope(), timeout=max(0, upload_deadline - time.monotonic()) if upload_deadline else 300)
         # Slow multipart transfers must not consume model-generation slots.
         with _ark_http_capacity(upload, upload_deadline):
             request_timeout = timeout or ARK_RESPONSE_TIMEOUT_SECONDS
@@ -244,6 +277,29 @@ def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
 
 
 def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
+    """Hold a shared generation slot through SSE AND stored-response recovery."""
+    scope = _ark_quota_scope()
+    queued = time.perf_counter()
+    with _ark_generation_semaphore, capacity("ark-generation", SHARED_MODEL_CONCURRENCY):
+        queue_ms = (time.perf_counter() - queued) * 1000
+        started = time.perf_counter()
+        reservation = provider_budget.reserve(
+            scope, rpm=ARK_QUOTA_RPM, tpm=ARK_QUOTA_TPM,
+            tokens=ARK_INPUT_TOKEN_RESERVE + int(payload.get("max_output_tokens") or ARK_MAX_OUTPUT_TOKENS),
+            lifetime=ARK_RESPONSE_TIMEOUT_SECONDS + ARK_RESPONSE_POLL_TIMEOUT_SECONDS + 120,
+        )
+        logger.info("provider_step provider=ark operation=generation_admission model=%s queue_ms=%.1f quota_wait_ms=%.1f",
+                    payload.get("model"), queue_ms, (time.perf_counter() - started) * 1000)
+        usage = None
+        try:
+            result = _ark_stream_response(payload, api_key)
+            usage = ark_usage(result).get("total_tokens")
+            return result
+        finally:
+            provider_budget.finish(reservation, usage)
+
+
+def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
     """Create a stored response over SSE and recover it by ID if disconnected."""
     request_payload = {**payload, "stream": True, "store": True}
     request = UrlRequest(
@@ -414,7 +470,7 @@ def _ark_upload_proxy(path: Path, duration_sec: float = 0, *, progress_callback:
     try:
         # Limit both encoding jobs and their decoder/encoder threads, separately
         # from uploads/model calls. Queue wait does not use the encoding timeout.
-        with _ark_proxy_semaphore:
+        with _ark_proxy_semaphore, capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT):
             started = time.perf_counter()
             _report_media_progress(progress_callback, "compressing", 0)
             duration = duration_sec if duration_sec > 0 and math.isfinite(duration_sec) else probe_duration(path)
@@ -506,7 +562,7 @@ def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float
     upload_path, proxy_dir = _delivery_video(path, duration_sec, progress_callback, cache)
     try:
         _report_media_progress(progress_callback, "video_upload", None)
-        with _ark_upload_body_semaphore:
+        with _ark_upload_body_semaphore, capacity("upload-body", ARK_UPLOAD_MAX_IN_FLIGHT):
             return _ark_upload_prepared_video(upload_path, api_key, duration_sec, progress_callback=progress_callback)
     finally:
         if proxy_dir is not None:
@@ -657,7 +713,7 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
             logger.warning("provider_step provider=ark operation=object_proxy_unavailable file=%s error_type=%s", path.name, type(exc).__name__)
             _report_media_progress(progress_callback, "video_upload_retry", None)
             # Reuse the exact validated proxy, including when disk checkpointing failed.
-            with _ark_upload_body_semaphore:
+            with _ark_upload_body_semaphore, capacity("upload-body", ARK_UPLOAD_MAX_IN_FLIGHT):
                 file_id, api_key = _ark_upload_prepared_video(upload_path, api_key, duration_sec, progress_callback=progress_callback)
         finally:
             if proxy_dir is not None:
@@ -1329,7 +1385,7 @@ def ark_recognize(
             # ``ark_stream_response``.  Only retry creation when the socket
             # failed before an ID was received; reuse the prepared file so a
             # transient disconnect never forces another upload/transcode.
-            if exc.provider_code not in {"transient_network", "invalid_script_response"} or attempt >= ARK_RESPONSE_CREATE_ATTEMPTS:
+            if (exc.provider_code not in {"transient_network", "invalid_script_response"} and exc.status_code != 429) or attempt >= ARK_RESPONSE_CREATE_ATTEMPTS:
                 raise
             if exc.provider_code == "invalid_script_response":
                 # Regenerate once with the same source. Never turn a truncated

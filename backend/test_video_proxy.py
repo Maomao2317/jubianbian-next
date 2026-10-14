@@ -124,7 +124,14 @@ class VideoProxyTests(unittest.TestCase):
         stack.enter_context(patch.object(providers.shutil, "which", return_value="ffmpeg"))
         create = stack.enter_context(patch.object(providers.tempfile, "mkdtemp", return_value="mock-proxy"))
         run = stack.enter_context(patch.object(providers, "_run_ffmpeg_proxy", side_effect=error))
-        stack.enter_context(patch.object(Path, "stat", return_value=result))
+        original_stat = Path.stat
+
+        def proxy_stat(path, *args, **kwargs):
+            if path == Path("mock-proxy/original.ark.mp4"):
+                return result
+            return original_stat(path, *args, **kwargs)
+
+        stack.enter_context(patch.object(Path, "stat", proxy_stat))
         cleanup = stack.enter_context(patch.object(providers.shutil, "rmtree"))
         return source, create, run, cleanup
 

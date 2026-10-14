@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from functools import partial
 import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import (
     POINTS_PER_MINUTE,
@@ -16,11 +19,13 @@ from .config import (
     ARK_FALLBACK_ON_ERROR,
     ARK_LITE_MODEL,
     ARK_MODEL,
+    ARK_MAX_IN_FLIGHT,
     ARK_ROUTING_MODE,
     ARK_TURBO_MODEL,
     MAX_DURATION_SECONDS,
     OPENAI_API_KEY,
     OPENAI_TEXT_MODEL,
+    WORKER_CONCURRENCY,
 )
 from .auth_store import db, now_iso
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
@@ -41,6 +46,19 @@ from .script import (
 )
 from .storage import cleanup_materialized, is_object_uri, materialize_media
 from .task_store import batch_character_context, mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
+
+
+# Collectors wait for CPU evidence queues. Give them their own bounded pool so
+# they cannot occupy the general asyncio threads needed by uploads and Ark.
+_evidence_collector_executor = ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY, thread_name_prefix="jbb-collect")
+# Small hosts may have fewer default asyncio threads than model slots. Keep
+# long generation calls separate so all configured slots can run concurrently.
+_model_executor = ThreadPoolExecutor(max_workers=ARK_MAX_IN_FLIGHT, thread_name_prefix="jbb-model")
+
+
+async def _run_model_call(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    call = partial(copy_context().run, function, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(_model_executor, call)
 
 
 def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> dict[str, Any]:
@@ -455,7 +473,10 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         # alongside evidence collection hides the network latency, and the
         # resulting file_id is reused by a possible Turbo review.
         mark_task_stage(row["id"], status="running", stage="transcribing", progress_percent=16, message="正在采集语音和字幕证据")
-        evidence_task = asyncio.create_task(asyncio.to_thread(_collect_task_evidence, path, row["title"], duration, cache))
+        evidence_task = asyncio.get_running_loop().run_in_executor(
+            _evidence_collector_executor, copy_context().run,
+            _collect_task_evidence, path, row["title"], duration, cache,
+        )
         progress = _media_progress_callback(row["id"])
 
         async def prepare_media() -> dict[str, Any]:
@@ -520,7 +541,7 @@ async def _run_recognizer_with_media(
         ark_script: dict[str, Any] | None = None
         ark_usage_data: dict[str, Any] | None = None
         try:
-            ark_script, ark_usage_data = await asyncio.to_thread(
+            ark_script, ark_usage_data = await _run_model_call(
                 ark_recognize,
                 path,
                 row["title"],
@@ -540,7 +561,7 @@ async def _run_recognizer_with_media(
                     turbo_model,
                 )
                 try:
-                    ark_script, ark_usage_data = await asyncio.to_thread(
+                    ark_script, ark_usage_data = await _run_model_call(
                         ark_recognize,
                         path,
                         row["title"],
@@ -606,7 +627,7 @@ async def _run_recognizer_with_media(
                     len(review_issues),
                 )
                 try:
-                    reviewed_script, reviewed_usage = await asyncio.to_thread(
+                    reviewed_script, reviewed_usage = await _run_model_call(
                         ark_recognize,
                         path,
                         row["title"],
@@ -676,7 +697,7 @@ async def _run_recognizer_with_media(
     try:
         if not transcript:
             transcript = await asyncio.to_thread(openai_transcribe, path)
-        script = await asyncio.to_thread(openai_script, row["title"], duration, transcript, evidence)
+        script = await _run_model_call(openai_script, row["title"], duration, transcript, evidence)
     except Exception as exc:
         logger.warning("provider_failed provider=openai task_id=%s error=%s", row["id"], safe_error_text(exc))
         raise ArkError("OpenAI 备用识别失败，未生成未经证实的剧本") from exc

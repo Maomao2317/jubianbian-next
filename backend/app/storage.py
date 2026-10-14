@@ -5,12 +5,15 @@ from __future__ import annotations
 import shutil
 import tempfile
 import hashlib
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from .config import (
     DATA_DIR,
+    DOWNLOAD_CONCURRENCY,
+    ARK_UPLOAD_MAX_IN_FLIGHT,
     OBJECT_STORAGE_ACCESS_KEY,
     OBJECT_STORAGE_ADDRESSING_STYLE,
     OBJECT_STORAGE_BUCKET,
@@ -22,6 +25,8 @@ from .config import (
     OBJECT_STORAGE_SECRET_KEY,
     UPLOAD_DIR,
 )
+from .resource_limits import capacity
+from .logging_setup import logger
 
 
 def object_storage_enabled() -> bool:
@@ -123,7 +128,7 @@ def upload_recognition_proxy(path: Path, identity: str) -> str:
     key = "/".join(part for part in (OBJECT_STORAGE_PREFIX, "recognition", hashlib.sha256(identity.encode()).hexdigest() + ".mp4") if part)
     # A streaming body avoids another 40 MiB multipart allocation. These
     # objects inherit the bucket's private policy; only scoped URLs are shared.
-    with path.open("rb") as body:
+    with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT), path.open("rb") as body:
         _client(delivery=True).put_object(Bucket=OBJECT_STORAGE_BUCKET, Key=key, Body=body,
                                           ContentLength=size, ContentType="video/mp4")
     return f"s3://{OBJECT_STORAGE_BUCKET}/{quote(key, safe='/')}"
@@ -145,7 +150,11 @@ def materialize_media(uri: str | Path, task_id: str) -> tuple[Path, Path | None]
     temp_dir = Path(tempfile.mkdtemp(prefix=f"jbb-media-{task_id[:18]}-", dir=DATA_DIR))
     target = temp_dir / "source.mp4"
     try:
-        _client().download_file(bucket, key, str(target))
+        from boto3.s3.transfer import TransferConfig
+        with capacity("media-download", DOWNLOAD_CONCURRENCY) as queue_ms:
+            started = time.perf_counter()
+            _client().download_file(bucket, key, str(target), Config=TransferConfig(max_concurrency=1, use_threads=False))
+            logger.info("media_step task_id=%s operation=download queue_ms=%.1f duration_ms=%.1f", task_id, queue_ms, (time.perf_counter() - started) * 1000)
         if not target.is_file() or target.stat().st_size <= 0:
             raise OSError("对象存储下载为空")
         return target, temp_dir

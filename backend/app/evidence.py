@@ -22,6 +22,8 @@ from typing import Any, Callable
 
 from .config import (
     LOCAL_ASR_BEAM_SIZE,
+    LOCAL_ASR_CONCURRENCY,
+    LOCAL_ASR_CPU_THREADS,
     LOCAL_ASR_COMPUTE_TYPE,
     LOCAL_ASR_DEVICE,
     LOCAL_ASR_LANGUAGE,
@@ -30,12 +32,14 @@ from .config import (
     LOCAL_ASR_VAD_MIN_SPEECH_MS,
     LOCAL_ASR_VAD_SPEECH_PAD_MS,
     OCR_LANG,
+    OCR_PROCESS_CONCURRENCY,
     OCR_MAX_FRAMES,
     OCR_SAMPLE_INTERVAL_SECONDS,
     OPENAI_API_KEY,
     EVIDENCE_CONCURRENCY,
 )
 from .logging_setup import logger, safe_error_text
+from .resource_limits import capacity, limited
 
 EVIDENCE_VERSION = "1.1"
 MAX_TRANSCRIPT_CHARS = 12_000
@@ -43,10 +47,13 @@ MAX_OCR_ITEMS = 1440
 MAX_KEYFRAMES = 24
 
 _local_asr_model: Any | None = None
-_local_asr_model_key: tuple[str, str, str] | None = None
+_local_asr_model_key: tuple | None = None
 _local_asr_load_lock = threading.Lock()
-_local_asr_infer_lock = threading.Lock()
-_evidence_semaphore = threading.BoundedSemaphore(EVIDENCE_CONCURRENCY)
+_local_asr_infer_lock = threading.BoundedSemaphore(LOCAL_ASR_CONCURRENCY)
+# Keep the same per-source CPU limits, but give ASR and OCR independent queues.
+# A slow ASR must not reserve an OCR slot after its own OCR has finished.
+_audio_executor = ThreadPoolExecutor(max_workers=EVIDENCE_CONCURRENCY, thread_name_prefix="jbb-audio")
+_ocr_executor = ThreadPoolExecutor(max_workers=EVIDENCE_CONCURRENCY, thread_name_prefix="jbb-screen")
 
 
 def _source(kind: str, status: str, *, provider: str = "", reason: str = "", items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -95,7 +102,7 @@ def _adaptive_ocr_times(duration_sec: float) -> list[float]:
 def _get_local_asr_model() -> Any:
     """Lazily load one faster-whisper model per worker process."""
     global _local_asr_model, _local_asr_model_key
-    key = (LOCAL_ASR_MODEL, LOCAL_ASR_DEVICE, LOCAL_ASR_COMPUTE_TYPE)
+    key = (LOCAL_ASR_MODEL, LOCAL_ASR_DEVICE, LOCAL_ASR_COMPUTE_TYPE, LOCAL_ASR_CPU_THREADS, LOCAL_ASR_CONCURRENCY)
     with _local_asr_load_lock:
         if _local_asr_model is not None and _local_asr_model_key == key:
             return _local_asr_model
@@ -105,11 +112,14 @@ def _get_local_asr_model() -> Any:
             LOCAL_ASR_MODEL,
             device=LOCAL_ASR_DEVICE,
             compute_type=LOCAL_ASR_COMPUTE_TYPE,
+            cpu_threads=LOCAL_ASR_CPU_THREADS,
+            num_workers=LOCAL_ASR_CONCURRENCY,
         )
         _local_asr_model_key = key
         return _local_asr_model
 
 
+@limited("evidence-decode", 2)
 def _decode_audio_ffmpeg(path: Path) -> Any:
     """Decode media with ffmpeg so ASR does not depend on PyAV's API version."""
     ffmpeg = shutil.which("ffmpeg")
@@ -121,6 +131,8 @@ def _decode_audio_ffmpeg(path: Path) -> Any:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-threads",
+            "2",
             "-i",
             str(path),
             "-vn",
@@ -155,9 +167,12 @@ def _local_asr_items(path: Path) -> list[dict[str, Any]]:
     language = LOCAL_ASR_LANGUAGE or None
     items: list[dict[str, Any]] = []
     captured_chars = 0
-    # A single inference at a time avoids several CPU workers loading the same
-    # model into memory and competing until the host is unresponsive.
-    with _local_asr_infer_lock:
+    # Default to one host-wide inference; a controlled two-worker experiment
+    # can use the same model without changing beam, VAD or word timestamps.
+    queued = time.perf_counter()
+    with _local_asr_infer_lock, capacity("local-asr", LOCAL_ASR_CONCURRENCY):
+        queue_ms = (time.perf_counter() - queued) * 1000
+        logger.info("evidence_step file=%s kind=asr_admission queue_ms=%.1f", path.name, queue_ms)
         segments, _info = model.transcribe(
             audio,
             language=language,
@@ -294,6 +309,7 @@ def _keyframe_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     return _source("keyframes", "available", provider=Path(ffmpeg).name, items=items)
 
 
+@limited("evidence-decode", 2)
 def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: str, duration_sec: float, *, probe: bool = False) -> list[Path]:
     """Decode dense short-video samples once without changing their timestamps.
 
@@ -311,7 +327,7 @@ def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: 
         try:
             subprocess.run(
                 [
-                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path),
+                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-filter_threads", "1", "-i", str(path),
                     # Accurate seeks round target times to the stream's time
                     # base. Comparing raw seconds can drop a boundary frame
                     # whose PTS is a few microseconds before the millisecond.
@@ -333,7 +349,7 @@ def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: 
             logger.warning("evidence_frame_batch_failed file=%s error=%s", path.name, safe_error_text(exc))
     for image, timestamp in zip(images, times):
         subprocess.run(
-            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", str(timestamp), "-i", str(path), "-frames:v", "1"]
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-filter_threads", "1", "-ss", str(timestamp), "-i", str(path), "-frames:v", "1"]
             + (["-vf", probe_filter] if probe else []) + ["-y", str(image)],
             capture_output=True,
             timeout=30,
@@ -425,7 +441,8 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
                 previous_band = band
             def run_ocr(job: tuple[int, str, Path]) -> tuple[int, str, str]:
                 _index, _region, sample_path = job
-                result = subprocess.run(
+                with capacity("ocr-process", OCR_PROCESS_CONCURRENCY):
+                    result = subprocess.run(
                         [tesseract, str(sample_path), "stdout", "-l", OCR_LANG, "--psm", "11"],
                         capture_output=True, timeout=30, check=False,
                         text=True, encoding="utf-8", errors="replace", env=ocr_env,
@@ -512,10 +529,8 @@ def collect_evidence(
 ) -> dict[str, Any]:
     """Collect independent evidence and return a JSON-safe record."""
     del title  # reserved for future provider metadata; never used to infer content
-    # ASR and frame OCR are independent, but an unbounded batch of workers can
-    # otherwise start many ffmpeg/tesseract processes at once and make every
-    # episode slower.  Keep a small evidence lane so throughput stays stable
-    # while video upload/model requests continue in parallel.
+    # The shared pools bound each source independently across the whole batch.
+    # Local ASR inference still runs one at a time under its existing lock.
     started = time.perf_counter()
     cached_sources = {
         source["kind"]: source for source in (cached_evidence or {}).get("sources", [])
@@ -525,26 +540,35 @@ def collect_evidence(
     if len(cached_sources) == 3:
         logger.info("evidence_step file=%s kind=all operation=cache_hit", path.name)
         return {**cached_evidence, "cacheHitSources": sorted(cached_sources),
-                "timingsMs": {"queue": 0, "audio": 0, "ocr": 0, "total": 0}}
+                "timingsMs": {"queue": 0, "audioQueue": 0, "ocrQueue": 0, "audio": 0, "ocr": 0, "total": 0}}
+    for kind in cached_sources:
+        logger.info("evidence_step file=%s kind=%s operation=cache_hit", path.name, kind)
 
-    def timed_source(kind: str, function: Callable[..., dict[str, Any]], **kwargs: Any) -> tuple[dict[str, Any], float]:
-        if kind in cached_sources:
-            logger.info("evidence_step file=%s kind=%s operation=cache_hit", path.name, kind)
-            return cached_sources[kind], 0
+    def timed_source(kind: str, function: Callable[..., dict[str, Any]], **kwargs: Any) -> tuple[dict[str, Any], float, float]:
         source_started = time.perf_counter()
+        queue_ms = round((source_started - started) * 1000, 1)
         source = function(path, duration_sec, **kwargs)
         elapsed_ms = round((time.perf_counter() - source_started) * 1000, 1)
-        logger.info("evidence_step file=%s kind=%s status=%s items=%s duration_ms=%.1f", path.name, kind, source.get("status"), len(source.get("items") or []), elapsed_ms)
-        return source, elapsed_ms
+        logger.info("evidence_step file=%s kind=%s status=%s items=%s queue_ms=%.1f duration_ms=%.1f", path.name, kind, source.get("status"), len(source.get("items") or []), queue_ms, elapsed_ms)
+        return source, elapsed_ms, queue_ms
 
-    with _evidence_semaphore:
-        queue_ms = round((time.perf_counter() - started) * 1000, 1)
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="jbb-evidence") as executor:
-            audio_future = executor.submit(timed_source, "audio", _audio_evidence, transcribe=transcribe)
-            ocr_future = executor.submit(timed_source, "ocr", _ocr_evidence)
-            keyframes = cached_sources.get("keyframes") or _keyframe_evidence(path, duration_sec)
-            audio, audio_ms = audio_future.result()
-            ocr, ocr_ms = ocr_future.result()
+    audio_future = None if "audio" in cached_sources else _audio_executor.submit(timed_source, "audio", _audio_evidence, transcribe=transcribe)
+    ocr_future = None
+    try:
+        if "ocr" not in cached_sources:
+            ocr_future = _ocr_executor.submit(timed_source, "ocr", _ocr_evidence)
+        keyframes = cached_sources.get("keyframes") or _keyframe_evidence(path, duration_sec)
+        audio, audio_ms, audio_queue_ms = audio_future.result() if audio_future else (cached_sources["audio"], 0, 0)
+        ocr, ocr_ms, ocr_queue_ms = ocr_future.result() if ocr_future else (cached_sources["ocr"], 0, 0)
+    finally:
+        # All source readers must release the original before callers remove a
+        # materialized video, including when another source fails unexpectedly.
+        for future in (audio_future, ocr_future):
+            if future is not None:
+                try:
+                    future.result()
+                except Exception:
+                    pass  # Propagate the original failure from the try block.
     sources = [audio, ocr, keyframes]
     available = [source["kind"] for source in sources if source.get("status") == "available"]
     unavailable = [source["kind"] for source in sources if source.get("status") != "available"]
@@ -554,7 +578,9 @@ def collect_evidence(
         "availableSources": available,
         "unavailableSources": unavailable,
         "sources": sources,
-        "timingsMs": {"queue": queue_ms, "audio": audio_ms, "ocr": ocr_ms, "total": round((time.perf_counter() - started) * 1000, 1)},
+        "timingsMs": {"queue": max(audio_queue_ms, ocr_queue_ms), "audioQueue": audio_queue_ms,
+                      "ocrQueue": ocr_queue_ms, "audio": audio_ms, "ocr": ocr_ms,
+                      "total": round((time.perf_counter() - started) * 1000, 1)},
     }
     if cached_sources:
         result["cacheHitSources"] = sorted(cached_sources)

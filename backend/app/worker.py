@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from .auth_store import db, now_iso
@@ -11,6 +12,28 @@ from .logging_setup import logger
 from .processing import _refund_task_once, process_task
 from .storage import delete_media
 from .task_store import record_task_event
+
+
+def _claim_next_task(connection, active_users: Counter, last_user: str | None):
+    """Choose a least-occupied ready user, rotating ties; FIFO within each user."""
+    connection.execute("BEGIN IMMEDIATE")
+    rows = connection.execute(
+        "SELECT id, user_id FROM tasks WHERE status = 'queued' AND stage = 'queued' ORDER BY created_at, id"
+    ).fetchall()
+    heads = {}
+    for row in rows:
+        heads.setdefault(str(row["user_id"] or ""), row)
+    if not heads:
+        return None
+    minimum = min(active_users[user] for user in heads)
+    candidates = sorted(user for user in heads if active_users[user] == minimum)
+    user = next((user for user in candidates if last_user is None or user > last_user), candidates[0])
+    row = heads[user]
+    claimed = connection.execute(
+        "UPDATE tasks SET status = 'running', stage = 'queued', updated_at = ? WHERE id = ? AND status = 'queued' AND stage = 'queued'",
+        (now_iso(), row["id"]),
+    ).rowcount
+    return (row["id"], user) if claimed == 1 else None
 
 
 async def _expire_incomplete_uploads() -> None:
@@ -41,6 +64,9 @@ async def run_worker() -> None:
     with db() as connection:
         connection.execute("UPDATE tasks SET status = 'queued', stage = 'queued', progress_percent = 4, updated_at = ? WHERE status = 'running'", (now_iso(),))
     active: set[asyncio.Task] = set()
+    task_users: dict[asyncio.Task, str] = {}
+    active_users: Counter = Counter()
+    last_user = None
     last_upload_cleanup = 0.0
     while True:
         now = asyncio.get_running_loop().time()
@@ -49,15 +75,21 @@ async def run_worker() -> None:
             last_upload_cleanup = now
         while len(active) < WORKER_CONCURRENCY:
             with db() as connection:
-                row = connection.execute("SELECT id FROM tasks WHERE status = 'queued' AND stage = 'queued' ORDER BY created_at ASC LIMIT 1").fetchone()
-                if row:
-                    connection.execute("UPDATE tasks SET status = 'running', stage = 'queued', updated_at = ? WHERE id = ? AND status = 'queued' AND stage = 'queued'", (now_iso(), row["id"]))
-            if not row:
+                claimed = _claim_next_task(connection, active_users, last_user)
+            if not claimed:
                 break
-            active.add(asyncio.create_task(process_task(row["id"])))
+            task_id, user = claimed
+            task = asyncio.create_task(process_task(task_id))
+            active.add(task)
+            task_users[task] = user
+            active_users[user] += 1
+            last_user = user
         if active:
-            done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+            # Uploads finish independently of running recognizers. Refill free
+            # slots while they run rather than waiting minutes for one to end.
+            done, active = await asyncio.wait(active, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
+                active_users[task_users.pop(task)] -= 1
                 if task.exception():
                     logger.error("worker_task_crashed error=%s", task.exception())
         else:

@@ -124,26 +124,23 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             "status": "completed",
             "output": [{"content": [{"text": '{"title":"测试","scenes":[{"heading":"1-1 日 内 客厅","location":"客厅","blocks":[{"type":"dialogue","speaker":"甲","text":"你好"}]}]}'}]}],
         }
-        with (
-            patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
-            patch.object(
-                providers,
-                "ark_stream_response",
-                side_effect=[ArkError("socket closed", provider_code="transient_network"), completed],
-            ) as response,
-            patch.object(providers, "ark_prepare_video") as prepare,
-            patch.object(providers.time, "sleep"),
-        ):
-            script, _usage = providers.ark_recognize(
-                Path(__file__),
-                "测试",
-                30,
-                model="lite",
-                prepared_video={"api_key": "key", "file_id": "file"},
-            )
-        prepare.assert_not_called()
-        self.assertEqual(response.call_count, 2)
-        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "你好。")
+        for error in (ArkError("socket closed", provider_code="transient_network"),
+                      ArkError("limited", status_code=429)):
+            with (
+                self.subTest(error=error),
+                patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+                patch.object(providers, "ark_stream_response", side_effect=[error, completed]) as response,
+                patch.object(providers, "ark_prepare_video") as prepare,
+                patch.object(providers.time, "sleep"),
+            ):
+                script, _usage = providers.ark_recognize(
+                    Path(__file__), "测试", 30, model="lite",
+                    prepared_video={"api_key": "key", "file_id": "file"},
+                )
+                prepare.assert_not_called()
+                self.assertEqual(response.call_count, 2)
+                self.assertEqual(response.call_args.args[0]["input"][0]["content"][0]["file_id"], "file")
+                self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "你好。")
 
     def test_episode_markers_in_upload_names(self):
         self.assertEqual(episode_from_text("2.mp4"), 2)
