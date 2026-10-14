@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app import evidence, processing, providers, task_store
 from app.errors import ArkError
-from app.script import apply_batch_character_continuity, normalize_script, script_quality
+from app.script import apply_batch_character_continuity, normalize_script, quality_gate, script_quality
 
 
 def episode(characters, blocks, profiles=None):
@@ -20,6 +20,52 @@ def episode(characters, blocks, profiles=None):
 
 
 class RecognitionRegressions(unittest.TestCase):
+    def test_late_dialogue_only_stretch_requires_video_review(self):
+        blocks = [{"type": "action", "text": "甲拿起杯子递给乙。", "startSec": 0, "endSec": 1}]
+        blocks.extend({"type": "dialogue", "speaker": "甲" if i % 2 else "乙",
+                       "text": f"第{i}句", "startSec": i * 2, "endSec": i * 2 + 1}
+                      for i in range(1, 31))
+        script = episode(["甲", "乙"], blocks)
+        quality = script_quality(script, "ark")
+        gaps = [issue for issue in quality["issues"] if issue["tag"] == "画面表演缺失"]
+        self.assertEqual(len(gaps), 3)
+        self.assertEqual((gaps[-1]["startSec"], gaps[-1]["endSec"]), (42, 61))
+        self.assertEqual(quality["presentationGaps"], 3)
+        self.assertFalse(quality_gate(quality)[0])
+        self.assertTrue(processing._needs_automated_content_review(quality))
+        self.assertEqual(len(processing._automated_review_context(script, gaps)["ranges"]), 3)
+
+    def test_presentation_review_preserves_words_and_repairs_visible_gap(self):
+        script = episode(["甲", "乙"], [
+            {"type": "dialogue", "speaker": "甲", "text": f"第{i}句", "startSec": i * 2,
+             "endSec": i * 2 + 1} for i in range(10)
+        ])
+        original = script_quality(script, "ark")
+        gap = next(issue for issue in original["issues"] if issue["tag"] == "画面表演缺失")
+        context = processing._automated_review_context(script, [gap])
+        rewritten = {"type": "dialogue", "speaker": "甲", "text": "改写的台词", "startSec": 0, "endSec": 1}
+        with self.assertRaises(ArkError):
+            providers._apply_ark_review({"output_text": json.dumps({"corrections": [
+                {"sceneIndex": 0, "blockIndex": 0, "operation": "replace", "block": rewritten},
+            ]})}, context, 22)
+        same_line = {"type": "dialogue", "speaker": "甲", "text": "第0句。", "startSec": 0,
+                     "endSec": 1, "performance": "急切", "emotionEvidence": "说话急促"}
+        with_cue = providers._apply_ark_review({"output_text": json.dumps({"corrections": [
+            {"sceneIndex": 0, "blockIndex": 0, "operation": "replace", "block": same_line},
+        ]})}, context, 22)
+        self.assertEqual(with_cue["scenes"][0]["blocks"][0]["performance"], "急切")
+        self.assertEqual(with_cue["scenes"][0]["blocks"][0]["text"], "第0句。")
+        action = {"type": "action", "text": "甲把杯子递给乙，乙伸手接住。", "startSec": 9,
+                  "endSec": 9.5}
+        reviewed = providers._apply_ark_review({"output_text": json.dumps({"corrections": [
+            {"sceneIndex": 0, "blockIndex": 4, "operation": "insert_after", "block": action},
+        ]})}, context, 22)
+        reviewed = normalize_script(reviewed, "第1集")
+        self.assertEqual([b["text"] for b in reviewed["scenes"][0]["blocks"] if b["type"] == "dialogue"],
+                         [b["text"] for b in script["scenes"][0]["blocks"]])
+        self.assertEqual(script_quality(reviewed, "ark")["presentationGaps"], 0)
+        self.assertIsNone(processing._review_regression_reason(original, script_quality(reviewed, "ark")))
+
     def test_boolean_lip_speaker_cannot_become_true_character(self):
         script = episode(["甲", True], [{"type": "dialogue", "speaker": "甲", "visibleSpeaker": True,
                                          "mouthMoving": True, "text": "我来了"}],

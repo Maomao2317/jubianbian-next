@@ -2400,6 +2400,7 @@ def script_quality(
     evidence_warnings = 0
     sound_transition_warnings = 0
     emotion_warnings = 0
+    presentation_gaps = 0
 
     for scene_index, scene in enumerate(scenes, start=1):
         heading = str(scene.get("heading") or "")
@@ -2487,6 +2488,39 @@ def script_quality(
             elif block_type in {"screen_text", "transition"} and not (block.get("startSec") is not None or block.get("endSec") is not None):
                 sound_transition_warnings += 1
                 add_issue("格式错误", "P2", f"第 {scene_index} 场第 {block_index} 个字幕/转场缺少时间定位。", scene_index, block_index)
+
+        # A lengthy stretch of timed dialogue with neither visible action nor
+        # playable delivery is a missing part of the screenplay, even when
+        # every word of the dialogue has been transcribed. Review the video;
+        # the heuristic itself must never invent gestures or emotions.
+        dry_dialogue: list[tuple[int, dict[str, Any]]] = []
+
+        def flag_dry_dialogue() -> None:
+            nonlocal presentation_gaps
+            for offset in range(0, len(dry_dialogue), 10):
+                chunk = dry_dialogue[offset:offset + 10]
+                if len(chunk) < 10 or sum(bool(text_of(block.get("performance"))) for _, block in chunk) > 1:
+                    continue
+                first, last = chunk[0][1], chunk[-1][1]
+                start, end = first.get("startSec"), last.get("endSec")
+                if (type(start) not in {int, float} or type(end) not in {int, float}
+                        or not 0 <= start < end or end - start < 12):
+                    continue
+                issue = add_issue(
+                    "画面表演缺失", "P0",
+                    f"第 {scene_index} 场连续十句台词几乎没有画面动作和表演提示，需回看视频核对可见动作与可听语气。",
+                    scene_index, chunk[0][0],
+                )
+                issue.update(startSec=start, endSec=end)
+                presentation_gaps += 1
+
+        for block_index, block in enumerate(scene_blocks, start=1):
+            if block.get("type") == "action" or block.get("type") == "transition":
+                flag_dry_dialogue()
+                dry_dialogue = []
+            elif block.get("type") == "dialogue":
+                dry_dialogue.append((block_index, block))
+        flag_dry_dialogue()
 
         # A sharp line normally needs a visible or audible response before the
         # next beat. Flag only high-impact dialogue with no nearby reaction so
@@ -2864,9 +2898,9 @@ def script_quality(
         if block_number < 1 or block_number > len(blocks):
             continue
         block = blocks[block_number - 1]
-        if block.get("startSec") is not None:
+        if "startSec" not in issue and block.get("startSec") is not None:
             issue["startSec"] = block.get("startSec")
-        if block.get("endSec") is not None:
+        if "endSec" not in issue and block.get("endSec") is not None:
             issue["endSec"] = block.get("endSec")
 
     issue_tags = list(dict.fromkeys(str(item["tag"]) for item in issues))
@@ -2885,6 +2919,8 @@ def script_quality(
         "sceneCount": len(scenes),
         "dialogueCount": len(dialogue),
         "actionCount": len(action_blocks),
+        "performanceCount": sum(bool(text_of(block.get("performance"))) for block in dialogue),
+        "presentationGaps": presentation_gaps,
         "complexityScore": complexity_score,
         "complexityBand": complexity_band,
         "reviewRecommendation": review_recommendation,

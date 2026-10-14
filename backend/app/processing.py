@@ -184,6 +184,10 @@ def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any])
         before, after = initial.get(key), reviewed.get(key)
         if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after < before:
             return f"lower_{key}"
+    for key in ("actionCount", "performanceCount"):
+        before, after = initial.get(key), reviewed.get(key)
+        if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after < before:
+            return f"lower_{key}"
     return None
 
 

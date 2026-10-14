@@ -751,13 +751,18 @@ def ark_prompt(
     if isinstance(review_context, dict) and review_context.get("scope") == "issue_patches":
         return (
             "你是专业视频复核员。逐一回看issues和ranges的时间范围，只修明确有视频声音/字幕证据的漏词、"
-            "说话人或OS错误。只返回合法JSON corrections数组，不要重写整集，不删除正文，不做风格调整。"
+            "说话人或OS错误；遇到画面表演缺失问题，还要回看对应时段的可见动作和可听语气，"
+            "补有画面依据的action，或为原对白补简短、可执行的performance。视频没有可确认的动作或语气就保持原样，"
+            "不能为了通过质量检查编造表情、心理或动作，也不要给每句台词机械添加情绪。"
+            "只返回合法JSON corrections数组，不要重写整集，不删除正文，不做风格调整。"
             "每个修改包含sceneIndex和blockIndex（直接复制draft中该场次和该段的编号，不要自行计数）、operation（replace、insert_before、insert_after）"
             "及完整block。block包含type、text、startSec、endSec，以及该类型必需的说话人、口型、声音、情绪证据字段。"
             "修正的时间必须属于ranges。对白逐字保留，不可概括，今天、我、决定等短词不可删减或去重。"
             "相邻ranges的0.5秒容差连续时，可跨段保留完整台词；replace可沿用与问题相交的原block完整起止时间，"
             "不能延伸到该原block和连续问题范围以外。contextStartSec/contextEndSec仅供回看，不能据此改无关正文。"
             "ranges中的replacementTargets和insertionAnchors提供原稿编号；替换用replace，补独立漏句才用insert。"
+            "仅修画面表演缺失时，不得改动对白的type、speaker、text、时间或已有情绪；补performance必须replace原block并逐字复制原台词，"
+            "补action必须有视频中明确可见的主体、动作、对象及结果，按时间用insert_before/insert_after插入。"
             "insert_before的新段startSec不得晚于锚点startSec+0.5，insert_after的新段endSec不得早于锚点endSec-0.5；"
             "所有编号始终指原稿，不受前面插入影响。补词要保留原句，避免插入已有台词的重复副本。"
             "人物规范姓名沿用draft及前集人物表，仅统一出场人物和speaker标签，台词、字幕和动作原文中的称谓不能替换。"
@@ -1141,17 +1146,42 @@ def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float
         windows = ark_review_windows(context["ranges"])
         edits: dict[tuple[int, int], dict[str, list[dict[str, Any]]]] = {}
         errors = []
+        presentation_only = bool(context.get("issues")) and all(
+            issue.get("tag") == "画面表演缺失" for issue in context["issues"]
+        )
         reasons = {
             "invalid indices", "invalid operation", "invalid time", "repair outside issue ranges",
             "target outside issue ranges", "replacement outside target block", "insertion after target",
             "insertion before target", "duplicate replacement", "missing speaker",
-            "invalid visible speaker", "missing voice classification",
+            "invalid visible speaker", "missing voice classification", "presentation review changed dialogue",
+            "presentation review inserted non-action",
         }
         for index, correction in enumerate(corrections):
             try:
                 scene_index, block_index, operation, block = _validate_ark_review_correction(
                     correction, script, windows, duration_sec,
                 )
+                if presentation_only:
+                    target = script["scenes"][scene_index]["blocks"][block_index]
+                    if operation != "replace" and block["type"] != "action":
+                        raise ValueError("presentation review inserted non-action")
+                    if operation == "replace":
+                        if (target["type"] not in {"dialogue", "vo"}
+                                or block["type"] != target["type"] or block["text"] != target["text"]
+                                or block.get("speaker") != target.get("speaker")
+                                or block["startSec"] != target.get("startSec")
+                                or block["endSec"] != target.get("endSec")
+                                or any(key not in {"type", "text", "speaker", "startSec", "endSec",
+                                                    "performance", "speechTone", "emotionType", "emotionEvidence"}
+                                       and value != target.get(key)
+                                       for key, value in correction["block"].items())
+                                or any(target.get(key) and key in correction["block"]
+                                       and correction["block"][key] != target[key]
+                                       for key in ("performance", "speechTone", "emotionType", "emotionEvidence"))):
+                            raise ValueError("presentation review changed dialogue")
+                        for key in ("sourceText", "verbatimText", "rawText", "finalText"):
+                            if key in target:
+                                block[key] = target[key]
                 entry = edits.setdefault((scene_index, block_index), {})
                 if operation == "replace" and entry.get(operation):
                     raise ValueError("duplicate replacement")
