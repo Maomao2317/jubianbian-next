@@ -281,12 +281,12 @@ def subtitle_aligned_evidence(
     *,
     update_script: bool = False,
 ) -> tuple[dict[str, Any] | None, int]:
-    """Use confirmed, corresponding subtitles as the wording reference.
+    """Use subtitles only when the corresponding audio is not intelligible.
 
-    Require a classified dialogue subtitle, matching independent OCR, one
-    spoken block and one ASR segment within its time span. Never substitute an
-    entire long utterance with a partial subtitle or guess between speakers.
-    Return a copy: original ASR/OCR remains available for diagnosis and review.
+    Clear speech is authoritative even when the subtitle uses different words.
+    A low-confidence/unclear audio segment may use a confirmed subtitle as its
+    wording reference. In both cases the independent evidence remains intact
+    for quality checks.
     """
     if not isinstance(evidence, dict):
         return evidence, 0
@@ -309,6 +309,22 @@ def subtitle_aligned_evidence(
 
     def overlaps(left: tuple[float, float], right: tuple[float, float]) -> bool:
         return min(left[1], right[1]) > max(left[0], right[0])
+
+    def audio_is_unclear(item: dict[str, Any], block: dict[str, Any]) -> bool:
+        # Block confidence/uncertainty also describes speaker ownership. Only
+        # explicit speech metadata or low-confidence ASR can authorize a text
+        # replacement; an unknown speaker must not change clearly heard words.
+        if any(value.get("audioUnclear") is False
+               or str(value.get("speechClarity") or "").casefold() == "clear"
+               for value in (item, block)):
+            return False
+        if item.get("uncertain") is True or any(value.get("audioUnclear") is True for value in (item, block)):
+            return True
+        for value in (item.get("confidence"), item.get("speechClarity"), block.get("speechClarity")):
+            normalized = str(value or "").strip().casefold()
+            if normalized in {"low", "unclear", "inaudible", "unintelligible", "noise", "不清晰", "听不清"}:
+                return True
+        return False
 
     blocks = [block for scene in script.get("scenes") or [] for block in scene.get("blocks") or []
               if isinstance(block, dict)]
@@ -339,6 +355,19 @@ def subtitle_aligned_evidence(
             continue
         reference = evidence_comparison_text(item.get("text"))
         candidate = evidence_comparison_text(block.get("text"))
+        subtitle_text = evidence_comparison_text(raw)
+        if not audio_is_unclear(item, block):
+            # A provider that selected a subtitle despite clear speech must be
+            # restored to the audible wording. Only replace a whole subtitle
+            # line; a partial caption is intentionally left for review.
+            if (update_script and block.get("textSource") == "subtitle"
+                    and candidate == subtitle_text and reference and reference != subtitle_text):
+                replacement = normalize_dialogue_text(item.get("text"))
+                block["text"] = replacement
+                for key in ("sourceText", "rawText", "finalText"):
+                    block[key] = str(item.get("text") or "").strip()
+                block["textSource"] = "audio"
+            continue
         matched, ref_size, sub_size = matching_character_counts(reference, text)
         similar = bool(ref_size and sub_size and matched / ref_size >= 0.5 and matched / sub_size >= 0.5)
         explicit = block.get("textSource") == "subtitle" and candidate == text
@@ -398,6 +427,77 @@ def subtitle_aligned_evidence(
         return evidence, 0
     aligned_audio = {**audio, "items": [replacements.get(i, item) for i, item in enumerate(audio["items"])]}
     return {**evidence, "sources": [aligned_audio if s is audio else s for s in sources]}, len(replacements)
+
+
+def suppress_redundant_subtitles(script: dict[str, Any]) -> None:
+    """Keep dialogue captions for QA, displaying their spoken lines only.
+
+    Calculate this after repairs as well as normalization: restored dialogue
+    may cover a previously orphaned caption. A caption may span several lines
+    or a scene boundary, but never a different episode with reset timestamps.
+    """
+    spoken_by_episode: dict[str, list[dict[str, Any]]] = {}
+    scenes = [scene for scene in script.get("scenes") or [] if isinstance(scene, dict)]
+
+    def episode_key(scene: dict[str, Any]) -> str:
+        match = re.match(r"^\s*(\d+)-\d+", str(scene.get("heading") or ""))
+        return match.group(1) if match else str(script.get("episodeNumber") or "1")
+
+    def span(block: dict[str, Any]) -> tuple[float, float] | None:
+        start, end = block.get("startSec"), block.get("endSec")
+        if (type(start) in {int, float} and type(end) in {int, float}
+                and 0 <= start <= end < float("inf")):
+            return float(start), float(end)
+        return None
+
+    def spoken_text(block: dict[str, Any]) -> str:
+        text = re.sub(r"[\[【（(](?:听不清|无法辨认|不清晰)[\]】）)]", "", str(block.get("text") or ""))
+        return evidence_comparison_text(text)
+
+    for scene in scenes:
+        for block in scene.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            block.pop("suppressInOutput", None)
+            if block.get("type") in {"dialogue", "vo"} and spoken_text(block):
+                spoken_by_episode.setdefault(episode_key(scene), []).append(block)
+
+    for scene in scenes:
+        blocks = scene.get("blocks") or []
+        for index, subtitle in enumerate(blocks):
+            if (not isinstance(subtitle, dict) or subtitle.get("type") != "screen_text"
+                    or subtitle.get("screenType") != "subtitle"):
+                continue
+            text = evidence_comparison_text(subtitle.get("text"))
+            if not text:
+                continue
+            window = span(subtitle)
+            if window is None:
+                # Legacy untimed records: only an identical adjacent line is
+                # safe to hide; repeated text elsewhere proves nothing.
+                neighbors = blocks[max(0, index - 1):index] + blocks[index + 1:index + 2]
+                if any(block.get("type") in {"dialogue", "vo"} and text == spoken_text(block)
+                       for block in neighbors if isinstance(block, dict)):
+                    subtitle["suppressInOutput"] = True
+                continue
+            candidates = [block for block in spoken_by_episode.get(episode_key(scene), [])
+                          if span(block) and span(block)[1] >= window[0] - 0.35
+                          and span(block)[0] <= window[1] + 0.35]
+            candidates.sort(key=lambda block: span(block))
+            joined = "".join(spoken_text(block) for block in candidates)
+            # Matching wording handles brief caption lag. For shortened or
+            # differently worded captions, require substantial time coverage,
+            # not a single coincident edge from an unrelated sentence.
+            intervals = sorted((max(window[0], span(block)[0]), min(window[1], span(block)[1]))
+                               for block in candidates if span(block)[1] > window[0]
+                               and span(block)[0] < window[1])
+            covered, end = 0.0, window[0]
+            for left, right in intervals:
+                covered += max(0.0, right - max(left, end))
+                end = max(end, right)
+            duration = window[1] - window[0]
+            if (joined and text in joined) or (duration > 0 and covered / duration >= 0.65):
+                subtitle["suppressInOutput"] = True
 
 
 def restore_short_transcript_segments(
@@ -1208,7 +1308,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
 
     def clean_detail(value: Any) -> str:
         text = compact_character_detail(value).strip("。！？；; ")
-        if not text or text in {"不明", "未知", "待核对", "首登外观/服装待核对"}:
+        if not text or text in {"不明", "未知"} or re.search(r"待核对|待确认|待补充", text):
             return ""
         return text
 
@@ -1223,7 +1323,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
             # Some legacy provider responses put the whole introduction in
             # firstAppearance. Use only the descriptive lead before the name,
             # rather than copying a complete action sentence into another one.
-            first = compact_character_detail(profile.get("firstAppearance"), max_chars=48)
+            first = clean_detail(profile.get("firstAppearance"))
             if name and name in first:
                 first = first.split(name, 1)[0].rstrip("，、；：: ")
                 first = re.sub(r"的$", "", first).strip()
@@ -1648,7 +1748,13 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         if raw_segment_type in non_plot_segments and not has_screen_text:
             continue
         blocks: list[dict[str, Any]] = []
-        scene_location = str(raw_scene.get("location") or "待补充").strip()
+        heading_parts = re.match(
+            r"^\s*\d+-\d+\s+(日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
+            r"(内|外|内外|内转外|外转内|不明)\s+(.+)$", raw_heading,
+        )
+        scene_location = str(raw_scene.get("location") or (heading_parts.group(3) if heading_parts else "待补充")).strip()
+        scene_time = raw_scene.get("timeOfDay") or (heading_parts.group(1) if heading_parts else None)
+        scene_interior = raw_scene.get("interiorExterior") or (heading_parts.group(2) if heading_parts else None)
         raw_blocks: list[Any] = []
         if raw_scene.get("sound"):
             raw_blocks.extend(
@@ -1841,6 +1947,12 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                     block["evidenceRecoveryOriginal"] = dict(raw_block["evidenceRecoveryOriginal"])
                 if raw_block.get("textSource") in {"subtitle", "audio"}:
                     block["textSource"] = raw_block["textSource"]
+                audio_unclear = optional_bool(raw_block.get("audioUnclear"))
+                if audio_unclear is not None:
+                    block["audioUnclear"] = audio_unclear
+                clarity = str(raw_block.get("speechClarity") or "").strip().casefold()
+                if clarity in {"clear", "unclear", "inaudible", "unintelligible"}:
+                    block["speechClarity"] = clarity
                 visible_speaker = dedupe_character_names(character_label(raw_block.get("visibleSpeaker")))
                 if visible_speaker:
                     block["visibleSpeaker"] = alias_map.get(visible_speaker.casefold(), visible_speaker)
@@ -1927,8 +2039,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             "id": str(raw_scene.get("id") or f"scene_{index:03d}"),
             "heading": scene_heading(raw_scene, raw_scene_number or index, scene_location, scene_episode),
             "location": scene_location,
-            "timeOfDay": normalize_time_of_day(raw_scene.get("timeOfDay")),
-            "interiorExterior": normalize_interior_exterior(raw_scene.get("interiorExterior")),
+            "timeOfDay": normalize_time_of_day(scene_time),
+            "interiorExterior": normalize_interior_exterior(scene_interior),
             "segmentType": raw_segment_type,
             "characters": scene_characters,
             # The visible screenplay is a visual transcript.  Do not expose
@@ -1949,6 +2061,10 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
             scene["props"] = raw_props if isinstance(raw_props, list) else [raw_props]
         scene_start = number(raw_scene.get("startSec"))
         scene_end = number(raw_scene.get("endSec"))
+        if scene_start is None:
+            scene_start = min((block["startSec"] for block in blocks if "startSec" in block), default=None)
+        if scene_end is None:
+            scene_end = max((block["endSec"] for block in blocks if "endSec" in block), default=None)
         if scene_start is not None:
             scene["startSec"] = scene_start
         if scene_end is not None:
@@ -1974,6 +2090,42 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         )
 
     scenes = sorted(scenes, key=scene_sort_key)
+    # Providers often split every camera beat into a new scene even when the
+    # location, time and dramatic segment never changed. Merge adjacent
+    # compatible scenes before numbering so a five-minute clip does not become
+    # 1-1 through 1-17. Explicit transitions and large time gaps keep scenes
+    # separate.
+    merged_scenes: list[dict[str, Any]] = []
+
+    def mergeable(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if any(left.get(key) != right.get(key) for key in ("_episodeOrder", "location", "timeOfDay", "interiorExterior", "segmentType")):
+            return False
+        if (left.get("location") in {None, "", "待补充", "未知", "不明", "未标注地点"}
+                or left.get("timeOfDay") == "不明" or left.get("interiorExterior") == "不明"):
+            return False
+        for scene in (left, right):
+            if any(block.get("type") == "transition" for block in scene.get("blocks") or []):
+                return False
+        left_end, right_start = left.get("endSec"), right.get("startSec")
+        return (isinstance(left_end, (int, float)) and isinstance(right_start, (int, float))
+                and -1.0 <= right_start - left_end <= 8.0)
+
+    for scene in scenes:
+        if merged_scenes and mergeable(merged_scenes[-1], scene):
+            previous = merged_scenes[-1]
+            previous["blocks"].extend(scene.get("blocks") or [])
+            previous["characters"] = list(dict.fromkeys(
+                (previous.get("characters") or []) + (scene.get("characters") or [])
+            ))
+            if isinstance(scene.get("props"), list):
+                previous["props"] = list(previous.get("props") or []) + scene["props"]
+            if isinstance(scene.get("startSec"), (int, float)):
+                previous["startSec"] = min(previous.get("startSec", scene["startSec"]), scene["startSec"])
+            if isinstance(scene.get("endSec"), (int, float)):
+                previous["endSec"] = max(previous.get("endSec", scene["endSec"]), scene["endSec"])
+        else:
+            merged_scenes.append(scene)
+    scenes = merged_scenes
     scene_counts: dict[int, int] = {}
     for scene in scenes:
         scene_episode = int(scene.get("_episodeOrder") or episode_number)
@@ -2007,7 +2159,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
                 "clothing": "",
                 "firstAppearance": "首登外观/服装待核对",
             })
-    return {
+    result = {
         "version": str(script.get("version") or "1.0"),
         **({"characterNameScope": "labels"} if script.get("characterNameScope") == "labels" else {}),
         "episodeNumber": episode_number,
@@ -2020,6 +2172,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         "characterProfiles": used_profiles,
         "scenes": scenes,
     }
+    suppress_redundant_subtitles(result)
+    return result
 
 
 _GENERIC_CHARACTER_LABELS = {
@@ -2156,6 +2310,108 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
 
     register(first)
 
+    # Appearance labels are useful identity evidence when later episodes
+    # replace a named character with a role description (for example
+    # ``校服小女孩``). Keep the match conservative: one unique distinctive
+    # phrase or two shared concrete descriptors are required.
+    identity_evidence: dict[str, list[str]] = {}
+
+    def identity_text(value: Any) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        # Clothing/role descriptions vary mostly by connective words. Remove
+        # those words before comparing, while retaining concrete descriptors.
+        return re.sub(r"[\s的地得着穿戴一名个位之与及和、，。！？!?：:；;（）()【】\[\]]+", "", text)
+
+    def meaningful_identity(value: Any) -> bool:
+        """Ignore generated placeholders that are shared by every profile."""
+        text = identity_text(value)
+        if not text:
+            return False
+        return not any(marker in text for marker in (
+            "待核对", "待补充", "待确认", "未知", "不明", "首登外观服装",
+            "首登外观", "外观服装待核对",
+        ))
+
+    def identity_tokens(value: Any) -> set[str]:
+        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        tokens = set(re.findall(r"[\u4e00-\u9fff]{2,}", text))
+        generic = {
+            "人物", "角色", "男子", "女人", "男人", "女孩", "男孩", "小女孩", "小男孩",
+            "老人", "老妇人", "年轻人", "中年人", "身影", "穿着", "看起来",
+        }
+        return {token for token in tokens if token not in generic}
+
+    def add_identity_evidence(script: dict[str, Any], mapping: dict[str, str] | None = None) -> None:
+        for profile in script.get("characterProfiles") or []:
+            if not isinstance(profile, dict):
+                continue
+            name = character_label(profile.get("name"))
+            canonical = (mapping or {}).get(name, name)
+            if not canonical:
+                continue
+            values = [name]
+            values.extend(
+                value for value in (
+                    str(profile.get(key) or "")
+                    for key in ("appearance", "clothing", "firstAppearance", "identityEvidence")
+                )
+                if meaningful_identity(value)
+            )
+            values.extend(
+                str(alias) for alias in profile.get("aliases") or []
+                if character_label(alias) and meaningful_identity(alias)
+            )
+            identity_evidence.setdefault(canonical, []).extend(value for value in values if value)
+
+    add_identity_evidence(first)
+
+    def resolve_by_appearance(candidate: str, profile: dict[str, Any]) -> str | None:
+        if not isinstance(profile, dict) or not identity_evidence:
+            return None
+        # A relationship label may contain a known character name (for
+        # example ``周向东父亲``).  Do not let that substring become an
+        # appearance match; relationship labels need an explicit counterpart
+        # and relation before they can be resolved.
+        if relation_pattern.search(_character_key(candidate)):
+            return None
+        # Appearance can reconcile descriptive role labels, not establish that
+        # two different proper names are one person. Clothing alone is shared
+        # by many real characters, especially school/work uniforms.
+        if not re.search(r"男主|女主|主角|男子|女子|男人|女人|男孩|女孩|老人|老头|老太|妇人|大叔|阿姨|小伙|少年|少女|老师|医生|老板|校服|[红白黑蓝绿黄紫]衣", candidate):
+            return None
+        candidate_values = [candidate] + [
+            str(profile.get(key) or "")
+            for key in ("appearance", "clothing", "firstAppearance", "identityEvidence")
+            if meaningful_identity(profile.get(key))
+        ]
+        if not any(len(identity_text(value)) >= 4 for value in candidate_values):
+            return None
+        candidate_joined = "".join(identity_text(value) for value in candidate_values if value)
+        candidate_tokens = set().union(*(identity_tokens(value) for value in candidate_values if value))
+        ranked: list[tuple[int, str]] = []
+        for canonical, values in identity_evidence.items():
+            evidence_joined = "".join(identity_text(value) for value in values if value)
+            evidence_tokens = set().union(*(identity_tokens(value) for value in values if value))
+            score = 0
+            # Removing connective words turns "穿校服的小女孩" and
+            # "校服小女孩" into the same distinctive phrase.
+            for value in candidate_values:
+                compact = identity_text(value)
+                if len(compact) >= 5 and (compact in evidence_joined or evidence_joined in compact):
+                    score = max(score, 4)
+            overlap = candidate_tokens & evidence_tokens
+            if len(overlap) >= 2:
+                score = max(score, 3)
+            elif any(len(token) >= 5 for token in overlap):
+                score = max(score, 3)
+            if score:
+                ranked.append((score, canonical))
+        if not ranked:
+            return None
+        best_score = max(score for score, _ in ranked)
+        best = {canonical for score, canonical in ranked if score == best_score}
+        return next(iter(best)) if len(best) == 1 and best_score >= 3 else None
+
     def resolve(candidate: str) -> str | None:
         key = _character_key(candidate)
         if not key or key in ambiguous_aliases:
@@ -2203,6 +2459,8 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
             profile = next((p for p in script.get("characterProfiles") or []
                             if isinstance(p, dict) and p.get("name") == candidate), {})
             if not resolved:
+                resolved = resolve_by_appearance(candidate, profile)
+            if not resolved:
                 matches = {resolve(alias) for alias in profile.get("aliases") or [] if character_label(alias)} - {None}
                 if len(matches) == 1:
                     resolved = matches.pop()
@@ -2222,6 +2480,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
             if resolved and _character_key(candidate) != _character_key(resolved):
                 mapping[candidate] = resolved
         if not mapping:
+            add_identity_evidence(script)
             register(script)
             continue
         def replace_label(value: Any) -> Any:
@@ -2269,6 +2528,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
                     if key in block:
                         block[key] = replace_label(block.get(key))
         total_changes += len(mapping)
+        add_identity_evidence(script, mapping)
         register(script)
     return total_changes
 
@@ -2307,6 +2567,8 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             lines.append(f"出场人物：{'、'.join(dict.fromkeys(cast))}")
             lines.append("")
         for block in scene.get("blocks", []):
+            if block.get("suppressInOutput"):
+                continue
             block_type = block.get("type")
             if block_type == "dialogue":
                 warning = uncertainty(block, "dialogue")
@@ -2700,6 +2962,31 @@ def script_quality(
             f"无法用独立 OCR 校验字幕、姓名条和系统文字是否遗漏：{reason}。本结果必须人工复核。",
         )
 
+    # Detect a screenplay that stops well before the last independent speech
+    # evidence. Aggregate coverage can look acceptable when the entire tail of
+    # a long episode is absent, so this is an independent P0 content check.
+    evidence_end_sec = max(
+        (float(item.get("endSec")) for item in transcript_segments
+         if isinstance(item.get("endSec"), (int, float))),
+        default=None,
+    )
+    script_end_sec = max(
+        (float(block.get("endSec")) for block in dialogue
+         if isinstance(block.get("endSec"), (int, float))),
+        default=None,
+    )
+    tail_gap_sec: float | None = None
+    if evidence_end_sec is not None and script_end_sec is not None and evidence_end_sec > script_end_sec:
+        tail_gap_sec = round(evidence_end_sec - script_end_sec, 3)
+        if tail_gap_sec >= 8:
+            evidence_warnings += 1
+            issue = add_issue(
+                "台词尾部截断",
+                "P0",
+                f"独立 ASR 证据持续到 {evidence_end_sec:.1f} 秒，但成稿台词只到 {script_end_sec:.1f} 秒，尾部缺失约 {tail_gap_sec:.1f} 秒，必须复核完整视频。",
+            )
+            issue.update(startSec=script_end_sec, endSec=evidence_end_sec)
+
     spoken_candidate = ordered_script_text(script, {"dialogue", "vo"})
     timed_spoken = any(
         isinstance(block.get("startSec"), (int, float))
@@ -2944,6 +3231,9 @@ def script_quality(
         "transcriptCoverage": transcript_coverage,
         "subtitlePrioritySegments": subtitle_overrides,
         "dialogueEvidencePrecision": dialogue_evidence_precision,
+        "evidenceEndSec": evidence_end_sec,
+        "scriptEndSec": script_end_sec,
+        "tailGapSec": tail_gap_sec,
         "ocrCoverage": ocr_coverage,
         "speakerConfidence": max(0, confidence),
         "warnings": len(issues),

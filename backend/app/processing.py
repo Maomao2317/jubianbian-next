@@ -43,6 +43,7 @@ from .script import (
     restore_short_transcript_segments,
     script_quality,
     subtitle_aligned_evidence,
+    suppress_redundant_subtitles,
 )
 from .storage import cleanup_materialized, is_object_uri, materialize_media
 from .task_store import batch_character_context, mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
@@ -146,6 +147,7 @@ def _evaluate_quality(
     boundary_recovered = restore_evidence_boundary_segments(script, evidence)
     gap_recovered = restore_transcript_gap_segments(script, evidence)
     short_recovered = restore_short_transcript_segments(script, evidence)
+    suppress_redundant_subtitles(script)
     recovered = {
         "segments": boundary_recovered["segments"] + gap_recovered["segments"] + short_recovered["segments"],
         "blocks": boundary_recovered["blocks"] + gap_recovered["blocks"] + short_recovered["blocks"],
@@ -192,20 +194,33 @@ def _issue_identity(issue: dict[str, Any]) -> str:
 
 
 def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any]) -> str | None:
-    """Do not replace a draft with a review that loses independent evidence."""
-    if len(quality_gate(reviewed)[1]) > len(quality_gate(initial)[1]):
+    """Keep a draft only when review actually loses spoken content.
+
+    A full video review is allowed to change scene/action structure and its
+    precision score can move slightly when it restores omitted lines.  The
+    safety check still rejects lower transcript coverage. Dialogue/action
+    counts describe structure and cannot prove that the words were retained.
+    """
+    initial_blocking = quality_gate(initial)[1]
+    reviewed_blocking = quality_gate(reviewed)[1]
+    if len(reviewed_blocking) > len(initial_blocking):
         return "more_blocking_issues"
-    before_tags = {issue.get("tag") for issue in quality_gate(initial)[1]}
-    if any(issue.get("tag") not in before_tags for issue in quality_gate(reviewed)[1]):
+    before_tags = {issue.get("tag") for issue in initial_blocking}
+    if any(issue.get("tag") not in before_tags for issue in reviewed_blocking):
         return "new_blocking_issue_type"
-    for key in ("transcriptCoverage", "dialogueEvidencePrecision", "ocrCoverage"):
-        before, after = initial.get(key), reviewed.get(key)
-        if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after < before:
-            return f"lower_{key}"
-    for key in ("actionCount", "performanceCount"):
-        before, after = initial.get(key), reviewed.get(key)
-        if isinstance(before, (int, float)) and isinstance(after, (int, float)) and after < before:
-            return f"lower_{key}"
+
+    before_coverage = initial.get("transcriptCoverage")
+    after_coverage = reviewed.get("transcriptCoverage")
+    coverage_dropped = (
+        isinstance(before_coverage, (int, float))
+        and isinstance(after_coverage, (int, float))
+        and after_coverage < before_coverage
+    )
+    if coverage_dropped:
+        return "lower_transcriptCoverage"
+    before_ocr, after_ocr = initial.get("ocrCoverage"), reviewed.get("ocrCoverage")
+    if isinstance(before_ocr, (int, float)) and isinstance(after_ocr, (int, float)) and after_ocr < before_ocr:
+        return "lower_ocrCoverage"
     return None
 
 
@@ -249,11 +264,12 @@ def _automated_review_context(
     block_keys = {
         "type", "text", "speaker", "visibleSpeaker", "mouthMoving", "speakerEvidence",
         "speechContinuity", "voiceSource",
-        "textSource",
+        "textSource", "audioUnclear", "speechClarity",
         "voKind", "confidence", "uncertain", "inferred", "startSec", "endSec",
         "object", "result", "performance", "emotionType", "emotionEvidence",
         "emotionIntensity", "emotionTrigger", "emotionChange", "emotionTarget",
         "speechTone", "category", "source", "importance", "screenType", "transitionType",
+        "suppressInOutput",
     }
     draft = {
         "title": script.get("title"),
@@ -316,12 +332,15 @@ def _automated_review_context(
         and len(missing) >= 3
         and max(window["endSec"] for window in missing) - min(window["startSec"] for window in missing) >= 20
     )
-    full_review = not ranges or extensive_loss or len(missing) > 40
+    tail_gap = (quality or {}).get("tailGapSec")
+    tail_loss = isinstance(tail_gap, (int, float)) and tail_gap >= 8
+    full_review = not ranges or extensive_loss or tail_loss or len(missing) > 40
     return {
         "scope": "full_video_with_issue_ranges" if full_review else "issue_patches",
         "issues": blocking if full_review else blocking[:40],
         "ranges": ranges if full_review else ranges[:40],
-        **({"reviewReason": "extensive_content_loss"} if extensive_loss or len(missing) > 40 else {}),
+        **({"reviewReason": "tail_content_loss" if tail_loss else "extensive_content_loss"}
+           if extensive_loss or tail_loss or len(missing) > 40 else {}),
         "draft": draft,
         "_sourceScript": script,
     }
@@ -341,6 +360,9 @@ def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
         "事实臆造",
         "疑似漏画面文字片段", "字幕对白遗漏",
     }
+    tail_gap = quality.get("tailGapSec")
+    if isinstance(tail_gap, (int, float)) and tail_gap >= 8:
+        return True
     return any(
         isinstance(issue, dict)
         and (

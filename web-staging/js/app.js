@@ -589,6 +589,7 @@
     function renderBlock(block) {
       // The screenplay follows 剧拆拆's readable text layout; timestamps stay
       // in the underlying data for review but are not printed in the body.
+      if (block.suppressInOutput) return "";
       const time = "";
       if (block.type === "dialogue") {
         const performance = block.performance ? `<em>${escapeHtml(block.performance)}</em>` : "";

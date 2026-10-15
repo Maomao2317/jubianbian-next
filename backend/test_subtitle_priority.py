@@ -8,17 +8,39 @@ from app.script import (normalize_script, restore_evidence_boundary_segments,
 
 
 class SubtitlePriorityTests(unittest.TestCase):
+    def test_clear_audio_is_authoritative_and_hides_corresponding_subtitle(self):
+        script, evidence = self.fixture()
+        dialogue = script["scenes"][0]["blocks"][0]
+        subtitle = script["scenes"][0]["blocks"][1]
+        audio_text = evidence["sources"][0]["items"][0]["text"]
+        subtitle_text = subtitle["text"]
+        dialogue.update(text=subtitle_text, textSource="subtitle")
+        dialogue.pop("confidence", None)
+        evidence["sources"][0]["items"][0].pop("confidence", None)
+
+        self.evaluate(script, evidence)
+
+        self.assertIn(audio_text, dialogue["text"])
+        self.assertNotEqual(dialogue["text"], subtitle_text)
+        self.assertEqual(dialogue.get("textSource"), "audio")
+        self.assertTrue(subtitle.get("suppressInOutput"))
+        exported = script_to_markdown({"title": "test", "result": script})
+        self.assertIn(audio_text, exported)
+        self.assertNotIn(subtitle_text, exported)
+
     def fixture(self, audio="这个人是畜生", subtitle="这个人是坏人", dialogue=None, **fields):
+        # Default fixtures exercise unclear ASR; clear-speech cases remove this
+        # confidence explicitly. Set it before normalization, as in production.
         raw = {"characters": ["甲"], "scenes": [{
             "heading": "1-1 日 内 客厅", "location": "客厅", "characters": ["甲"], "blocks": [
                 {"type": "dialogue", "speaker": "甲", "text": dialogue or audio,
-                 "performance": "愤怒", "startSec": 1, "endSec": 3, **fields},
+                 "performance": "愤怒", "confidence": "low", "startSec": 1, "endSec": 3, **fields},
                 {"type": "screen_text", "screenType": "subtitle", "text": subtitle,
                  "confidence": "high", "startSec": 1, "endSec": 3},
             ]}]}
         evidence = {"sources": [
             {"kind": "audio", "status": "available", "items": [
-                {"type": "transcript_segment", "text": audio, "startSec": 1, "endSec": 3,
+                {"type": "transcript_segment", "text": audio, "confidence": "low", "startSec": 1, "endSec": 3,
                  "words": [{"text": "啊", "startSec": 2, "endSec": 2.1}]},
             ]},
             {"kind": "ocr", "status": "available", "items": [
@@ -31,6 +53,28 @@ class SubtitlePriorityTests(unittest.TestCase):
     def evaluate(self, script, evidence):
         return processing._evaluate_quality(script, "test", evidence,
                                             {"band": "simple", "score": 0, "reasons": []})[0]
+
+    def test_unknown_speaker_does_not_authorize_replacing_clear_words(self):
+        script, evidence = self.fixture(speaker="未知说话人", uncertain=True)
+        evidence["sources"][0]["items"][0]["confidence"] = "high"
+        self.evaluate(script, evidence)
+        block = script["scenes"][0]["blocks"][0]
+        self.assertEqual(block["text"], "这个人是畜生。")
+        self.assertNotEqual(block.get("textSource"), "subtitle")
+
+    def test_explicit_speech_clarity_survives_normalization_and_review(self):
+        for clarity, unclear, expected in [("clear", False, "这个人是畜生。"),
+                                            ("unclear", True, "这个人是坏人。")]:
+            with self.subTest(clarity=clarity):
+                script, evidence = self.fixture(speechClarity=clarity, audioUnclear=unclear)
+                evidence["sources"][0]["items"][0]["confidence"] = "high"
+                block = script["scenes"][0]["blocks"][0]
+                self.assertEqual((block["speechClarity"], block["audioUnclear"]), (clarity, unclear))
+                context = processing._automated_review_context(script, [])
+                self.assertEqual(context["draft"]["scenes"][0]["blocks"][0]["speechClarity"], clarity)
+                self.evaluate(script, evidence)
+                self.assertEqual(block["text"], expected)
+                self.assertTrue(script["scenes"][0]["blocks"][1].get("suppressInOutput"))
 
     def test_user_example_changes_words_and_keeps_speaker_emotion_and_evidence(self):
         script, evidence = self.fixture()
@@ -165,7 +209,10 @@ class SubtitlePriorityTests(unittest.TestCase):
                                                "startSec": 3.1, "endSec": 5})
         evidence["sources"][1]["items"].append({"text": "他真的可恶", "startSec": 3.5, "endSec": 3.75})
         self.evaluate(script, evidence)
-        self.assertEqual(block["text"], "这个人是坏人，他真的可恶。")
+        # The second caption is only a short span inside a longer unclear
+        # utterance, so it cannot erase the remaining audible words.
+        self.assertIn("这个人是坏人", block["text"])
+        self.assertIn("他真的该死", block["text"])
 
 
 if __name__ == "__main__":

@@ -185,6 +185,34 @@ class ProviderDeliveryTests(unittest.TestCase):
             upload.assert_called_once()
             delay.assert_not_called()
 
+    def test_task_retry_remembers_url_ingestion_failure_and_prepares_files_directly(self):
+        checkpoint = {}
+        cache = Mock()
+        cache.load.side_effect = lambda kind: checkpoint.get(kind)
+        cache.save.side_effect = lambda kind, data: checkpoint.update({kind: data})
+        prepared = {"api_key": "key", "video_url": "https://cos.test/video", "_cache": cache}
+        timeout = ArkError("Timeout while processing video_url", status_code=400, provider_code="InvalidParameter")
+        with (
+            patch.object(providers, "ARK_VIDEO_URL_ATTEMPTS", 2),
+            patch.object(providers, "ark_stream_response", side_effect=[timeout, timeout, self.completed()]),
+            patch.object(providers, "ark_prepare_video", return_value={"api_key": "key", "file_id": "file", "_cache": cache}),
+            patch.object(providers.time, "sleep"),
+        ):
+            providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared)
+        self.assertEqual(checkpoint, {"delivery_route": {"mode": "files", "reason": "url_ingestion_failed"}})
+        source = SimpleNamespace(name="source.mp4", stat=lambda: SimpleNamespace(st_size=1024))
+        with (
+            patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),
+            patch.object(providers, "ark_account_key", return_value="key"),
+            patch.object(providers, "presigned_get") as sign,
+            patch.object(providers, "ark_upload_video", return_value=("next-file", "key")) as upload,
+            patch.object(providers, "ark_wait_for_file"),
+        ):
+            retry = providers.ark_prepare_video(source, 131, source_uri="s3://bucket/video", cache=cache)
+        sign.assert_not_called()
+        upload.assert_called_once_with(source, "key", 131, cache=cache)
+        self.assertEqual(retry["file_id"], "next-file")
+
     def test_signer_failure_keeps_existing_link_and_never_logs_signature(self):
         url = "https://cos.test/video?signature=private-secret"
         prepared = {"api_key": "key", "video_url": url, "_video_uri": "s3://bucket/video"}
