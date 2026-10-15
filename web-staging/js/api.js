@@ -475,7 +475,8 @@
       };
       const retryable = (error) => {
         const status = Number(error && error.status || 0);
-        return !status || status === 408 || status === 425 || status === 429 || status >= 500;
+        return !status || status === 408 || status === 425 || status === 429 || status >= 500
+          || (status === 409 && Number(error.retryAfter) > 0);
       };
       const waitBeforeRetry = async (error, attempt) => {
         if (attempt < 3 && retryable(error)) {

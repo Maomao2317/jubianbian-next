@@ -415,6 +415,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_admin_created ON tasks(created_at DESC, id DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_admin_status_created ON tasks(status, created_at DESC, id DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_batch_created ON tasks(batch_id, created_at DESC, id DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_ready_user ON tasks(user_id, created_at, id) WHERE status = 'queued' AND stage = 'queued'")
         # A completed task may be sent through the quality pipeline again by
         # an administrator. Keep the delivered version outside ``tasks`` so a
         # candidate result can never destroy it.

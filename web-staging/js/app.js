@@ -805,14 +805,26 @@
     const pending = new Promise((resolve, reject) => {
       const video = document.createElement("video");
       const url = URL.createObjectURL(file);
+      let finished = false;
+      const finish = (error) => {
+        if (finished) return;
+        finished = true;
+        const duration = video.duration;
+        clearTimeout(timer);
+        video.onloadedmetadata = null;
+        video.onerror = null;
+        video.removeAttribute("src");
+        video.load();
+        URL.revokeObjectURL(url);
+        error ? reject(error) : resolve(duration);
+      };
+      const timer = setTimeout(() => finish(new Error(`${file.name} 读取视频时长超时`)), 30000);
       video.preload = "metadata";
       video.onloadedmetadata = () => {
-        URL.revokeObjectURL(url);
-        Number.isFinite(video.duration) && video.duration > 0 ? resolve(video.duration) : reject(new Error("无法读取视频时长"));
+        finish(Number.isFinite(video.duration) && video.duration > 0 ? null : new Error("无法读取视频时长"));
       };
       video.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error("视频无法读取，请确认文件未损坏"));
+        finish(new Error("视频无法读取，请确认文件未损坏"));
       };
       video.src = url;
     });
@@ -875,20 +887,25 @@
     if (files.length > cfg.upload.maxFiles) { state.upload = { files: existing, file: existing[0] || null, durationSec: state.upload.durationSec || 0, estimatedMinutes: state.upload.estimatedMinutes || 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
     const invalid = files.find((file) => !/\.mp4$/i.test(file.name) || file.size > maxBytes);
     if (invalid) { state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
-    state.upload = { files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
+    const upload = { files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
+    state.upload = upload;
     rerenderCreateModal(titleValue);
     try {
       // Reading metadata for 100+ videos at once creates one decoder and one
       // object URL per file. Keep browser pressure bounded while preserving
       // the original selection order for billing and upload mapping.
       const durations = await readVideoDurations(files, 4);
+      if (state.upload !== upload) return;
       state.upload.durations = durations;
       state.upload.durationSec = durations.reduce((sum, value) => sum + value, 0);
       // Bill the selected batch by its aggregate duration, rounded once. This
       // must match the backend, otherwise every short episode is overcharged.
       state.upload.estimatedMinutes = estimatedMinutes(state.upload.durationSec);
       if (durations.some((value) => value > cfg.upload.maxDurationMinutes * 60)) state.upload.error = `单个视频不能超过 ${cfg.upload.maxDurationMinutes} 分钟`;
-    } catch (error) { state.upload.error = error.message; }
+    } catch (error) {
+      if (state.upload !== upload) return;
+      state.upload.error = error.message;
+    }
     state.upload.reading = false;
     rerenderCreateModal(titleValue);
   }

@@ -22,15 +22,14 @@ def _claim_next_task(connection, active_users: Counter, last_user: str | None):
     # scanned and transferred the same large queue while choosing one task.
     rows = connection.execute(
         """SELECT task.id, task.user_id
-           FROM tasks AS task
-           WHERE task.status = 'queued' AND task.stage = 'queued'
-             AND NOT EXISTS (
-               SELECT 1 FROM tasks AS earlier
-               WHERE earlier.user_id = task.user_id
-                 AND earlier.status = 'queued' AND earlier.stage = 'queued'
-                 AND (earlier.created_at < task.created_at
-                      OR (earlier.created_at = task.created_at AND earlier.id < task.id))
-             )
+           FROM (SELECT DISTINCT user_id FROM tasks
+                 WHERE status = 'queued' AND stage = 'queued') AS owner
+           JOIN tasks AS task ON task.id = (
+               SELECT ready.id FROM tasks AS ready
+               WHERE ready.user_id IS owner.user_id
+                 AND ready.status = 'queued' AND ready.stage = 'queued'
+               ORDER BY ready.created_at, ready.id LIMIT 1
+           )
            ORDER BY task.created_at, task.id"""
     ).fetchall()
     heads = {}

@@ -1023,10 +1023,10 @@ async def upload_task_media(request: Request, task_id: str) -> dict[str, Any]:
     row = task_row(task_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="上传任务不存在")
-    if row["status"] == "queued" and row["stage"] == "queued":
-        info = await asyncio.to_thread(media_info, row["stored_path"])
-        if info and int(info.get("size") or 0) == int(row["file_size"] or 0):
-            return {"taskId": task_id, "status": "queued"}
+    if _upload_already_accepted(row):
+        # A lost PUT response can be retried after a worker has already
+        # claimed/completed this episode. Never overwrite its source again.
+        return {"taskId": task_id, "status": row["status"]}
     if row["status"] != "queued" or row["stage"] != "uploading" or is_object_uri(row["stored_path"]):
         raise HTTPException(status_code=409, detail="该任务当前不能上传")
     expected_size = int(row["file_size"] or 0)
@@ -1061,22 +1061,41 @@ async def upload_task_media(request: Request, task_id: str) -> dict[str, Any]:
     return {"taskId": task_id, "status": "queued"}
 
 
+def _upload_already_accepted(row: sqlite3.Row | dict[str, Any]) -> bool:
+    return (row["status"] == "queued" and row["stage"] == "queued") or row["status"] in {"running", "done", "review"}
+
+
 async def complete_task_upload(request: Request, task_id: str) -> dict[str, Any]:
     """Confirm that a browser direct-to-object-store PUT is complete."""
     user_id = current_user(request)["id"]
     row = task_row(task_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="上传任务不存在")
-    if row["status"] == "queued" and row["stage"] == "queued":
-        return {"taskId": task_id, "status": "queued"}
+    if _upload_already_accepted(row):
+        return {"taskId": task_id, "status": row["status"]}
     if row["status"] != "queued" or row["stage"] != "uploading" or not is_object_uri(row["stored_path"]):
         raise HTTPException(status_code=409, detail="该任务当前不能确认上传")
     info = await asyncio.to_thread(media_info, row["stored_path"])
     expected_size = int(row["file_size"] or 0)
     if not info or int(info.get("size") or 0) != expected_size:
-        raise HTTPException(status_code=409, detail="对象存储中的文件尚未完整上传")
-    update_task(task_id, stage="queued", progress_percent=4, error=None)
-    record_task_event(task_id, "uploaded", "视频直传完成，已进入识别队列", status="queued", stage="queued", progress_percent=4)
+        raise HTTPException(status_code=409, detail="对象存储中的文件尚未完整上传", headers={"Retry-After": "1"})
+    # A HEAD request can overlap an abort/expiry or a second confirmation.
+    # Only the still-uploading reservation may transition into the queue.
+    with db() as connection:
+        claimed = connection.execute(
+            "UPDATE tasks SET stage = 'queued', progress_percent = 4, error = NULL, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'queued' AND stage = 'uploading'",
+            (now_iso(), task_id, user_id),
+        ).rowcount
+        if claimed:
+            record_task_events(connection, [{
+                "task_id": task_id, "event_type": "uploaded", "message": "视频直传完成，已进入识别队列",
+                "status": "queued", "stage": "queued", "progress_percent": 4,
+            }])
+    if not claimed:
+        current = task_row(task_id, user_id)
+        if current and _upload_already_accepted(current):
+            return {"taskId": task_id, "status": current["status"]}
+        raise HTTPException(status_code=409, detail="上传任务已取消或状态已变化")
     return {"taskId": task_id, "status": "queued"}
 
 
