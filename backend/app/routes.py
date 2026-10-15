@@ -87,6 +87,7 @@ from .storage import (
 from .task_store import (
     get_task,
     record_task_event,
+    record_task_events,
     row_to_task,
     task_events,
     task_row,
@@ -984,14 +985,25 @@ async def create_upload_batch(request: Request) -> dict[str, Any]:
                     item["billing_minutes"], created, created, batch_id, batch_title, index, len(prepared),
                 ),
             )
+        # Initial upload reservations and their first timeline event share the
+        # same transaction.  This avoids opening/committing one SQLite
+        # connection per episode for a 100+ episode batch.
+        record_task_events(connection, [
+            {
+                "task_id": item["id"],
+                "event_type": "uploading",
+                "message": "等待视频上传",
+                "status": "queued",
+                "stage": "uploading",
+                "progress_percent": 1,
+            }
+            for item in prepared
+        ])
         charge_points, balance = charged
         connection.execute(
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (user["id"], -charge_points, balance, "consume", "视频识别消费", created),
         )
-    for item in prepared:
-        record_task_event(item["id"], "uploading", "等待视频上传", status="queued", stage="uploading", progress_percent=1)
-
     uploads = []
     for item in prepared:
         uploads.append({

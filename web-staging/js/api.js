@@ -469,42 +469,79 @@
       let cursor = 0;
       let completed = 0;
       const errors = [];
+      const retryDelay = (error, attempt) => {
+        const serverDelay = Number(error && error.retryAfter || 0) * 1000;
+        return Math.min(15000, Math.max(serverDelay, attempt * 800));
+      };
+      const retryable = (error) => {
+        const status = Number(error && error.status || 0);
+        return !status || status === 408 || status === 425 || status === 429 || status >= 500;
+      };
+      const waitBeforeRetry = async (error, attempt) => {
+        if (attempt < 3 && retryable(error)) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelay(error, attempt)));
+          return true;
+        }
+        return false;
+      };
       const uploadOne = async (target) => {
         const file = files[Number(target.inputIndex) || 0];
         if (!file) throw new Error(`${target.fileName || "视频"} 未找到本地文件`);
-        let lastError;
-        for (let attempt = 1; attempt <= 3; attempt += 1) {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), cfg().api.batchTimeoutMs);
-          try {
-            const response = await fetch(target.url, {
-              method: target.method || "PUT",
-              headers: target.headers || { "Content-Type": file.type || "video/mp4" },
-              body: file,
-              credentials: target.mode === "object" ? "omit" : "include",
-              signal: controller.signal,
-            });
-            if (!response.ok) {
-              const detail = await response.json().catch(() => ({}));
-              throw new Error(detail.detail || `${file.name} 上传失败（${response.status}）`);
+        try {
+          // Keep the object-storage PUT separate from completion confirmation.
+          // A transient 429/503 or lost response from /complete must not upload
+          // the whole episode again.
+          let putError;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), cfg().api.batchTimeoutMs);
+            try {
+              const response = await fetch(target.url, {
+                method: target.method || "PUT",
+                headers: target.headers || { "Content-Type": file.type || "video/mp4" },
+                body: file,
+                credentials: target.mode === "object" ? "omit" : "include",
+                signal: controller.signal,
+              });
+              if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                const error = new Error(detail.detail || `${file.name} 上传失败（${response.status}）`);
+                error.status = response.status;
+                error.retryAfter = Number(response.headers.get("Retry-After") || detail.retryAfter || 0) || 0;
+                throw error;
+              }
+              putError = null;
+              break;
+            } catch (error) {
+              putError = error.name === "AbortError" ? new Error(`${file.name} 上传超时`) : error;
+              if (!(await waitBeforeRetry(putError, attempt))) throw putError;
+            } finally {
+              clearTimeout(timer);
             }
-            if (target.completeUrl) {
-              await this.request(target.completeUrl, { method: "POST", timeoutMs: cfg().api.timeoutMs });
-            }
-            completed += 1;
-            if (typeof payload.onProgress === "function") payload.onProgress(completed, files.length, file.name);
-            return;
-          } catch (error) {
-            lastError = error.name === "AbortError" ? new Error(`${file.name} 上传超时`) : error;
-            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 800));
-          } finally {
-            clearTimeout(timer);
           }
+          if (putError) throw putError;
+          if (target.completeUrl) {
+            let completeError;
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              try {
+                await this.request(target.completeUrl, { method: "POST", timeoutMs: cfg().api.timeoutMs });
+                completeError = null;
+                break;
+              } catch (error) {
+                completeError = error;
+                if (!(await waitBeforeRetry(error, attempt))) throw error;
+              }
+            }
+            if (completeError) throw completeError;
+          }
+          completed += 1;
+          if (typeof payload.onProgress === "function") payload.onProgress(completed, files.length, file.name);
+        } catch (error) {
+          if (target.abortUrl) {
+            await this.request(target.abortUrl, { method: "POST" }).catch(() => null);
+          }
+          throw error;
         }
-        if (target.abortUrl) {
-          await this.request(target.abortUrl, { method: "POST" }).catch(() => null);
-        }
-        throw lastError || new Error(`${file.name} 上传失败`);
       };
       const worker = async () => {
         while (cursor < targets.length) {

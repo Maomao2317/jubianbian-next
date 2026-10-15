@@ -17,8 +17,21 @@ from .task_store import record_task_event
 def _claim_next_task(connection, active_users: Counter, last_user: str | None):
     """Choose a least-occupied ready user, rotating ties; FIFO within each user."""
     connection.execute("BEGIN IMMEDIATE")
+    # Only fetch each user's FIFO head.  The previous query materialized every
+    # queued row on every free worker slot, so a 999-episode batch repeatedly
+    # scanned and transferred the same large queue while choosing one task.
     rows = connection.execute(
-        "SELECT id, user_id FROM tasks WHERE status = 'queued' AND stage = 'queued' ORDER BY created_at, id"
+        """SELECT task.id, task.user_id
+           FROM tasks AS task
+           WHERE task.status = 'queued' AND task.stage = 'queued'
+             AND NOT EXISTS (
+               SELECT 1 FROM tasks AS earlier
+               WHERE earlier.user_id = task.user_id
+                 AND earlier.status = 'queued' AND earlier.stage = 'queued'
+                 AND (earlier.created_at < task.created_at
+                      OR (earlier.created_at = task.created_at AND earlier.id < task.id))
+             )
+           ORDER BY task.created_at, task.id"""
     ).fetchall()
     heads = {}
     for row in rows:

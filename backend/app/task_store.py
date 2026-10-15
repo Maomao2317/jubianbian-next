@@ -211,25 +211,57 @@ def record_task_event(
     """Persist a small task timeline while keeping log messages searchable."""
     try:
         with db() as connection:
-            connection.execute(
-                """
-                INSERT INTO task_events
-                  (task_id, event_type, status, stage, progress_percent, message, duration_ms, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    event_type,
-                    status,
-                    stage,
-                    progress_percent,
-                    message[:1000],
-                    duration_ms,
-                    now_iso(),
-                ),
+            _insert_task_event(
+                connection, task_id, event_type, message,
+                status=status, stage=stage, progress_percent=progress_percent,
+                duration_ms=duration_ms,
             )
     except sqlite3.Error:
         logger.exception("task_event_persist_failed task_id=%s event_type=%s", task_id, event_type)
+
+
+def _insert_task_event(
+    connection: sqlite3.Connection,
+    task_id: str,
+    event_type: str,
+    message: str = "",
+    *,
+    status: str | None = None,
+    stage: str | None = None,
+    progress_percent: int | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO task_events
+          (task_id, event_type, status, stage, progress_percent, message, duration_ms, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task_id,
+            event_type,
+            status,
+            stage,
+            progress_percent,
+            message[:1000],
+            duration_ms,
+            now_iso(),
+        ),
+    )
+
+
+def record_task_events(connection: sqlite3.Connection, events: list[dict[str, Any]]) -> None:
+    """Write a group of timeline events on an existing transaction.
+
+    Batch creation can reserve hundreds of episodes in one transaction.  Keep
+    its initial timeline writes on that connection so it does not open and
+    commit one SQLite transaction per episode.
+    """
+    try:
+        for event in events:
+            _insert_task_event(connection, **event)
+    except sqlite3.Error:
+        logger.exception("task_event_batch_persist_failed count=%s", len(events))
 
 
 def mark_task_stage(

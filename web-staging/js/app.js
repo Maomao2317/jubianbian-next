@@ -797,8 +797,12 @@
     </div>`;
   }
 
+  const videoDurationCache = new WeakMap();
+
   function readVideoDuration(file) {
-    return new Promise((resolve, reject) => {
+    const cached = videoDurationCache.get(file);
+    if (cached) return cached;
+    const pending = new Promise((resolve, reject) => {
       const video = document.createElement("video");
       const url = URL.createObjectURL(file);
       video.preload = "metadata";
@@ -812,6 +816,22 @@
       };
       video.src = url;
     });
+    videoDurationCache.set(file, pending);
+    pending.catch(() => videoDurationCache.delete(file));
+    return pending;
+  }
+
+  async function readVideoDurations(files, concurrency = 4) {
+    const durations = new Array(files.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < files.length) {
+        const index = cursor++;
+        durations[index] = await readVideoDuration(files[index]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
+    return durations;
   }
 
   async function setUploadFile(file) {
@@ -858,7 +878,10 @@
     state.upload = { files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
     rerenderCreateModal(titleValue);
     try {
-      const durations = await Promise.all(files.map(readVideoDuration));
+      // Reading metadata for 100+ videos at once creates one decoder and one
+      // object URL per file. Keep browser pressure bounded while preserving
+      // the original selection order for billing and upload mapping.
+      const durations = await readVideoDurations(files, 4);
       state.upload.durations = durations;
       state.upload.durationSec = durations.reduce((sum, value) => sum + value, 0);
       // Bill the selected batch by its aggregate duration, rounded once. This
