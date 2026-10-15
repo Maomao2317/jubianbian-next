@@ -17,6 +17,7 @@ from .config import (
     OBJECT_STORAGE_ACCESS_KEY,
     OBJECT_STORAGE_ADDRESSING_STYLE,
     OBJECT_STORAGE_BUCKET,
+    OBJECT_STORAGE_LEGACY_BUCKET,
     OBJECT_STORAGE_ENABLED,
     OBJECT_STORAGE_ENDPOINT,
     OBJECT_STORAGE_PREFIX,
@@ -50,7 +51,8 @@ def _object_parts(uri: str | Path) -> tuple[str, str]:
     parsed = urlparse(str(uri))
     if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
         raise ValueError("无效的对象存储地址")
-    return parsed.netloc, unquote(parsed.path.lstrip("/"))
+    bucket = OBJECT_STORAGE_BUCKET if parsed.netloc == OBJECT_STORAGE_LEGACY_BUCKET and OBJECT_STORAGE_LEGACY_BUCKET else parsed.netloc
+    return bucket, unquote(parsed.path.lstrip("/"))
 
 
 def _client(*, delivery: bool = False) -> Any:

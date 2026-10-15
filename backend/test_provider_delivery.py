@@ -11,6 +11,19 @@ from app.errors import ArkError
 
 
 class ProviderDeliveryTests(unittest.TestCase):
+    def test_legacy_object_uri_uses_current_bucket_after_migration(self):
+        client = Mock()
+        client.generate_presigned_url.return_value = "https://cos.test/video"
+        with (
+            patch.object(storage, "_client", return_value=client),
+            patch.object(storage, "OBJECT_STORAGE_BUCKET", "new-bucket"),
+            patch.object(storage, "OBJECT_STORAGE_LEGACY_BUCKET", "old-bucket"),
+        ):
+            storage.presigned_get("s3://old-bucket/jubianbian/uploads/task.mp4")
+        self.assertEqual(client.generate_presigned_url.call_args.kwargs["Params"], {
+            "Bucket": "new-bucket", "Key": "jubianbian/uploads/task.mp4",
+        })
+
     def completed(self):
         return {"status": "completed", "output_text": json.dumps({
             "characters": ["甲"],

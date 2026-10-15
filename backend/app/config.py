@@ -144,6 +144,7 @@ ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION = float(os.getenv("ARK_OUTPUT_TOKEN_PRICE
 # ready to process.  Leaving these values empty keeps the local-volume path.
 OBJECT_STORAGE_ENDPOINT = os.getenv("JBB_OBJECT_STORAGE_ENDPOINT", "").strip().rstrip("/")
 OBJECT_STORAGE_BUCKET = os.getenv("JBB_OBJECT_STORAGE_BUCKET", "").strip()
+OBJECT_STORAGE_LEGACY_BUCKET = os.getenv("JBB_OBJECT_STORAGE_LEGACY_BUCKET", "").strip()
 OBJECT_STORAGE_REGION = os.getenv("JBB_OBJECT_STORAGE_REGION", "auto").strip() or "auto"
 OBJECT_STORAGE_ACCESS_KEY = os.getenv("JBB_OBJECT_STORAGE_ACCESS_KEY", "").strip()
 OBJECT_STORAGE_SECRET_KEY = os.getenv("JBB_OBJECT_STORAGE_SECRET_KEY", "").strip()
