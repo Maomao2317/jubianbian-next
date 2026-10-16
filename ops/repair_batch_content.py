@@ -56,7 +56,7 @@ def save_candidate(row, before, script, quality, usage):
                            (*values.values(), row["id"]))
 
 
-async def repair_one(row):
+async def repair_one(row, *, stop_event=None):
     from app.processing import repair_content_gaps, select_ark_route
     from app.recognition_cache import recognition_cache
     from app.storage import materialize_media, cleanup_materialized
@@ -72,7 +72,8 @@ async def repair_one(row):
     path, directory = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"])
     try:
         script, quality, usage = await repair_content_gaps(
-            path, row["title"], duration, before, evidence, select_ark_route(duration, evidence), cache=cache)
+            path, row["title"], duration, before, evidence, select_ark_route(duration, evidence),
+            cache=cache, stop_event=stop_event)
         # An error without additions must not turn a usable old result into a
         # replacement. The failed attempt remains available in the audit cache.
         if quality["contentRepair"]["completedRanges"]:
@@ -84,11 +85,32 @@ async def repair_one(row):
         await asyncio.to_thread(cleanup_materialized, directory)
 
 
+async def run_targets(targets, concurrency=1):
+    stop = asyncio.Event()
+    pending = iter(targets)
+
+    async def worker():
+        while not stop.is_set():
+            row = next(pending, None)
+            if row is None:
+                return
+            try:
+                if await repair_one(row, stop_event=stop):
+                    stop.set()
+                    print("STOP: provider balance insufficient; remaining calls paused", flush=True)
+            except Exception as exc:
+                stop.set()
+                print(json.dumps({"task": row["id"], "error": safe_error_text(exc)}, ensure_ascii=False), flush=True)
+
+    await asyncio.gather(*(worker() for _ in range(min(concurrency, len(targets)))))
+
+
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch", required=True)
     parser.add_argument("--episodes", type=int, nargs="+")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--concurrency", type=int, choices=range(1, 5), default=1)
     args = parser.parse_args()
     rows = rows_for_batch(args.batch)
     if not rows:
@@ -115,15 +137,7 @@ async def main():
     folder.mkdir(parents=True, exist_ok=False)
     with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as source, sqlite3.connect(folder / "before.sqlite3") as backup:
         source.backup(backup)
-    for row in targets:
-        # No batch retry loop: an account error stops all subsequent calls.
-        try:
-            if await repair_one(row):
-                print("STOP: provider balance insufficient; remaining tasks unchanged", flush=True)
-                break
-        except Exception as exc:
-            print(json.dumps({"task": row["id"], "error": safe_error_text(exc)}, ensure_ascii=False), flush=True)
-            break
+    await run_targets(targets, args.concurrency)
 
 
 if __name__ == "__main__":

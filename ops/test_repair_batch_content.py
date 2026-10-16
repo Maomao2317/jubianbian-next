@@ -1,7 +1,8 @@
 import json
+import asyncio
 import sqlite3
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import repair_batch_content as repair
 
@@ -47,6 +48,32 @@ class CandidateTests(unittest.TestCase):
     def test_lost_original_line_cannot_be_published(self):
         with self.assertRaises(ValueError):
             repair.save_candidate(self.row, self.before, {"scenes": []}, self.quality, {})
+
+
+class WorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_balance_stops_unstarted_tasks(self):
+        worker = AsyncMock(return_value=True)
+        with patch.object(repair, "repair_one", worker):
+            await repair.run_targets([{"id": str(i)} for i in range(9)], 3)
+        self.assertEqual(worker.await_count, 1)
+
+    async def test_concurrency_bound_and_each_task_runs_once(self):
+        active = peak = 0
+        seen = []
+
+        async def fake(row, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            seen.append(row["id"])
+            await asyncio.sleep(0)
+            active -= 1
+            return False
+
+        with patch.object(repair, "repair_one", side_effect=fake):
+            await repair.run_targets([{"id": str(i)} for i in range(9)], 3)
+        self.assertEqual(peak, 3)
+        self.assertEqual(sorted(seen), list(map(str, range(9))))
 
 
 if __name__ == "__main__":

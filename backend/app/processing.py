@@ -143,12 +143,15 @@ def _evaluate_quality(
     provider: str,
     evidence: dict[str, Any],
     route: dict[str, Any],
+    *, recover_evidence: bool = True,
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
-    evidence, subtitle_overrides = subtitle_aligned_evidence(script, evidence, update_script=True)
-    boundary_recovered = restore_evidence_boundary_segments(script, evidence)
-    gap_recovered = restore_transcript_gap_segments(script, evidence)
-    short_recovered = restore_short_transcript_segments(script, evidence)
-    suppress_redundant_subtitles(script)
+    evidence, subtitle_overrides = subtitle_aligned_evidence(script, evidence, update_script=recover_evidence)
+    empty = {"segments": 0, "blocks": 0}
+    boundary_recovered = restore_evidence_boundary_segments(script, evidence) if recover_evidence else empty
+    gap_recovered = restore_transcript_gap_segments(script, evidence) if recover_evidence else empty
+    short_recovered = restore_short_transcript_segments(script, evidence) if recover_evidence else empty
+    if recover_evidence:
+        suppress_redundant_subtitles(script)
     recovered = {
         "segments": boundary_recovered["segments"] + gap_recovered["segments"] + short_recovered["segments"],
         "blocks": boundary_recovered["blocks"] + gap_recovered["blocks"] + short_recovered["blocks"],
@@ -190,6 +193,7 @@ def _merge_usage(*records: dict[str, Any]) -> dict[str, Any]:
 async def repair_content_gaps(
     path: Path, title: str, duration: float, script: dict[str, Any],
     evidence: dict[str, Any], route: dict[str, Any], *, cache: RecognitionCache | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """One bounded pass over missing ranges; keep source evidence and old words.
 
@@ -197,6 +201,7 @@ async def repair_content_gaps(
     candidate available for review, and a balance error stops further calls.
     """
     from copy import deepcopy
+    from .content_coverage import normalize_additive_repair
 
     script = deepcopy(script)
     evidence = {**evidence, "durationSec": duration}
@@ -205,6 +210,9 @@ async def repair_content_gaps(
     metadata: dict[str, Any] = {"requestedRanges": windows, "completedRanges": [], "errors": []}
     usage: dict[str, Any] = {}
     for window in windows:
+        if stop_event is not None and stop_event.is_set():
+            metadata["errors"].append({**window, "error": "本批修补已停止，未发起新调用", "balanceError": False})
+            break
         cast = deepcopy(evidence.get("batchCharacterContext") or {})
         profiles = cast.setdefault("characterProfiles", [])
         names = {profile.get("name") for profile in profiles}
@@ -219,7 +227,7 @@ async def repair_content_gaps(
             candidate, added = merge_gap_repair(script, clip, window, offset, clip_duration)
             if not added:
                 raise ArkError("该缺段没有返回可定位的正文，保留原稿等待复核")
-            script = normalize_script(candidate, title)
+            script = normalize_additive_repair(script, candidate, title)
             metadata["completedRanges"].append({**window, "addedBlocks": added})
             if cache:
                 cache.save("content_repair_candidate", {"script": script, "metadata": metadata})
@@ -229,8 +237,10 @@ async def repair_content_gaps(
             logger.warning("content_repair_failed title=%s start=%.1f end=%.1f error=%s",
                            title, window["startSec"], window["endSec"], safe_error_text(exc))
             if is_account_balance_error(exc):
+                if stop_event is not None:
+                    stop_event.set()
                 break
-    quality, _approved, _blocking = _evaluate_quality(script, "ark", evidence, route)
+    quality, _approved, _blocking = _evaluate_quality(script, "ark", evidence, route, recover_evidence=False)
     metadata["remainingRanges"] = content_gaps(script, duration)
     metadata["model"] = model
     quality["contentRepair"] = metadata

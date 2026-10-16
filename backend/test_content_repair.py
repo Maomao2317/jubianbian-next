@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.content_coverage import content_gaps, repair_windows, slice_evidence, merge_gap_repair
+from app.content_coverage import content_gaps, repair_windows, slice_evidence, merge_gap_repair, normalize_additive_repair
 from app import processing, providers
 from app.errors import ArkError
 from app.script import normalize_script, script_quality, quality_gate
@@ -90,6 +90,19 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(added, 0)
         self.assertEqual(sum(len(s["blocks"]) for s in merged["scenes"]), 1)
 
+    def test_new_alias_profiles_cannot_rewrite_existing_actions(self):
+        old = normalize_script(script(action(80, 90, "甲关门。")), "第11集")
+        original_block = deepcopy(old["scenes"][0]["blocks"][0])
+        clip = script(action(0, 40, "张明坐下。"))
+        clip["characters"] = ["张明"]
+        clip["characterProfiles"] = [{"name": "张明", "aliases": ["甲"], "appearance": "短发", "clothing": "蓝色外套"}]
+        candidate, _ = merge_gap_repair(old, clip, {"startSec": 0, "endSec": 80}, 0, 50)
+        result = normalize_additive_repair(old, candidate, "第11集")
+        blocks = [b for s in result["scenes"] for b in s["blocks"]]
+        self.assertIn(original_block, blocks)
+        self.assertFalse(any("contentRepair" in b["text"] for b in blocks))
+        self.assertEqual([b["startSec"] for b in blocks], [0, 80])
+
     def test_misclassified_recaps_cannot_erase_observed_content(self):
         raw = script({**action(0, 20), "isNonPlot": True},
                      {"type": "dialogue", "speaker": "甲", "text": "我们回去。", "startSec": 20, "endSec": 22})
@@ -99,6 +112,25 @@ class CoverageTests(unittest.TestCase):
 
 
 class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_stop_prevents_new_calls(self):
+        stop = asyncio.Event()
+        stop.set()
+        model = AsyncMock()
+        with patch.object(processing, "_run_model_call", model):
+            _, quality, _ = await processing.repair_content_gaps(
+                Path("unused"), "第11集", 120, script(action(110, 120)), {},
+                {"band": "simple", "score": 0, "reasons": []}, stop_event=stop)
+        model.assert_not_awaited()
+        self.assertTrue(quality["contentRepair"]["remainingRanges"])
+
+    async def test_repair_quality_does_not_run_mutating_evidence_recovery(self):
+        with (patch.object(processing, "restore_evidence_boundary_segments") as recover,
+              patch.object(processing, "suppress_redundant_subtitles") as suppress):
+            await processing.repair_content_gaps(Path("unused"), "第11集", 120,
+                script(action(0, 120)), {}, {"band": "simple", "score": 0, "reasons": []})
+        recover.assert_not_called()
+        suppress.assert_not_called()
+
     async def test_missing_beginning_uses_physical_ranges_without_whole_video_review(self):
         original = script(action(110, 120, "甲关门。"))
         def recognize_range(_path, _title, duration, evidence, _model, window, **kwargs):
@@ -124,10 +156,11 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         before = deepcopy(original)
         failure = ArkError("account balance insufficient", status_code=403, provider_code="InsufficientBalance")
         model = AsyncMock(side_effect=[(script(action(0, 38, "甲打开门。")), {"total_tokens": 20}, 0, 39), failure])
+        stop = asyncio.Event()
         with patch.object(processing, "_run_model_call", model):
             repaired, quality, usage = await processing.repair_content_gaps(
                 Path("unused.mp4"), "第11集", 120, original, {},
-                {"band": "simple", "score": 0, "reasons": []})
+                {"band": "simple", "score": 0, "reasons": []}, stop_event=stop)
         self.assertEqual(model.await_count, 2)
         self.assertEqual(original, before)
         text = [b["text"] for s in repaired["scenes"] for b in s["blocks"]]
@@ -135,6 +168,7 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("甲打开门。", text)
         self.assertEqual(usage["total_tokens"], 20)
         self.assertTrue(quality["contentRepair"]["errors"][0]["balanceError"])
+        self.assertTrue(stop.is_set())
         self.assertTrue(quality["contentRepair"]["remainingRanges"])
         self.assertFalse(quality_gate(quality)[0])
 

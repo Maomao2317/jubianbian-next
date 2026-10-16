@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 import re
+from uuid import uuid4
 from typing import Any
 
 
@@ -137,3 +138,43 @@ def merge_gap_repair(original: dict[str, Any], clip: dict[str, Any], window: dic
             profiles.append(deepcopy(profile))
             names.add(profile.get("name"))
     return result, added
+
+
+def normalize_additive_repair(original: dict[str, Any], candidate: dict[str, Any], title: str) -> dict[str, Any]:
+    """Normalize scene structure while keeping existing blocks verbatim.
+
+    New character aliases and appearance profiles can otherwise rewrite old
+    action prose during normalization. Temporary transitions protect the old
+    blocks from all prose/speaker transforms; none reach QA or a model call.
+    """
+    from .script import normalize_script
+
+    remaining = [(block, scene) for scene in original.get("scenes") or []
+                 for block in scene.get("blocks") or []]
+    prepared = deepcopy(candidate)
+    protected = {}
+    prefix = "contentRepair" + uuid4().hex
+    for scene in prepared.get("scenes") or []:
+        for index, block in enumerate(scene.get("blocks") or []):
+            match = next((i for i, (old, _) in enumerate(remaining) if old == block), None)
+            if match is None:
+                continue
+            old, old_scene = remaining.pop(match)
+            marker = prefix + str(len(protected))
+            protected[marker] = (deepcopy(old), list(old_scene.get("characters") or []))
+            scene["blocks"][index] = {"type": "transition", "text": marker,
+                                      **{key: block[key] for key in ("startSec", "endSec") if key in block}}
+    if remaining:
+        raise ValueError("additive repair lost an original block before normalization")
+    result = normalize_script(prepared, title)
+    for scene in result.get("scenes") or []:
+        for index, block in enumerate(scene.get("blocks") or []):
+            saved = protected.pop(block.get("text"), None)
+            if saved is None:
+                continue
+            old, cast = saved
+            scene["blocks"][index] = old
+            scene["characters"] = list(dict.fromkeys(list(scene.get("characters") or []) + cast))
+    if protected:
+        raise ValueError("normalization lost a protected original block")
+    return result
