@@ -64,7 +64,7 @@ class RealOcrBatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="jbb-ocr-test-") as directory:
             root = Path(directory)
             frames = []
-            for index, text in enumerate(("", "101", "102", "A", "B")):
+            for index, text in enumerate(("", "101", "102", "CODE A", "CODE B")):
                 image = root / f"sample {index}.pgm"
                 command = [shutil.which("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error",
                            "-f", "lavfi", "-i", "color=c=white:s=640x240:d=0.04"]
@@ -88,7 +88,7 @@ class RealOcrBatchTests(unittest.TestCase):
             observed = {(item["text"], item["startSec"], item["endSec"])
                         for item in variants[1]["items"] if item["region"] == "subtitle_band"}
             self.assertEqual(observed, {("101", .25, .75), ("101", 1, 1.25),
-                                       ("102", 1.25, 1.5), ("A", 1.5, 1.75), ("B", 1.75, 2)})
+                                       ("102", 1.25, 1.5), ("CODE A", 1.5, 1.75), ("CODE B", 1.75, 2)})
 
 
 if __name__ == "__main__":
