@@ -110,8 +110,59 @@ class CoverageTests(unittest.TestCase):
         result = normalize_script(raw, "第11集")
         self.assertEqual([b["text"] for b in result["scenes"][0]["blocks"]], ["甲走进房间。", "我们回去。"])
 
+    def test_nonplot_labels_keep_titles_subtitles_and_voiceover_distinct(self):
+        for segment in ("recap", "trailer", "title_card", "credits"):
+            with self.subTest(segment=segment):
+                raw = script(
+                    {"type": "title_card", "text": "三年之后", "startSec": 0, "endSec": 2},
+                    {"type": "vo", "speaker": "旁白", "text": "故事从这里开始。", "startSec": 2, "endSec": 4},
+                    {"type": "dialogue", "speaker": "甲", "text": "我们回去。", "startSec": 4, "endSec": 6},
+                    {"type": "subtitle", "text": "我们回去。", "startSec": 4, "endSec": 6},
+                )
+                raw["scenes"][0]["segmentType"] = segment
+                result = normalize_script(raw, "第11集")
+                blocks = [b for s in result["scenes"] for b in s["blocks"]]
+                self.assertTrue(any(b["type"] == "screen_text" and b["text"] == "三年之后" for b in blocks))
+                self.assertTrue(any(b["type"] == "vo" and b["text"] == "故事从这里开始。" for b in blocks))
+                self.assertTrue(any(b["type"] == "dialogue" and b["text"] == "我们回去。" for b in blocks))
+                # The original subtitle deduplication still suppresses a
+                # screen-text copy when the same words are already dialogue.
+                subtitle = next(b for b in blocks if b["type"] == "screen_text" and b["text"] == "我们回去。")
+                self.assertTrue(subtitle.get("suppressInOutput"))
+
 
 class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_lite_modes_keep_their_original_model_policy(self):
+        for mode in ("lite", "lite_only"):
+            with self.subTest(mode=mode):
+                with (patch.object(processing, "mark_task_stage"),
+                      patch.object(processing, "ARK_API_KEYS", ("test",)),
+                      patch.object(processing, "ark_recognize", return_value=(script(action(110, 120)), {})) as whole,
+                      patch.object(processing, "ark_recognize_range") as ranges):
+                    _, quality, _, _ = await processing._run_recognizer_with_media(
+                        {"id": "task", "title": "第11集"}, Path("unused"), 120, {"durationSec": 120},
+                        {"model": "lite", "mode": mode, "band": "simple", "score": 0, "reasons": []}, {}, None)
+                whole.assert_called_once()
+                ranges.assert_not_called()
+                self.assertTrue(quality["contentGapRanges"])
+                self.assertFalse(quality_gate(quality)[0])
+
+    async def test_complete_draft_keeps_the_existing_review_path(self):
+        original = script(action(0, 120))
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "_needs_automated_content_review", return_value=True),
+              patch.object(processing, "ark_recognize", return_value=(original, {})) as whole,
+              patch.object(processing, "ark_recognize_range") as ranges):
+            _, quality, _, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集"}, Path("unused"), 120, {"durationSec": 120},
+                {"model": "lite", "mode": "complexity", "band": "simple", "score": 0, "reasons": []}, {}, None)
+        self.assertEqual(whole.call_count, 2)
+        self.assertIsNotNone(whole.call_args.kwargs["review_context"])
+        ranges.assert_not_called()
+        self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
+
     async def test_shared_stop_prevents_new_calls(self):
         stop = asyncio.Event()
         stop.set()

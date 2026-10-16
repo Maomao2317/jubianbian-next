@@ -72,6 +72,9 @@ LOCAL_ASR_VAD_SPEECH_PAD_MS = max(0, int(os.getenv("JBB_LOCAL_ASR_VAD_SPEECH_PAD
 OCR_LANG = os.getenv("JBB_OCR_LANG", "chi_sim+eng").strip() or "chi_sim+eng"
 OCR_SAMPLE_INTERVAL_SECONDS = max(0.1, float(os.getenv("JBB_OCR_SAMPLE_INTERVAL_SECONDS", "0.25")))
 OCR_MAX_FRAMES = max(12, min(1440, int(os.getenv("JBB_OCR_MAX_FRAMES", "720"))))
+# Reuse one Tesseract process for a small group of unchanged input images.
+# Set to 1 to retain the previous single-image execution path.
+OCR_BATCH_SIZE = max(1, min(32, int(os.getenv("JBB_OCR_BATCH_SIZE", "16"))))
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_API_KEY_2 = os.getenv("ARK_API_KEY_2", "").strip()
 ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2) if key))

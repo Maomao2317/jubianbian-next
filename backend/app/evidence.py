@@ -32,6 +32,7 @@ from .config import (
     LOCAL_ASR_VAD_MIN_SPEECH_MS,
     LOCAL_ASR_VAD_SPEECH_PAD_MS,
     OCR_LANG,
+    OCR_BATCH_SIZE,
     OCR_PROCESS_CONCURRENCY,
     OCR_MAX_FRAMES,
     OCR_SAMPLE_INTERVAL_SECONDS,
@@ -389,6 +390,59 @@ def _append_ocr_sample(items: list[dict[str, Any]], text: str, timestamp: float,
     return item
 
 
+def _run_ocr_pages(samples: list[Path], tesseract: str, temp_dir: Path) -> tuple[list[tuple[int, str, str]], dict[str, int]]:
+    """Amortize engine startup without changing pixels, language or page mode.
+
+    Tesseract emits a separator *between* pages, including empty pages. Never
+    remove blanks: they terminate subtitle occurrences and own timestamps.
+    An unsupported/failed batch falls back to the original single-image path.
+    """
+    stats = {"processes": 0, "batches": 0, "fallback_batches": 0}
+    stats_lock = threading.Lock()
+    ocr_env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
+
+    def invoke(input_path: Path, pages: int = 1) -> subprocess.CompletedProcess:
+        command = [tesseract, str(input_path), "stdout", "-l", OCR_LANG, "--psm", "11"]
+        if pages > 1:
+            command += ["-c", "page_separator=\f"]
+        with capacity("ocr-process", OCR_PROCESS_CONCURRENCY):
+            with stats_lock:
+                stats["processes"] += 1
+                stats["batches"] += int(pages > 1)
+            return subprocess.run(
+                command, capture_output=True, timeout=min(120, 30 * pages), check=False,
+                text=True, encoding="utf-8", errors="replace", env=ocr_env,
+            )
+
+    def single(sample: Path) -> tuple[int, str, str]:
+        result = invoke(sample)
+        return result.returncode, (_bounded_text(result.stdout, 1000) if result.returncode == 0 else ""), _bounded_text(result.stderr, 300)
+
+    def run_chunk(chunk: tuple[int, list[Path]]) -> list[tuple[int, str, str]]:
+        index, paths = chunk
+        if len(paths) == 1:
+            return [single(paths[0])]
+        try:
+            file_list = temp_dir / f"ocr-pages-{index}.txt"
+            file_list.write_text("\n".join(map(str, paths)) + "\n", encoding="utf-8")
+            result = invoke(file_list, len(paths))
+            pages = result.stdout.split("\f")
+            if result.returncode != 0 or len(pages) != len(paths):
+                raise ValueError(f"OCR batch exit={result.returncode} pages={len(pages)}/{len(paths)}")
+            stderr = _bounded_text(result.stderr, 300)
+            return [(0, _bounded_text(page, 1000), stderr) for page in pages]
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            with stats_lock:
+                stats["fallback_batches"] += 1
+            logger.warning("evidence_ocr_batch_fallback pages=%s error=%s", len(paths), safe_error_text(exc))
+            return [single(path) for path in paths]
+
+    chunks = [(i, samples[i:i + OCR_BATCH_SIZE]) for i in range(0, len(samples), OCR_BATCH_SIZE)]
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(chunks))), thread_name_prefix="jbb-ocr") as executor:
+        groups = list(executor.map(run_chunk, chunks))
+    return [result for group in groups for result in group], stats
+
+
 def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     """Optionally OCR sampled frames when both command-line tools exist.
 
@@ -410,7 +464,6 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     # Each process remains single-threaded, while independent sampled images
     # run in a small pool. Output is consumed in timestamp order below, so the
     # deduplication and interval semantics remain identical to serial OCR.
-    ocr_env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
     try:
         with tempfile.TemporaryDirectory(prefix="jbb-ocr-") as temp_name:
             temp_dir = Path(temp_name)
@@ -439,18 +492,7 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
                     jobs.append((index, "full", image_path))
                     next_full = timestamp + max(1.0, OCR_SAMPLE_INTERVAL_SECONDS)
                 previous_band = band
-            def run_ocr(job: tuple[int, str, Path]) -> tuple[int, str, str]:
-                _index, _region, sample_path = job
-                with capacity("ocr-process", OCR_PROCESS_CONCURRENCY):
-                    result = subprocess.run(
-                        [tesseract, str(sample_path), "stdout", "-l", OCR_LANG, "--psm", "11"],
-                        capture_output=True, timeout=30, check=False,
-                        text=True, encoding="utf-8", errors="replace", env=ocr_env,
-                    )
-                return result.returncode, (_bounded_text(result.stdout, 1000) if result.returncode == 0 else ""), _bounded_text(result.stderr, 300)
-
-            with ThreadPoolExecutor(max_workers=min(4, max(1, len(jobs))), thread_name_prefix="jbb-ocr") as executor:
-                results = list(executor.map(run_ocr, jobs))
+            results, execution = _run_ocr_pages([job[2] for job in jobs], tesseract, temp_dir)
             for index, (timestamp, image_path) in enumerate(zip(times, images)):
                 band_job = band_jobs.get(index)
                 band_result = results[band_job] if band_job is not None else None
@@ -484,7 +526,9 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
                     previous_items["full"] = _append_ocr_sample(
                         items, text if returncode == 0 else "", timestamp, timestamp,
                         previous_items["full"], region="full")
-            logger.info("evidence_ocr_sampling file=%s frames=%s ocr_calls=%s", path.name, len(images), ocr_calls)
+            logger.info("evidence_ocr_sampling file=%s frames=%s ocr_calls=%s ocr_processes=%s ocr_batches=%s batch_fallbacks=%s batch_size=%s",
+                        path.name, len(images), ocr_calls, execution["processes"], execution["batches"],
+                        execution["fallback_batches"], OCR_BATCH_SIZE)
     except Exception as exc:
         logger.warning("evidence_ocr_failed file=%s error=%s", path.name, safe_error_text(exc))
         return _source("ocr", "unavailable", provider="tesseract", reason=f"OCR 失败：{safe_error_text(exc)}")
