@@ -65,6 +65,7 @@ from .config import (
     OPENAI_TRANSCRIPTION_MODEL,
 )
 from .errors import ArkError, is_account_balance_error
+from .content_coverage import slice_evidence
 from .evidence import evidence_summary
 from .logging_setup import logger, safe_error_text
 from .media import multipart_body, probe_duration
@@ -905,7 +906,8 @@ def ark_prompt(
         "11b. speaker按声音的实际归属填写，先核对起句时的声源、同期口型、声音连续性和实际说话人切换。A一句未结束而画面转到B听话或反应，仍归A并填speechContinuity=true，不因切镜换speaker；确认是新的发声者才另建块。visibleSpeaker只填明确与此声同步的角色姓名字符串或空字符串，绝不能填布尔值；mouthMoving是布尔值，无法确认可省略。口型或画面中出现某人单独不足以证明声音归属，动画、动物、机器人等也按声音及字幕证据判定。"
         "12. 正式扒剧本不输出背景音乐；sound 只保留原片确实听到且对剧情有作用的动作音效或环境声。必须逐条识别所有画面字幕，包括人物姓名字幕、对白字幕、作品/AI免责声明、系统提示、标题字样和转场字幕，全部使用 screen_text 单独标记并保持出现顺序，不能漏掉、合并或改写；闪回、回到现实和闪白等使用 transition。"
         "13. characterProfiles为每个角色建立唯一id、规范name和aliases，出场人物characters及台词前speaker标签必须用首次确定的同一名字。周守田是周向东父亲，后面再次出现仍标周守田，不能改为向东爸，更不能归并到周向东；台词、字幕和动作原文的称谓保持原样。姓名从姓名条、字幕、直接称呼及自报身份确认，用nameEvidence记录原视频依据；仅凭剧情或相似外观不能编造姓名。relationships中target=周向东、relation=父亲表示此角色是周向东父亲，仅确认关系时填写。动物、动画及其他非人角色也属于角色，species记录可见类型；确无姓名时首次用可区分的稳定称呼，后续沿用并保留身份疑点，不能漏掉其对白。"
-        "14. recap、trailer、title_card 或 credits 不作为新剧情场景，但其中实际出现的字幕必须保留为 screen_text；不要因其属于片头、片尾或包装而丢弃字幕。"
+        "14. 全片实际出现的画面动作、对白和文字都必须保留，包括回顾recap、预告trailer、片头和片尾；"
+        "segmentType只标记片段类别，不是删减指令，不能把重复剧情当成可省略内容。纯标题或演职员文字用screen_text。"
         "15. startSec 和 endSec 填写画面或声音的大致秒数并保持顺序；时间只用于回看定位，不要据此拆成镜头。无法判断时才填 0。每个关键行为都要能回溯到 eventChain 或视频时间证据；不要为没有证据的动机、设定、道具状态或心理活动补写事实。"
         "没有把握的内容使用‘不明’、‘未知说话人’或‘[听不清]’，不要编造视频之外的事实；优先保证剧情因果、台词准确、动作动词保真和人物一致。"
         "16. 本提示中的希希、王铁柱、米缸、河流和服装只是格式示例，绝不能套用到其他视频；先根据当前视频真实判断题材、时代、地域、人物关系和叙事语气。无论都市、家庭、校园、职场、古装、悬疑、动作、喜剧、纪录或其他类型，都只记录当前视频实际出现的画面、声音、字幕和动作，不因题材不同而省略关键事件，也不凭类型套路补写剧情。"
@@ -918,6 +920,11 @@ def ark_prompt(
         f"\n{evidence_fragment}"
     )
     prompt += SUBTITLE_PRIORITY_RULE
+    if (evidence or {}).get("segmentReconstruction"):
+        prompt += (
+            "\n当前视频是从原片物理截取的独立短片。必须逐段完整识别本短片从0秒到结尾的实际动作、"
+            "对白和画面文字；所有输出时间从本短片0秒起算，不沿用原片时间，不把短片当预告而省略。"
+        )
     cast_context = (evidence or {}).get("batchCharacterContext")
     if isinstance(cast_context, dict) and cast_context.get("characterProfiles"):
         prompt += (
@@ -1332,6 +1339,8 @@ def ark_recognize(
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s model=%s duration_sec=%.1f", path.name, selected_model, duration_sec)
     prepared = prepared_video or ark_prepare_video(path, duration_sec)
+    audit_cache = prepared.get("_audit_cache") or prepared.get("_cache")
+    audit_kind = prepared.get("_audit_kind") or ("review" if review_context else "initial")
     if prepared.get("_video_uri"):
         try:
             prepared["video_url"] = presigned_get(prepared["_video_uri"])
@@ -1447,6 +1456,9 @@ def ark_recognize(
             time.sleep(min(5.0, float(attempt)))
     logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
     script = normalize_script(raw_script, title)
+    if audit_cache is not None:
+        audit_cache.save("model_" + audit_kind, {"model": selected_model, "rawScript": raw_script,
+                                                "normalizedScript": script})
     logger.info(
         "provider_done provider=ark operation=video_recognize file=%s model=%s duration_ms=%.1f scenes=%s",
         path.name,
@@ -1460,6 +1472,49 @@ def ark_recognize(
             values = [record[key] for record in response_usages if isinstance(record.get(key), (int, float))]
             usage[key] = round(sum(values), 6) if values else None
     return script, usage
+
+
+def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: dict[str, Any],
+                        model: str, window: dict[str, float], *,
+                        cache: RecognitionCache | None = None) -> tuple[dict[str, Any], dict[str, Any], float, float]:
+    """Physically isolate a missing interval so full-video attention cannot skip it."""
+    start = max(0.0, window["startSec"] - 2)
+    end = min(duration_sec, window["endSec"] + 2)
+    kind = f"segment_{round(start * 1000)}_{round(end * 1000)}"
+    # Include the model and repair protocol in the checkpoint contract.
+    checkpoint = cache.load(kind) if cache else None
+    if checkpoint and checkpoint.get("protocol") == 1 and checkpoint.get("model") == model:
+        return checkpoint["script"], {}, start, end - start
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise ArkError("缺段修补需要 ffmpeg，已保留原稿")
+    clipped = slice_evidence(evidence, start, end)
+    clipped["segmentReconstruction"] = True
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="content-repair-", dir=DATA_DIR) as directory:
+        target = Path(directory) / "segment.mp4"
+        try:
+            # Decode and re-encode rather than keyframe stream-copy: local
+            # timestamps and the audio/video boundaries must agree precisely.
+            with _ark_proxy_semaphore, capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT):
+                subprocess.run([
+                    ffmpeg, "-nostdin", "-v", "error", "-ss", str(start), "-i", str(path),
+                    "-t", str(end - start), "-map", "0:v:0", "-map", "0:a:0?",
+                    "-vf", "scale=-2:min(960\\,ih)", "-c:v", "libx264", "-preset", "veryfast",
+                    "-crf", "22", "-threads", str(ARK_UPLOAD_PROXY_THREADS), "-c:a", "aac",
+                    "-b:a", "96k", "-movflags", "+faststart", str(target),
+                ], check=True, capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ArkError("原片缺段截取失败，已保留原稿") from exc
+        # A clip must never reuse or overwrite the original video's delivery
+        # cache. Keep model auditing separate from media delivery checkpoints.
+        prepared = ark_prepare_video(target, end - start, force_files=True)
+        if cache:
+            prepared.update(_audit_cache=cache, _audit_kind=kind)
+        script, usage = ark_recognize(target, title, end - start, clipped, model, prepared_video=prepared)
+    if cache:
+        cache.save(kind, {"protocol": 1, "model": model, "script": script, "usage": usage})
+    return script, usage, start, end - start
 
 
 def openai_transcribe(path: Path) -> str:

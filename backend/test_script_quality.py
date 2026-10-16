@@ -830,7 +830,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             "scenes": [{
                 "heading": "1-1 日 内 客厅",
                 "location": "客厅",
-                "blocks": [{"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True, "startSec": 1, "endSec": 2}],
+                "blocks": [{"type": "action", "text": "甲在客厅等候。", "startSec": 0, "endSec": 30},
+                           {"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True, "startSec": 1, "endSec": 2}],
             }],
         }
         repaired = {
@@ -838,7 +839,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             "scenes": [{
                 "heading": "1-1 日 内 客厅",
                 "location": "客厅",
-                "blocks": [{"type": "dialogue", "speaker": "甲", "text": "你好", "startSec": 1, "endSec": 2}],
+                "blocks": [{"type": "action", "text": "甲在客厅等候。", "startSec": 0, "endSec": 30},
+                           {"type": "dialogue", "speaker": "甲", "text": "你好", "startSec": 1, "endSec": 2}],
             }],
         }
         row = {"id": "task-1", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30}
@@ -865,7 +867,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         ):
             script, quality, usage, _ = asyncio.run(processing.run_recognizer(row))
         self.assertEqual(recognize.call_count, 2)
-        self.assertEqual(script["scenes"][0]["blocks"][0]["speaker"], "甲")
+        self.assertEqual(next(b for b in script["scenes"][0]["blocks"] if b["type"] == "dialogue")["speaker"], "甲")
         self.assertTrue(quality_gate(quality)[0])
         self.assertEqual(quality["modelRoute"], "turbo_review")
         self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
@@ -887,7 +889,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             "scenes": [{
                 "heading": "1-1 日 内 客厅",
                 "location": "客厅",
-                "blocks": [{"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True}],
+                "blocks": [{"type": "action", "text": "甲在客厅等候。", "startSec": 0, "endSec": 210},
+                           {"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True}],
             }],
         }
         # A complex clip starts on Turbo. It still gets exactly one focused

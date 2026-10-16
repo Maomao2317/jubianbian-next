@@ -212,7 +212,10 @@ class ProviderDeliveryTests(unittest.TestCase):
             patch.object(providers.time, "sleep"),
         ):
             providers.ark_recognize(Path("source.mp4"), "第2集", 131, prepared_video=prepared)
-        self.assertEqual(checkpoint, {"delivery_route": {"mode": "files", "reason": "url_ingestion_failed"}})
+        self.assertEqual(checkpoint["delivery_route"], {"mode": "files", "reason": "url_ingestion_failed"})
+        self.assertIn("model_initial", checkpoint)
+        self.assertNotIn("api_key", checkpoint["model_initial"])
+        self.assertNotIn("video_url", checkpoint["model_initial"])
         source = SimpleNamespace(name="source.mp4", stat=lambda: SimpleNamespace(st_size=1024))
         with (
             patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),

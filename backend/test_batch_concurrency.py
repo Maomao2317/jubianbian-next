@@ -296,7 +296,7 @@ class RecognizerThreadTests(unittest.IsolatedAsyncioTestCase):
                 config.REQUEST_ID.reset(token)
             self.assertEqual(result, "complete")
             self.assertEqual(request_ids, ["batch-request"])
-            self.assertEqual(recognize.call_args.args[3], collected)
+            self.assertEqual(recognize.call_args.args[3], {**collected, "durationSec": 1})
             self.assertEqual(recognize.call_args.args[5], video)
 
 

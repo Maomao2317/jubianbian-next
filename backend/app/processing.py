@@ -29,10 +29,11 @@ from .config import (
 )
 from .auth_store import db, now_iso
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
+from .content_coverage import content_gaps, merge_gap_repair, repair_windows
 from .errors import ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
-from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, openai_script, openai_transcribe
+from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, openai_script, openai_transcribe
 from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import (
@@ -184,6 +185,58 @@ def _merge_usage(*records: dict[str, Any]) -> dict[str, Any]:
         6,
     )
     return result
+
+
+async def repair_content_gaps(
+    path: Path, title: str, duration: float, script: dict[str, Any],
+    evidence: dict[str, Any], route: dict[str, Any], *, cache: RecognitionCache | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """One bounded pass over missing ranges; keep source evidence and old words.
+
+    Completed clips are checkpointed. A failed clip leaves the accumulated
+    candidate available for review, and a balance error stops further calls.
+    """
+    from copy import deepcopy
+
+    script = deepcopy(script)
+    evidence = {**evidence, "durationSec": duration}
+    windows = repair_windows(content_gaps(script, duration))
+    model = ARK_TURBO_MODEL.strip() or ARK_MODEL
+    metadata: dict[str, Any] = {"requestedRanges": windows, "completedRanges": [], "errors": []}
+    usage: dict[str, Any] = {}
+    for window in windows:
+        cast = deepcopy(evidence.get("batchCharacterContext") or {})
+        profiles = cast.setdefault("characterProfiles", [])
+        names = {profile.get("name") for profile in profiles}
+        profiles.extend(deepcopy(profile) for profile in script.get("characterProfiles") or []
+                        if profile.get("name") not in names)
+        try:
+            clip, clip_usage, offset, clip_duration = await _run_model_call(
+                ark_recognize_range, path, title, duration,
+                {**evidence, "batchCharacterContext": cast}, model, window, cache=cache,
+            )
+            usage = _merge_usage(usage, clip_usage)
+            candidate, added = merge_gap_repair(script, clip, window, offset, clip_duration)
+            if not added:
+                raise ArkError("该缺段没有返回可定位的正文，保留原稿等待复核")
+            script = normalize_script(candidate, title)
+            metadata["completedRanges"].append({**window, "addedBlocks": added})
+            if cache:
+                cache.save("content_repair_candidate", {"script": script, "metadata": metadata})
+        except Exception as exc:
+            metadata["errors"].append({**window, "error": safe_error_text(exc),
+                                       "balanceError": is_account_balance_error(exc)})
+            logger.warning("content_repair_failed title=%s start=%.1f end=%.1f error=%s",
+                           title, window["startSec"], window["endSec"], safe_error_text(exc))
+            if is_account_balance_error(exc):
+                break
+    quality, _approved, _blocking = _evaluate_quality(script, "ark", evidence, route)
+    metadata["remainingRanges"] = content_gaps(script, duration)
+    metadata["model"] = model
+    quality["contentRepair"] = metadata
+    if cache:
+        cache.save("content_repair_candidate", {"script": script, "quality": quality, "usage": usage})
+    return script, quality, usage
 
 
 def _issue_identity(issue: dict[str, Any]) -> str:
@@ -540,7 +593,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         results = await asyncio.gather(evidence_task, *([prepare_task] if prepare_task else []), return_exceptions=True)
         if isinstance(results[0], BaseException):
             raise results[0]
-        evidence = results[0]
+        evidence = {**results[0], "durationSec": duration}
         cast_context = await asyncio.to_thread(batch_character_context, row)
         if cast_context:
             evidence = {**evidence, "batchCharacterContext": cast_context}
@@ -646,8 +699,20 @@ async def _run_recognizer_with_media(
             }
 
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
+            has_content_gaps = bool(quality.get("contentGapRanges"))
+            if has_content_gaps and turbo_model and route.get("mode") not in {"lite", "lite_only"}:
+                script, quality, repair_usage = await repair_content_gaps(
+                    path, row["title"], duration, script, evidence, route,
+                    cache=prepared_video.get("_cache"),
+                )
+                final_usage = _merge_usage(final_usage, repair_usage)
+                final_model = turbo_model
+                review_metadata.update({"reviewModel": turbo_model,
+                                        "attemptCount": 1 + len(quality["contentRepair"]["completedRanges"]) + len(quality["contentRepair"]["errors"]),
+                                        "reviewScope": "missing_video_segments",
+                                        "unresolvedIssues": quality.get("blockingIssues", [])})
             may_auto_review = (
-                _needs_automated_content_review(quality)
+                not has_content_gaps and _needs_automated_content_review(quality)
                 and route.get("mode") not in {"lite", "lite_only"}
                 and bool(turbo_model)
             )

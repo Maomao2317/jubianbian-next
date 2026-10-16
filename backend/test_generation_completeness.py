@@ -193,6 +193,20 @@ class GenerationCompletenessTests(unittest.TestCase):
                 apply_batch_character_continuity(scripts)
                 self.assertEqual(scripts[1]["scenes"][0]["blocks"][0]["speaker"], "赵明月")
 
+    def test_unknown_girl_requires_unique_appearance_evidence(self):
+        for names, expected in [(["江词"], "江词"), (["江词", "吴芳"], "未知女生")]:
+            with self.subTest(names=names):
+                reference = normalize_script({"characterProfiles": [
+                    {"name": name, "appearance": "长发梳高马尾", "clothing": "军绿色宽松外套，白色休闲鞋"}
+                    for name in names], "scenes": [scene("1-1", [line("你好", 1, 3, speaker=name) for name in names])]}, "第1集")
+                later = normalize_script({"characterProfiles": [{"name": "未知女生", "appearance": "长发梳高马尾",
+                    "clothing": "军绿色宽松外套，白色休闲鞋"}],
+                    "scenes": [scene("9-1", [line("你叫江词吗", 1, 3, speaker="未知女生")])]}, "第9集")
+                original_words = later["scenes"][0]["blocks"][0]["text"]
+                apply_batch_character_continuity([reference, later])
+                self.assertEqual(later["scenes"][0]["blocks"][0]["speaker"], expected)
+                self.assertEqual(later["scenes"][0]["blocks"][0]["text"], original_words)
+
 
 if __name__ == "__main__":
     unittest.main()

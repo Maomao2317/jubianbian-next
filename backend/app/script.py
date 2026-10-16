@@ -1727,7 +1727,6 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         return text if text in {"内", "外", "内外", "内转外", "外转内", "不明"} else "不明"
 
     scenes: list[dict[str, Any]] = []
-    non_plot_segments = {"recap", "trailer", "title_card", "credits"}
     for index, raw_scene in enumerate(script["scenes"], start=1):
         if not isinstance(raw_scene, dict):
             continue
@@ -1737,16 +1736,9 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         scene_episode = heading_episode if multi_episode and heading_episode is not None else episode_number
         scene_number_match = _SCENE_NUMBER_RE.match(raw_heading)
         raw_scene_number = int(scene_number_match.group(2)) if scene_number_match else None
-        has_screen_text = any(
-            isinstance(item, dict)
-            and (
-                str(item.get("type") or "").strip().lower() in {"screen_text", "subtitle", "caption", "system", "title_card"}
-                or str(item.get("screenType") or "").strip().lower() in {"subtitle", "system", "title_card", "other"}
-            )
-            for item in (raw_scene.get("blocks") or [])
-        )
-        if raw_segment_type in non_plot_segments and not has_screen_text:
-            continue
+        # Segment labels are model judgements, not permission to erase source
+        # content. Recaps can contain most of an uploaded episode. Preserve
+        # observed action/speech even when the provider labels it non-plot.
         blocks: list[dict[str, Any]] = []
         heading_parts = re.match(
             r"^\s*\d+-\d+\s+(日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
@@ -1767,10 +1759,6 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         raw_blocks.extend(raw_scene.get("blocks") or [])
         for raw_block in raw_blocks:
             if not isinstance(raw_block, dict):
-                continue
-            raw_block_type = str(raw_block.get("type") or "").strip().lower()
-            is_screen_text = raw_block_type in {"screen_text", "subtitle", "caption", "system", "title_card"} or str(raw_block.get("screenType") or "").strip().lower() in {"subtitle", "system", "title_card", "other"}
-            if (raw_block.get("isNonPlot") or str(raw_block.get("segmentType") or "").lower() in non_plot_segments) and not is_screen_text:
                 continue
             text = strip_internal_review_markers(raw_block.get("text") or raw_block.get("description") or "")
             if not text:
@@ -2377,7 +2365,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
         # Appearance can reconcile descriptive role labels, not establish that
         # two different proper names are one person. Clothing alone is shared
         # by many real characters, especially school/work uniforms.
-        if not re.search(r"男主|女主|主角|男子|女子|男人|女人|男孩|女孩|老人|老头|老太|妇人|大叔|阿姨|小伙|少年|少女|老师|医生|老板|校服|[红白黑蓝绿黄紫]衣", candidate):
+        if not re.search(r"男主|女主|主角|男子|女子|男生|女生|男人|女人|男孩|女孩|老人|老头|老太|妇人|大叔|阿姨|小伙|少年|少女|老师|医生|老板|校服|[红白黑蓝绿黄紫]衣", candidate):
             return None
         candidate_values = [candidate] + [
             str(profile.get(key) or "")
@@ -2669,6 +2657,16 @@ def script_quality(
             issue["block"] = block_index
         issues.append(issue)
         return issue
+
+    from .content_coverage import content_gaps
+    content_duration = (evidence or {}).get("durationSec")
+    content_gap_ranges = content_gaps(script, content_duration) if isinstance(content_duration, (int, float)) else []
+    for window in content_gap_ranges:
+        issue = add_issue("正文时间缺段", "P0", (
+            f"{window['startSec']:.1f}—{window['endSec']:.1f}秒没有画面动作或对白正文，"
+            "需回看该段原片补全；字幕和场次时间不能代替正文。"
+        ))
+        issue.update(window)
 
     # The visible output follows 剧拆拆 and intentionally has no global event
     # chain or scene-task section. Keep those fields optional for compatibility
@@ -3234,6 +3232,7 @@ def script_quality(
         "evidenceEndSec": evidence_end_sec,
         "scriptEndSec": script_end_sec,
         "tailGapSec": tail_gap_sec,
+        "contentGapRanges": content_gap_ranges,
         "ocrCoverage": ocr_coverage,
         "speakerConfidence": max(0, confidence),
         "warnings": len(issues),
