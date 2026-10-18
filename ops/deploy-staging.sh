@@ -17,6 +17,13 @@ if ! flock -n 9; then
   exit 0
 fi
 
+# A verified local staging overlay must survive timer runs until its changes
+# have been merged. Operators remove this marker after deploying that merge.
+if [[ -f "$STAGING_DIR/.staging-deploy-hold" ]]; then
+  log "local staging overlay is pinned by .staging-deploy-hold; skip automatic deployment"
+  exit 0
+fi
+
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   log "repository is missing at $REPO_DIR"
   exit 1

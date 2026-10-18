@@ -44,6 +44,7 @@ from .config import (
     MAX_DURATION_SECONDS,
     MAX_UPLOAD_BYTES,
     POINTS_PER_MINUTE,
+    POINTS_PER_YUAN,
     QUEUE_MAX_WAIT_MINUTES,
     REGISTER_POINTS,
     PASSWORD_DIGIT_RE,
@@ -73,7 +74,7 @@ from .rechecks import (
     pending_recheck_snapshot,
     restore_recheck_snapshot,
 )
-from .script import script_to_markdown
+from .script import has_screenplay_body, script_to_markdown
 from .storage import (
     delete_media,
     is_object_uri,
@@ -528,7 +529,7 @@ async def admin_user_credits(request: Request, user_id: str) -> dict[str, Any]:
         rmb_amount = 0
     if not math.isfinite(rmb_amount) or rmb_amount <= 0 or rmb_amount > 1_000_000:
         raise HTTPException(status_code=400, detail="人民币金额必须大于 0")
-    points_amount = round(rmb_amount * 13.8, 1)
+    points_amount = round(rmb_amount * POINTS_PER_YUAN, 1)
     reason = str(payload.get("reason") or "管理员人民币充值")[:200]
     with db() as connection:
         row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -720,6 +721,12 @@ async def admin_approve_task(request: Request, task_id: str) -> dict[str, Any]:
         }
     if row["status"] != "review":
         raise HTTPException(status_code=409, detail="只有管理员复核中的任务可以确认通过")
+    try:
+        candidate = json.loads(row["result_json"] or "{}")
+    except (TypeError, ValueError):
+        candidate = None
+    if not has_screenplay_body(candidate):
+        raise HTTPException(status_code=409, detail="剧本正文为空，不能确认通过，请重新识别")
     approved_at = now_iso()
     quality = existing_quality
     quality["deliveryStatus"] = "approved"
@@ -1326,6 +1333,12 @@ def delete_task(request: Request, task_id: str) -> Response:
     return Response(status_code=204)
 
 
+def _download_markdown(task: dict[str, Any]) -> str:
+    if not has_screenplay_body(task.get("result")):
+        raise HTTPException(status_code=409, detail=f"{task.get('title') or '该任务'}的剧本正文为空，请重新识别；本次未生成下载文件")
+    return script_to_markdown(task)
+
+
 def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
     user = current_user(request)
     with db() as connection:
@@ -1342,7 +1355,7 @@ def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|tx
     content_parts = []
     for row in rows:
         task = row_to_task(row)
-        markdown = script_to_markdown(task)
+        markdown = _download_markdown(task)
         content_parts.append(markdown if fmt == "md" else re.sub(r"^#{1,6}\\s+", "", markdown, flags=re.MULTILINE))
     content = "\n\n---\n\n".join(content_parts)
     filename = f"全部剧本.{fmt}"
@@ -1362,7 +1375,7 @@ def download_batch(request: Request, batch_id: str, fmt: str = Query("md", patte
     rows = sorted(rows, key=lambda row: episode_sort_key(str(row["file_name"] or ""), int(row["batch_index"] or 0)))
     parts = []
     for row in rows:
-        markdown = script_to_markdown(row_to_task(row))
+        markdown = _download_markdown(row_to_task(row))
         parts.append(markdown if fmt == "md" else re.sub(r"^#{1,6}\s+", "", markdown, flags=re.MULTILINE))
     content = "\n\n---\n\n".join(parts)
     raw_title = rows[0]["batch_title"]
@@ -1379,7 +1392,7 @@ def download_task(request: Request, task_id: str, fmt: str = Query("md", pattern
     task = get_task(task_id, current_user(request)["id"])
     if not task or task["status"] != "done" or not task.get("result"):
         raise HTTPException(status_code=409, detail="剧本还不能下载")
-    markdown = script_to_markdown(task)
+    markdown = _download_markdown(task)
     content = markdown if fmt == "md" else re.sub(r"^#{1,6}\s+", "", markdown, flags=re.MULTILINE)
     filename = f"{safe_filename(task['title'])}.{fmt}"
     encoded_filename = quote(filename)

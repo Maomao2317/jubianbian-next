@@ -69,12 +69,18 @@ LOCAL_ASR_BEAM_SIZE = max(1, min(10, int(os.getenv("JBB_LOCAL_ASR_BEAM_SIZE", "5
 LOCAL_ASR_VAD_MIN_SPEECH_MS = max(50, int(os.getenv("JBB_LOCAL_ASR_VAD_MIN_SPEECH_MS", "100")))
 LOCAL_ASR_VAD_MIN_SILENCE_MS = max(100, int(os.getenv("JBB_LOCAL_ASR_VAD_MIN_SILENCE_MS", "300")))
 LOCAL_ASR_VAD_SPEECH_PAD_MS = max(0, int(os.getenv("JBB_LOCAL_ASR_VAD_SPEECH_PAD_MS", "200")))
+ASR_REMOTE_URL = os.getenv("JBB_ASR_REMOTE_URL", "").strip().rstrip("/")
+ASR_REMOTE_TOKEN = os.getenv("JBB_ASR_REMOTE_TOKEN", "").strip()
+ASR_REMOTE_TIMEOUT_SECONDS = max(5, min(300, float(os.getenv("JBB_ASR_REMOTE_TIMEOUT_SECONDS", "60"))))
 OCR_LANG = os.getenv("JBB_OCR_LANG", "chi_sim+eng").strip() or "chi_sim+eng"
 OCR_SAMPLE_INTERVAL_SECONDS = max(0.1, float(os.getenv("JBB_OCR_SAMPLE_INTERVAL_SECONDS", "0.25")))
 OCR_MAX_FRAMES = max(12, min(1440, int(os.getenv("JBB_OCR_MAX_FRAMES", "720"))))
 # Reuse one Tesseract process for a small group of unchanged input images.
 # Set to 1 to retain the previous single-image execution path.
 OCR_BATCH_SIZE = max(1, min(32, int(os.getenv("JBB_OCR_BATCH_SIZE", "16"))))
+OCR_REMOTE_URL = os.getenv("JBB_OCR_REMOTE_URL", "").strip().rstrip("/")
+OCR_REMOTE_TOKEN = os.getenv("JBB_OCR_REMOTE_TOKEN", "").strip()
+OCR_REMOTE_TIMEOUT_SECONDS = max(5, min(300, float(os.getenv("JBB_OCR_REMOTE_TIMEOUT_SECONDS", "90"))))
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_API_KEY_2 = os.getenv("ARK_API_KEY_2", "").strip()
 ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2) if key))
@@ -198,5 +204,5 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 APP_STARTED_MONOTONIC = time.monotonic()
 REQUEST_ID = ContextVar("request_id", default="-")
 POINTS_PER_MINUTE = 5
-POINTS_PER_YUAN = 13.8
+POINTS_PER_YUAN = 12.8
 REGISTER_POINTS = 25

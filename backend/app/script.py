@@ -2060,7 +2060,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         if blocks:
             scenes.append(scene)
     if not scenes:
-        raise ArkError("方舟返回的剧本没有可用场景")
+        raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
     # Sort batches by episode first.  Within an episode retain the provider's
     # explicit scene number when present; otherwise use timestamps, then input
     # order.  The old global timestamp sort could move episode 10 before episode
@@ -2183,13 +2183,13 @@ def _is_generic_character(value: Any) -> bool:
     return _character_key(value) in {_character_key(item) for item in _GENERIC_CHARACTER_LABELS}
 
 
-def _script_character_names(script: dict[str, Any]) -> list[str]:
+def _script_character_names(script: dict[str, Any], *, include_generic: bool = False) -> list[str]:
     """Collect visible character labels in stable first-seen order."""
     values: list[str] = []
 
     def add(value: Any) -> None:
         text = character_label(value)
-        if text and not _is_generic_character(text) and text not in values:
+        if text and (include_generic or not _is_generic_character(text)) and text not in values:
             values.append(text)
 
     for value in script.get("characters") or []:
@@ -2211,6 +2211,90 @@ def _script_character_names(script: dict[str, Any]) -> list[str]:
     return values
 
 
+def _replace_cast_labels(script: dict[str, Any], mapping: dict[str, str]) -> None:
+    """Rewrite structured identity labels, never source dialogue/action text."""
+    def replace(value: Any) -> Any:
+        return mapping.get(str(value).strip(), value) if value is not None else value
+
+    script["characterNameScope"] = "labels"
+    script["characters"] = list(dict.fromkeys(replace(v) for v in script.get("characters") or []))
+    profiles: dict[str, dict[str, Any]] = {}
+    for original in script.get("characterProfiles") or []:
+        if not isinstance(original, dict):
+            continue
+        profile = dict(original)
+        old = character_label(profile.get("name"))
+        profile["name"] = replace(old)
+        profile["aliases"] = list(dict.fromkeys(
+            list(profile.get("aliases") or []) + ([old] if old != profile["name"] else [])
+        ))
+        if profile.get("relationships"):
+            profile["relationships"] = [
+                {**r, "target": replace(r.get("target"))}
+                for r in profile["relationships"] if isinstance(r, dict)
+            ]
+        existing = profiles.get(profile["name"])
+        if existing:
+            existing["aliases"] = list(dict.fromkeys(existing["aliases"] + profile["aliases"]))
+            for field in ("appearance", "clothing", "firstAppearance", "nameEvidence", "identityEvidence"):
+                if not existing.get(field) and profile.get(field):
+                    existing[field] = profile[field]
+        else:
+            profiles[profile["name"]] = profile
+    script["characterProfiles"] = list(profiles.values())
+    for scene in script.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        scene["characters"] = list(dict.fromkeys(replace(v) for v in scene.get("characters") or []))
+        for block in scene.get("blocks") or []:
+            if isinstance(block, dict):
+                for field in ("speaker", "visibleSpeaker"):
+                    if field in block:
+                        block[field] = replace(block[field])
+
+
+def _backfill_evidenced_cast_aliases(scripts: list[dict[str, Any]]) -> int:
+    """Later explicit naming evidence may resolve earlier roles/honorifics.
+
+    Do not treat an alias list, shared clothes, or a shared surname as proof.
+    Different full names remain distinct; ambiguous aliases remain unresolved.
+    """
+    owners: dict[str, set[str]] = {}
+    supported: set[tuple[str, str]] = set()
+    for script in scripts:
+        if not isinstance(script, dict):
+            continue
+        for profile in script.get("characterProfiles") or []:
+            if not isinstance(profile, dict):
+                continue
+            name = character_label(profile.get("name"))
+            if (not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", name) or _is_generic_character(name)
+                    or re.search(r"先生$|女士$|小姐$|少爷$|夫人$|总裁$", name)):
+                continue
+            evidence = str(profile.get("nameEvidence") or "")
+            for alias in profile.get("aliases") or []:
+                alias = character_label(alias)
+                if not alias or alias == name:
+                    continue
+                if alias not in {"男主", "女主", "主角"} and not re.search(r"先生$|女士$|小姐$|少爷$|夫人$|总裁$", alias):
+                    continue
+                owners.setdefault(alias, set()).add(name)
+                if name in evidence and alias in evidence and not re.search(r"待核|待确认|疑似|猜测|暂定|可能", evidence):
+                    supported.add((alias, name))
+    mapping = {alias: next(iter(names)) for alias, names in owners.items()
+               if len(names) == 1 and (alias, next(iter(names))) in supported}
+    changes = 0
+    for script in scripts:
+        if not isinstance(script, dict):
+            continue
+        local = {label: mapping[label] for label in _script_character_names(script, include_generic=True)
+                 if label in mapping}
+        if local:
+            _replace_cast_labels(script, local)
+            changes += len(local)
+    return changes
+
+
 def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
     """Accumulate each character's first established name in episode order.
 
@@ -2225,6 +2309,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
     """
     if not isinstance(scripts, list) or len(scripts) < 2:
         return 0
+    backfilled = _backfill_evidenced_cast_aliases(scripts)
     first = scripts[0] if isinstance(scripts[0], dict) else None
     if not first:
         return 0
@@ -2430,17 +2515,13 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
         contained = [name for name in canonical_names if 2 <= len(key) < len(_character_key(name)) and key in _character_key(name)]
         if len(contained) == 1:
             return contained[0]
-        # A generic role label can be carried across episodes only when the
-        # first episode has one unambiguous named lead.
-        if key in {"男主", "女主", "主角"} and len(canonical_names) == 1:
-            return canonical_names[0]
         return None
 
-    total_changes = 0
+    total_changes = backfilled
     for script in scripts[1:]:
         if not isinstance(script, dict):
             continue
-        candidates = _script_character_names(script)
+        candidates = _script_character_names(script, include_generic=True)
         mapping: dict[str, str] = {}
         for candidate in candidates:
             resolved = resolve(candidate)
@@ -2448,7 +2529,12 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
                             if isinstance(p, dict) and p.get("name") == candidate), {})
             if not resolved:
                 resolved = resolve_by_appearance(candidate, profile)
-            if not resolved:
+            # A new full name must not be replaced by an earlier honorific
+            # merely because its profile lists that honorific as an alias.
+            # The evidence prepass above handles confirmed role -> full name.
+            full_name_candidate = bool(re.fullmatch(r"[\u4e00-\u9fff]{3,4}", candidate)) and not re.search(
+                r"先生|女士|小姐|少爷|夫人|总裁|男主|女主|主角|男子|女子|男生|女生|男人|女人|男孩|女孩|老人|老头|老太|妇人|大叔|阿姨|小伙|少年|少女|老师|医生|老板|校服|[红白黑蓝绿黄紫]衣", candidate)
+            if not resolved and not full_name_candidate:
                 matches = {resolve(alias) for alias in profile.get("aliases") or [] if character_label(alias)} - {None}
                 if len(matches) == 1:
                     resolved = matches.pop()
@@ -2519,6 +2605,19 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
         add_identity_evidence(script, mapping)
         register(script)
     return total_changes
+
+def has_screenplay_body(script: Any) -> bool:
+    """Count visible dramatic content, independently of timestamps or headings."""
+    if not isinstance(script, dict):
+        return False
+    return any(
+        isinstance(block, dict) and not block.get("suppressInOutput")
+        and block.get("type") in {"action", "dialogue", "vo", "os"}
+        and isinstance(block.get("text"), str) and bool(block["text"].strip())
+        for scene in (script.get("scenes") or []) if isinstance(scene, dict)
+        for block in (scene.get("blocks") or [])
+    )
+
 
 def script_to_markdown(task: dict[str, Any]) -> str:
     script = task.get("result") or {}
@@ -2659,6 +2758,21 @@ def script_quality(
         return issue
 
     from .content_coverage import content_gaps
+    if not has_screenplay_body(script):
+        add_issue("剧本正文为空", "P0", "没有可输出的画面动作或对白正文，禁止作为完整剧本交付。")
+    # normalize_script synthesizes a placeholder profile for otherwise
+    # unaccounted-for labels. A proper name with neither naming nor identity
+    # evidence must not silently become a verified cast member.
+    for profile in script.get("characterProfiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        name = character_label(profile.get("name"))
+        if (re.fullmatch(r"[\u4e00-\u9fff]{2,4}", name)
+                and not _is_generic_character(name)
+                and str(profile.get("firstAppearance") or "") == "首登外观/服装待核对"
+                and not any(str(profile.get(key) or "").strip()
+                            for key in ("nameEvidence", "identityEvidence", "appearance", "clothing"))):
+            add_issue("人物姓名缺少依据", "P0", f"{name}仅有姓名标签，没有姓名来源或人物身份资料，需回看姓名条、称呼或签名确认，不能猜名。")
     content_duration = (evidence or {}).get("durationSec")
     content_gap_ranges = content_gaps(script, content_duration) if isinstance(content_duration, (int, float)) else []
     for window in content_gap_ranges:
@@ -2895,7 +3009,7 @@ def script_quality(
             # mistaken for missing screenplay text.
             source_items: list[str] = []
             seen_items: set[str] = set()
-            ocr_observations: dict[tuple[str, str], dict[str, Any]] = {}
+            ocr_observations: dict[tuple[str, str, str], dict[str, Any]] = {}
             for item in source.get("items") or []:
                 if not isinstance(item, dict):
                     continue
@@ -2911,6 +3025,7 @@ def script_quality(
                     "startSec": item.get("startSec"),
                     "endSec": item.get("endSec"),
                     "region": item.get("region"),
+                    "screenType": item.get("screenType"),
                 }
                 if source.get("kind") == "audio" and item.get("type") == "transcript_segment":
                     transcript_segments.append(segment)
@@ -2920,7 +3035,7 @@ def script_quality(
                 elif source.get("kind") == "ocr":
                     # Adjacent frame observations are one occurrence; the
                     # same subtitle later in the video is checked again.
-                    key = (item_text, str(item.get("region") or ""))
+                    key = (item_text, str(item.get("region") or ""), str(item.get("screenType") or ""))
                     previous = ocr_observations.get(key)
                     start = segment["startSec"]
                     previous_end = previous.get("endSec", previous.get("startSec")) if previous else None
@@ -3089,7 +3204,39 @@ def script_quality(
         for scene in scenes for block in scene.get("blocks", [])
         if block.get("type") == "screen_text"
     )
-    ocr_matched, ocr_size, _ = matching_character_counts(ocr_reference, screen_text_candidate)
+    def represented_spoken_subtitle(segment: dict[str, Any]) -> bool:
+        # Do not require a second, duplicate screen_text when the exact timed
+        # subtitle is already spoken. Names/titles and ambiguous short OCR
+        # observations still need their own visual-text check.
+        text = segment["text"]
+        kind = segment.get("screenType")
+        if kind != "subtitle" and (kind or segment.get("region") != "subtitle_band" or len(text) < 4):
+            return False
+        start, end = segment.get("startSec"), segment.get("endSec")
+        end = end if end is not None else start
+        if type(start) not in {int, float} or type(end) not in {int, float} or not 0 <= start <= end:
+            return False
+        audio_supported = any(
+            item["text"] == text
+            and type(item.get("startSec")) in {int, float} and type(item.get("endSec")) in {int, float}
+            and item["startSec"] <= end + 0.35 and item["endSec"] >= start - 0.35
+            for item in transcript_segments
+        )
+        return audio_supported and text in time_window_script_text(script, {"dialogue", "vo"}, start, end, margin=0.35)
+
+    represented_subtitles = [represented_spoken_subtitle(segment) for segment in ocr_segments]
+    confirmed_texts = {segment["text"] for segment, supported in zip(ocr_segments, represented_subtitles) if supported}
+    if confirmed_texts:
+        # Aggregate OCR already counts repeated frame text once. Keep the same
+        # rule; each later occurrence is still checked separately below.
+        remaining = "".join(dict.fromkeys(segment["text"] for segment in ocr_segments
+                                          if segment["text"] not in confirmed_texts))
+        ocr_matched, ocr_size, _ = matching_character_counts(remaining, screen_text_candidate)
+        confirmed_size = sum(len(text) for text in confirmed_texts)
+        ocr_matched += confirmed_size
+        ocr_size += confirmed_size
+    else:
+        ocr_matched, ocr_size, _ = matching_character_counts(ocr_reference, screen_text_candidate)
     ocr_coverage: int | None = None
     if ocr_size >= 4:
         ocr_coverage = round(100 * ocr_matched / ocr_size)
@@ -3101,7 +3248,9 @@ def script_quality(
                 f"成稿仅覆盖独立 OCR 证据的 {ocr_coverage}%，可能漏掉字幕、姓名条或系统文字。",
             )
 
-    for segment in ocr_segments:
+    for segment, represented in zip(ocr_segments, represented_subtitles):
+        if represented:
+            continue
         segment_text = str(segment.get("text") or "")
         local_screen_text = time_window_script_text(script, {"screen_text"}, segment.get("startSec"),
                                                    segment.get("endSec") if segment.get("endSec") is not None else segment.get("startSec"), margin=0.5)
@@ -3267,6 +3416,7 @@ def script_quality(
         "emotionWarnings": emotion_warnings,
         "severityCounts": severity_counts,
         "issueTags": issue_tags,
+        "blockingIssues": [issue for issue in issues if issue.get("severity") == "P0"],
         "issues": issues[:100],
         "provider": provider,
     }
@@ -3283,7 +3433,17 @@ def quality_gate(quality: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
     """
     issues = [
         issue
-        for issue in (quality.get("issues") or [])
+        for issue in (quality.get("blockingIssues") or []) + (quality.get("issues") or [])
         if isinstance(issue, dict) and str(issue.get("severity") or "").upper() == "P0"
     ]
-    return not issues, issues
+    unique = []
+    for issue in issues:
+        if issue not in unique:
+            unique.append(issue)
+    # Legacy persisted summaries can contain more P0s than their truncated
+    # details. Missing details must never turn such a result into an approval.
+    count = (quality.get("severityCounts") or {}).get("P0", 0)
+    if isinstance(count, int) and count > len(unique):
+        unique.append({"severity": "P0", "tag": "阻断问题明细不完整",
+                       "description": "质量摘要仍有阻断问题，须重新校验完整正文。"})
+    return not unique, unique

@@ -31,11 +31,13 @@ from .config import (
     LOCAL_ASR_VAD_MIN_SILENCE_MS,
     LOCAL_ASR_VAD_MIN_SPEECH_MS,
     LOCAL_ASR_VAD_SPEECH_PAD_MS,
+    ASR_REMOTE_URL,
     OCR_LANG,
     OCR_BATCH_SIZE,
     OCR_PROCESS_CONCURRENCY,
     OCR_MAX_FRAMES,
     OCR_SAMPLE_INTERVAL_SECONDS,
+    OCR_REMOTE_URL,
     OPENAI_API_KEY,
     EVIDENCE_CONCURRENCY,
 )
@@ -103,14 +105,15 @@ def _adaptive_ocr_times(duration_sec: float) -> list[float]:
 def _get_local_asr_model() -> Any:
     """Lazily load one faster-whisper model per worker process."""
     global _local_asr_model, _local_asr_model_key
-    key = (LOCAL_ASR_MODEL, LOCAL_ASR_DEVICE, LOCAL_ASR_COMPUTE_TYPE, LOCAL_ASR_CPU_THREADS, LOCAL_ASR_CONCURRENCY)
+    model_path = os.getenv("JBB_LOCAL_ASR_MODEL_PATH", "") or LOCAL_ASR_MODEL
+    key = (model_path, LOCAL_ASR_DEVICE, LOCAL_ASR_COMPUTE_TYPE, LOCAL_ASR_CPU_THREADS, LOCAL_ASR_CONCURRENCY)
     with _local_asr_load_lock:
         if _local_asr_model is not None and _local_asr_model_key == key:
             return _local_asr_model
         from faster_whisper import WhisperModel
 
         _local_asr_model = WhisperModel(
-            LOCAL_ASR_MODEL,
+            model_path,
             device=LOCAL_ASR_DEVICE,
             compute_type=LOCAL_ASR_COMPUTE_TYPE,
             cpu_threads=LOCAL_ASR_CPU_THREADS,
@@ -121,7 +124,7 @@ def _get_local_asr_model() -> Any:
 
 
 @limited("evidence-decode", 2)
-def _decode_audio_ffmpeg(path: Path) -> Any:
+def _decode_audio_pcm(path: Path) -> bytes:
     """Decode media with ffmpeg so ASR does not depend on PyAV's API version."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -156,15 +159,23 @@ def _decode_audio_ffmpeg(path: Path) -> Any:
         raise RuntimeError(f"ffmpeg 音频提取失败：{_bounded_text(detail, 300)}")
     if not result.stdout:
         raise RuntimeError("视频没有可供转写的音频轨道")
-    import numpy as np
+    return result.stdout
 
-    return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+def _decode_audio_ffmpeg(path: Path) -> Any:
+    import numpy as np
+    return np.frombuffer(_decode_audio_pcm(path), dtype="<i2").astype(np.float32) / 32768.0
 
 
 def _local_asr_items(path: Path) -> list[dict[str, Any]]:
     """Return time-anchored transcript segments from the local ASR model."""
-    model = _get_local_asr_model()
     audio = _decode_audio_ffmpeg(path)
+    return _asr_items_from_audio(audio, path.name)
+
+
+def _asr_items_from_audio(audio: Any, source_name: str) -> list[dict[str, Any]]:
+    """Shared CPU/GPU decoding settings and word-anchor serialization."""
+    model = _get_local_asr_model()
     language = LOCAL_ASR_LANGUAGE or None
     items: list[dict[str, Any]] = []
     captured_chars = 0
@@ -173,7 +184,7 @@ def _local_asr_items(path: Path) -> list[dict[str, Any]]:
     queued = time.perf_counter()
     with _local_asr_infer_lock, capacity("local-asr", LOCAL_ASR_CONCURRENCY):
         queue_ms = (time.perf_counter() - queued) * 1000
-        logger.info("evidence_step file=%s kind=asr_admission queue_ms=%.1f", path.name, queue_ms)
+        logger.info("evidence_step file=%s kind=asr_admission queue_ms=%.1f", source_name, queue_ms)
         segments, _info = model.transcribe(
             audio,
             language=language,
@@ -256,6 +267,16 @@ def _audio_evidence(
         return _source("audio", "unavailable", reason="原始视频文件不存在")
 
     failures: list[str] = []
+    if ASR_REMOTE_URL and LOCAL_ASR_MODEL:
+        try:
+            from .remote_asr import request_asr
+            source = request_asr(_decode_audio_pcm(path), duration_sec)
+            if source.get("items"):
+                logger.info("evidence_asr_remote file=%s provider=%s items=%s", path.name, source["provider"], len(source["items"]))
+                return source
+            failures.append("GPU ASR 未返回语音，使用原本地识别复核")
+        except Exception as exc:
+            logger.warning("evidence_asr_cpu_fallback file=%s error_type=%s", path.name, type(exc).__name__)
     if LOCAL_ASR_MODEL:
         try:
             items = _local_asr_items(path)
@@ -333,7 +354,9 @@ def _extract_ocr_frames(path: Path, temp_dir: Path, times: list[float], ffmpeg: 
                     # base. Comparing raw seconds can drop a boundary frame
                     # whose PTS is a few microseconds before the millisecond.
                     "-vf", f"select=gte(pts\\,floor(floor(selected_n*{step:.12f}*1000+0.5)/1000/TB+0.5))" + ("," + probe_filter if probe else ""),
-                    "-fps_mode", "passthrough", "-frames:v", str(len(times)),
+                    # -vsync 0 is also supported by Ubuntu 22.04's ffmpeg 4.4;
+                    # -fps_mode would force hundreds of slow individual seeks.
+                    "-vsync", "0", "-frames:v", str(len(times)),
                     "-start_number", "0", "-y", str(temp_dir / f"frame-%03d.{extension}"),
                 ],
                 capture_output=True,
@@ -444,6 +467,18 @@ def _run_ocr_pages(samples: list[Path], tesseract: str, temp_dir: Path) -> tuple
 
 
 def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
+    if OCR_REMOTE_URL and path.exists():
+        try:
+            from .remote_ocr import request_ocr
+            result = request_ocr(path, duration_sec, len(_adaptive_ocr_times(duration_sec)))
+            logger.info("evidence_ocr_remote file=%s provider=paddleocr-gpu items=%s", path.name, len(result["items"]))
+            return result
+        except Exception as exc:
+            logger.warning("evidence_ocr_cpu_fallback file=%s error_type=%s", path.name, type(exc).__name__)
+    return _ocr_evidence_local(path, duration_sec)
+
+
+def _ocr_evidence_local(path: Path, duration_sec: float, *, page_runner=None, provider="tesseract") -> dict[str, Any]:
     """Optionally OCR sampled frames when both command-line tools exist.
 
     This deliberately stays optional: a missing OCR language pack or binary
@@ -453,7 +488,7 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
         return _source("ocr", "unavailable", reason="原始视频文件不存在")
     ffmpeg = shutil.which("ffmpeg")
     tesseract = shutil.which("tesseract")
-    if not ffmpeg or not tesseract:
+    if not ffmpeg or (not tesseract and page_runner is None):
         return _source("ocr", "unavailable", reason="未找到可用的 ffmpeg 与 tesseract OCR 工具")
     times = _adaptive_ocr_times(duration_sec)
     items: list[dict[str, Any]] = []
@@ -492,7 +527,10 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
                     jobs.append((index, "full", image_path))
                     next_full = timestamp + max(1.0, OCR_SAMPLE_INTERVAL_SECONDS)
                 previous_band = band
-            results, execution = _run_ocr_pages([job[2] for job in jobs], tesseract, temp_dir)
+            runner = page_runner or _run_ocr_pages
+            results, execution = runner([job[2] for job in jobs], tesseract, temp_dir)
+            if len(results) != len(jobs):
+                raise ValueError("OCR page count mismatch")
             for index, (timestamp, image_path) in enumerate(zip(times, images)):
                 band_job = band_jobs.get(index)
                 band_result = results[band_job] if band_job is not None else None
@@ -531,12 +569,16 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
                         execution["fallback_batches"], OCR_BATCH_SIZE)
     except Exception as exc:
         logger.warning("evidence_ocr_failed file=%s error=%s", path.name, safe_error_text(exc))
-        return _source("ocr", "unavailable", provider="tesseract", reason=f"OCR 失败：{safe_error_text(exc)}")
+        return _source("ocr", "unavailable", provider=provider, reason=f"OCR 失败：{safe_error_text(exc)}")
     if successful_frames == 0 and errors:
-        return _source("ocr", "unavailable", provider="tesseract", reason=f"OCR 引擎不可用：{errors[0]}")
+        return _source("ocr", "unavailable", provider=provider, reason=f"OCR 引擎不可用：{errors[0]}")
     if not items:
-        return _source("ocr", "available", provider="tesseract", reason="采样帧未识别到可确认的画面文字")
-    return _source("ocr", "available", provider="tesseract", items=sorted(items, key=lambda item: item["startSec"]))
+        result = _source("ocr", "available", provider=provider, reason="采样帧未识别到可确认的画面文字")
+    else:
+        result = _source("ocr", "available", provider=provider, items=sorted(items, key=lambda item: item["startSec"]))
+    result["sampling"] = {"frames": len(images), "pages": len(jobs), "complete": successful_frames == len(jobs),
+                          "interval": OCR_SAMPLE_INTERVAL_SECONDS, "maxFrames": OCR_MAX_FRAMES}
+    return result
 
 
 def evidence_summary(evidence: dict[str, Any] | None) -> str:
@@ -581,6 +623,8 @@ def collect_evidence(
         if isinstance(source, dict) and source.get("kind") in {"audio", "ocr", "keyframes"}
         and source.get("status") == "available" and isinstance(source.get("items"), list)
     }
+    # Available, fingerprinted CPU evidence remains valid after GPU fallback.
+    # Requeuing a task must not recollect it just because a remote URL exists.
     if len(cached_sources) == 3:
         logger.info("evidence_step file=%s kind=all operation=cache_hit", path.name)
         return {**cached_evidence, "cacheHitSources": sorted(cached_sources),

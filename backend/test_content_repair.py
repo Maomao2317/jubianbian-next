@@ -223,6 +223,35 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(quality["contentRepair"]["remainingRanges"])
         self.assertFalse(quality_gate(quality)[0])
 
+    async def test_repaired_gaps_still_review_unknown_speaker_and_preserve_usage_and_metadata(self):
+        original = script(action(110, 120))
+        repaired = normalize_script(script(action(0, 120), {
+            "type": "dialogue", "speaker": "未知说话人", "text": "我来了。",
+            "uncertain": True, "startSec": 10, "endSec": 12}), "第11集")
+        route = {"model": "lite", "mode": "complexity", "band": "simple", "score": 0, "reasons": []}
+        quality = processing._evaluate_quality(repaired, "ark", {"durationSec": 120}, route)[0]
+        metadata = {"completedRanges": [{"startSec": 0, "endSec": 110}], "errors": [], "remainingRanges": []}
+        quality["contentRepair"] = metadata
+        self.assertFalse(quality_gate(quality)[0])
+        reviewed = deepcopy(repaired)
+        reviewed["scenes"][0]["blocks"][-1].update(speaker="甲", uncertain=False, confidence="high")
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "repair_content_gaps", AsyncMock(return_value=(repaired, quality, {"total_tokens": 20}))),
+              patch.object(processing, "ark_recognize", side_effect=[(original, {"total_tokens": 10}),
+                                                                   (reviewed, {"total_tokens": 30})]) as whole):
+            result, final, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集"}, Path("unused"), 120, {"durationSec": 120}, route, {}, None)
+        self.assertEqual(whole.call_count, 2)
+        self.assertIn("台词归属错", [item["tag"] for item in whole.call_args.kwargs["review_context"]["issues"]])
+        self.assertEqual(usage["total_tokens"], 60)
+        self.assertEqual(final["contentRepair"], metadata)
+        self.assertEqual(final["automatedReview"]["attemptCount"], 3)
+        self.assertTrue(final["automatedReview"]["accepted"])
+        self.assertTrue(quality_gate(final)[0])
+        self.assertEqual(content_gaps(result, 120), [])
+
     async def test_no_gap_never_calls_model(self):
         model = AsyncMock()
         with patch.object(processing, "_run_model_call", model):

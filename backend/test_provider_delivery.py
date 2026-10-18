@@ -509,7 +509,7 @@ class ProviderDeliveryTests(unittest.TestCase):
             requests.append(deepcopy(payload))
             if len(requests) == 1:
                 raise providers._ark_incomplete_error({
-                    "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}})
+                    "status": "incomplete", "incomplete_details": {"reason": "length"}})
             return {"output_text": '{"corrections": []}'}
 
         with (patch.object(providers, "ark_stream_response", side_effect=create),
@@ -582,13 +582,41 @@ class ProviderDeliveryTests(unittest.TestCase):
                                                "startSec": 6, "endSec": 7})
         context = processing._automated_review_context(script, [{"startSec": 2, "endSec": 2.5}])
         target = context["ranges"][0]["replacementTargets"][0]
-        self.assertEqual(target, {"sceneIndex": 0, "blockIndex": 0, "startSec": 1, "endSec": 4})
+        self.assertEqual(target, {"sceneIndex": 0, "blockIndex": 0, "startSec": 1, "endSec": 4,
+                                  "text": script["scenes"][0]["blocks"][0]["text"], "speaker": "甲"})
         for anchor in context["ranges"][0]["insertionAnchors"]:
             block = script["scenes"][anchor["sceneIndex"]]["blocks"][anchor["blockIndex"]]
             if anchor["operation"] == "insert_before":
                 self.assertLessEqual(2, block["startSec"] + 0.5)
             else:
                 self.assertGreaterEqual(2.5, block["endSec"] - 0.5)
+
+    def test_exact_original_text_can_repair_wrong_index_without_changing_neighbors(self):
+        blocks = [
+            {"type": "dialogue", "speaker": "甲", "text": "保留这一句。", "startSec": 1, "endSec": 2},
+            {"type": "dialogue", "speaker": "乙", "text": "我要留下。", "sourceText": "我、我要留下。",
+             "startSec": 3, "endSec": 4},
+        ]
+        original = {"scenes": [{"blocks": blocks}]}
+        before = deepcopy(original)
+        context = processing._automated_review_context(original, [{"startSec": 3, "endSec": 4}])
+        anchor = context["ranges"][0]["replacementTargets"][0]["text"]
+        self.assertEqual(anchor, context["draft"]["scenes"][0]["blocks"][1]["text"])
+        correction = {"sceneIndex": 4, "blockIndex": 99, "operation": "replace", "targetText": anchor,
+                      "block": {**blocks[1], "speaker": "甲", "text": "我、我要留下。"}}
+        result = providers._apply_ark_review({"output_text": json.dumps({"corrections": [correction]})}, context, 10)
+        self.assertEqual(result["scenes"][0]["blocks"][0], blocks[0])
+        self.assertEqual(result["scenes"][0]["blocks"][1]["speaker"], "甲")
+        self.assertEqual(original, before)
+        for bad_blocks, text, window in (
+            ([*blocks, deepcopy(blocks[1])], anchor, {"startSec": 3, "endSec": 4}),
+            (blocks, "不存在的台词", {"startSec": 3, "endSec": 4}),
+            (blocks, anchor, {"startSec": 7, "endSec": 8}),
+        ):
+            bad_context = {"draft": {"scenes": [{"blocks": bad_blocks}]}, "ranges": [window]}
+            with self.subTest(text=text, count=len(bad_blocks)), self.assertRaises(ArkError):
+                providers._apply_ark_review({"output_text": json.dumps({"corrections": [
+                    {**correction, "targetText": text}]} )}, bad_context, 10)
 
     def test_patch_retains_source_metadata_and_survives_normalization(self):
         script = providers.normalize_script(json.loads(self.completed()["output_text"]), "第2集")

@@ -298,7 +298,7 @@ def _ark_poll_response(response_id: str, api_key: str) -> Any:
 def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
     detail = payload.get("error") or payload.get("incomplete_details") or payload.get("status") or "incomplete"
     reason = detail.get("reason") if isinstance(detail, dict) else detail
-    if str(reason).lower() in {"max_output_tokens", "max_tokens"}:
+    if str(reason).strip().lower() in {"max_output_tokens", "max_tokens", "length"}:
         return ArkError("方舟识别输出达到长度上限", provider_code="output_limit")
     return ArkError(f"方舟识别未完成：{detail}")
 
@@ -846,7 +846,8 @@ def ark_prompt(
             "修正的时间必须属于ranges。对白逐字保留，不可概括，今天、我、决定等短词不可删减或去重。"
             "相邻ranges的0.5秒容差连续时，可跨段保留完整台词；replace可沿用与问题相交的原block完整起止时间，"
             "不能延伸到该原block和连续问题范围以外。contextStartSec/contextEndSec仅供回看，不能据此改无关正文。"
-            "ranges中的replacementTargets和insertionAnchors提供原稿编号；替换用replace，补独立漏句才用insert。"
+            "ranges中的replacementTargets和insertionAnchors提供原稿编号和原文；替换用replace，补独立漏句才用insert。"
+            "replace还须填写targetText，逐字复制所替换原block的text，不能填写修正后的新台词；编号是从0开始的原稿索引。"
             "仅修画面表演缺失时，不得改动对白的type、speaker、text、时间或已有情绪；补performance必须replace原block并逐字复制原台词，"
             "补action必须有视频中明确可见的主体、动作、对象及结果，按时间用insert_before/insert_after插入。"
             "insert_before的新段startSec不得晚于锚点startSec+0.5，insert_after的新段endSec不得早于锚点endSec-0.5；"
@@ -1117,6 +1118,7 @@ def ark_review_format() -> dict[str, Any]:
                 "sceneIndex": {"type": "integer", "minimum": 0},
                 "blockIndex": {"type": "integer", "minimum": 0},
                 "operation": {"type": "string", "enum": ["replace", "insert_before", "insert_after"]},
+                "targetText": {"type": "string"},
                 "block": {"type": "object", "properties": block_properties,
                           "required": ["type", "text", "startSec", "endSec"], "additionalProperties": True},
             }, "required": ["sceneIndex", "blockIndex", "operation", "block"], "additionalProperties": False,
@@ -1161,6 +1163,13 @@ def _ark_review_insertion_anchor(
     return block_index, operation
 
 
+def ark_review_target_text(block: dict[str, Any]) -> str:
+    """Use the same original wording in the review draft and exact anchors."""
+    if block.get("type") in {"dialogue", "vo"}:
+        return block.get("sourceText") or block.get("rawText") or block.get("text") or ""
+    return block.get("text") or ""
+
+
 def _validate_ark_review_correction(
     correction: dict[str, Any], script: dict[str, Any],
     windows: list[tuple[float, float]], duration_sec: float,
@@ -1168,7 +1177,6 @@ def _validate_ark_review_correction(
     scene_index, block_index = correction["sceneIndex"], correction["blockIndex"]
     if type(scene_index) is not int or type(block_index) is not int or min(scene_index, block_index) < 0:
         raise ValueError("invalid indices")
-    target = script["scenes"][scene_index]["blocks"][block_index]
     operation, block = correction["operation"], correction["block"]
     if operation not in {"replace", "insert_before", "insert_after"}:
         raise ValueError("invalid operation")
@@ -1176,6 +1184,35 @@ def _validate_ark_review_correction(
     start, end = block["startSec"], block["endSec"]
     if type(start) not in {int, float} or type(end) not in {int, float} or not 0 <= start <= end <= duration_sec:
         raise ValueError("invalid time")
+    try:
+        target = script["scenes"][scene_index]["blocks"][block_index]
+    except (IndexError, KeyError):
+        target = None
+    if operation == "replace" and "targetText" in correction:
+        anchor_text = correction["targetText"]
+        if not isinstance(anchor_text, str) or not anchor_text.strip():
+            raise ValueError("target text mismatch")
+        # Correct an ordinal only with a unique, exact original text anchor
+        # inside the allowed range. Never guess by timestamp alone.
+        if target is None or anchor_text != ark_review_target_text(target):
+            matches = [
+                (si, bi, item)
+                for si, scene in enumerate(script["scenes"])
+                for bi, item in enumerate(scene["blocks"])
+                if ark_review_target_text(item) == anchor_text
+                and type(item.get("startSec")) in {int, float}
+                and type(item.get("endSec")) in {int, float}
+                and 0 <= item["startSec"] <= item["endSec"] <= duration_sec
+                and start <= item["endSec"] + 0.5 and end >= item["startSec"] - 0.5
+                and any(item["startSec"] <= right and item["endSec"] >= left for left, right in windows)
+            ]
+            if len(matches) != 1:
+                raise ValueError("target text mismatch")
+            scene_index, block_index, target = matches[0]
+            logger.info("provider_step provider=ark operation=review_text_anchor_adjusted scene=%s block=%s",
+                        scene_index, block_index)
+    if target is None:
+        raise ValueError("invalid indices")
     target_start, target_end = target.get("startSec"), target.get("endSec")
     timed_target = (
         type(target_start) in {int, float} and type(target_end) in {int, float}
@@ -1251,6 +1288,7 @@ def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float
             "insertion before target", "duplicate replacement", "missing speaker",
             "invalid visible speaker", "missing voice classification", "presentation review changed dialogue",
             "presentation review inserted non-action",
+            "target text mismatch",
         }
         for index, correction in enumerate(corrections):
             try:
@@ -1312,7 +1350,7 @@ def _parse_ark_script(payload: Any) -> dict[str, Any]:
         raise ArkError("方舟返回的剧本不是完整合法 JSON", provider_code="invalid_script_response") from exc
     scenes = script.get("scenes") if isinstance(script, dict) else None
     if not isinstance(scenes, list) or not scenes:
-        raise ArkError("方舟返回的剧本缺少场次正文", provider_code="invalid_script_response")
+        raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
     for scene in scenes:
         blocks = scene.get("blocks") if isinstance(scene, dict) else None
         if not isinstance(blocks, list) or not blocks or any(
@@ -1485,30 +1523,47 @@ def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: d
     checkpoint = cache.load(kind) if cache else None
     if checkpoint and checkpoint.get("protocol") == 1 and checkpoint.get("model") == model:
         return checkpoint["script"], {}, start, end - start
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise ArkError("缺段修补需要 ffmpeg，已保留原稿")
+    clip_cache = cache.scoped(f"{kind}:clip-v1") if cache else None
     clipped = slice_evidence(evidence, start, end)
     clipped["segmentReconstruction"] = True
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="content-repair-", dir=DATA_DIR) as directory:
-        target = Path(directory) / "segment.mp4"
-        try:
-            # Decode and re-encode rather than keyframe stream-copy: local
-            # timestamps and the audio/video boundaries must agree precisely.
-            with _ark_proxy_semaphore, capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT):
-                subprocess.run([
-                    ffmpeg, "-nostdin", "-v", "error", "-ss", str(start), "-i", str(path),
-                    "-t", str(end - start), "-map", "0:v:0", "-map", "0:a:0?",
-                    "-vf", "scale=-2:min(960\\,ih)", "-c:v", "libx264", "-preset", "veryfast",
-                    "-crf", "22", "-threads", str(ARK_UPLOAD_PROXY_THREADS), "-c:a", "aac",
-                    "-b:a", "96k", "-movflags", "+faststart", str(target),
-                ], check=True, capture_output=True, timeout=120)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise ArkError("原片缺段截取失败，已保留原稿") from exc
+        target = clip_cache.proxy() if clip_cache else None
+        if target is None:
+            target = Path(directory) / "segment.mp4"
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise ArkError("缺段修补需要 ffmpeg，已保留原稿")
+            try:
+                # Decode and re-encode so timestamps and A/V boundaries agree.
+                with _ark_proxy_semaphore, capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT):
+                    subprocess.run([
+                        ffmpeg, "-nostdin", "-v", "error", "-ss", str(start), "-i", str(path),
+                        "-t", str(end - start), "-map", "0:v:0", "-map", "0:a:0?",
+                        "-vf", "scale=-2:min(960\\,ih)", "-c:v", "libx264", "-preset", "veryfast",
+                        "-crf", "22", "-threads", str(ARK_UPLOAD_PROXY_THREADS), "-c:a", "aac",
+                        "-b:a", "96k", "-movflags", "+faststart", str(target),
+                    ], check=True, capture_output=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ArkError("原片缺段截取失败，已保留原稿") from exc
+            if clip_cache:
+                target = clip_cache.adopt_proxy(target)
         # A clip must never reuse or overwrite the original video's delivery
         # cache. Keep model auditing separate from media delivery checkpoints.
-        prepared = ark_prepare_video(target, end - start, force_files=True)
+        # Use the same private COS delivery as the full video. Only a scoped
+        # cache may be passed here: a parent cache could send the wrong video.
+        for attempt in range(2):
+            try:
+                prepared = ark_prepare_video(target, end - start, cache=clip_cache)
+                break
+            except ArkError as exc:
+                if (attempt or exc.provider_code == "video_upload_retry_exhausted"
+                        or is_account_balance_error(exc)
+                        or (exc.provider_code != "transient_network" and exc.status_code not in {502, 503, 504})):
+                    raise
+                # Upload already has its own bounded budget. Recover only a
+                # transient preparation/poll failure, without re-encoding.
+                time.sleep(1)
         if cache:
             prepared.update(_audit_cache=cache, _audit_kind=kind)
         script, usage = ark_recognize(target, title, end - start, clipped, model, prepared_video=prepared)

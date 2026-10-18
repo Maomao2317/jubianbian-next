@@ -78,6 +78,76 @@ class RecognitionCheckpointTests(unittest.TestCase):
             self.assertEqual(self.cache.save_proxy(self.original), self.original)
         self.assertEqual(self.original.read_bytes(), b"original-video")
 
+    def test_clip_delivery_is_isolated_reused_and_cleaned_without_touching_source(self):
+        self.cache.save_proxy(self.original)
+        clip = self.cache.scoped("segment_0_22000:clip-v1")
+        another = self.cache.scoped("segment_22000_44000:clip-v1")
+        clip_source = self.root / "clip.mp4"
+        clip_source.write_bytes(b"different-clip")
+        clip.save_proxy(clip_source)
+        clip.save("delivery", {"uri": "s3://bucket/recognition/" + "a" * 64 + ".mp4"})
+        self.assertEqual(self.cache.proxy().read_bytes(), b"original-video")
+        self.assertEqual(self.cache.scoped("segment_0_22000:clip-v1").proxy().read_bytes(), b"different-clip")
+        self.assertIsNone(self.cache.load("delivery"))
+        self.assertIsNone(another.load("delivery"))
+        self.assertNotEqual(clip.identity, another.identity)
+        checkpoints.discard_local_proxy("task")
+        self.assertIsNone(clip.proxy())
+        self.assertIsNotNone(clip.load("delivery"))
+        with (patch.object(config, "OBJECT_STORAGE_BUCKET", "bucket"),
+              patch.object(config, "OBJECT_STORAGE_PREFIX", ""),
+              patch.object(storage, "delete_media") as delete):
+            checkpoints.cleanup_task_cache("task")
+        delete.assert_called_once_with("s3://bucket/recognition/" + "a" * 64 + ".mp4")
+        self.assertEqual(self.original.read_bytes(), b"original-video")
+
+    def test_clip_repair_uses_private_cos_and_reuses_encoded_clip_after_model_failure(self):
+        clip = self.cache.scoped("segment_0_22000:clip-v1")
+        clip.save_proxy(self.original)
+        uri = "s3://bucket/recognition/" + "a" * 64 + ".mp4"
+        with (patch.object(providers, "DATA_DIR", self.root),
+              patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),
+              patch.object(providers, "object_storage_enabled", return_value=True),
+              patch.object(providers, "ark_account_key", return_value="key"),
+              patch.object(providers, "upload_recognition_proxy", return_value=uri) as upload,
+              patch.object(providers, "presigned_get", return_value="https://private/clip"),
+              patch.object(providers, "media_info", return_value={"size": self.original.stat().st_size}),
+              patch.object(providers, "ark_upload_video") as files,
+              patch.object(providers.subprocess, "run") as encode,
+              patch.object(providers, "ark_recognize", side_effect=[ArkError("temporary model failure"),
+                  ({"scenes": []}, {"total_tokens": 5})]) as recognize):
+            args = (self.original, "test", 120, {}, "turbo", {"startSec": 0, "endSec": 20})
+            with self.assertRaises(ArkError):
+                providers.ark_recognize_range(*args, cache=self.cache)
+            providers.ark_recognize_range(*args, cache=self.cache)
+        encode.assert_not_called()
+        files.assert_not_called()
+        upload.assert_called_once_with(clip.proxy(), clip.identity)
+        self.assertEqual(recognize.call_args.kwargs["prepared_video"]["_video_uri"], uri)
+        self.assertIsNone(self.cache.load("delivery"))
+
+    def test_clip_preparation_retries_transient_error_but_not_exhausted_upload_budget(self):
+        clip = self.cache.scoped("segment_0_22000:clip-v1")
+        clip.save_proxy(self.original)
+        transient = ArkError("TLS disconnected", provider_code="transient_network")
+        exhausted = ArkError("budget exhausted", status_code=503, provider_code="video_upload_retry_exhausted")
+        with (patch.object(providers, "DATA_DIR", self.root),
+              patch.object(providers.time, "sleep"),
+              patch.object(providers, "ark_prepare_video", side_effect=[transient, {"api_key": "key", "file_id": "file"}]) as prepare,
+              patch.object(providers, "ark_recognize", return_value=({"scenes": []}, {})),
+              patch.object(providers.subprocess, "run") as encode):
+            args = (self.original, "test", 120, {}, "turbo", {"startSec": 0, "endSec": 20})
+            providers.ark_recognize_range(*args, cache=self.cache)
+            self.assertEqual(prepare.call_count, 2)
+            self.assertEqual(prepare.call_args_list[0].args[0], prepare.call_args_list[1].args[0])
+            prepare.reset_mock(side_effect=True)
+            prepare.side_effect = exhausted
+            self.cache.save("segment_0_22000", {"protocol": 0})
+            with self.assertRaises(ArkError):
+                providers.ark_recognize_range(*args, cache=self.cache)
+            prepare.assert_called_once()
+        encode.assert_not_called()
+
     def test_large_video_uses_private_proxy_then_retry_uses_fresh_url(self):
         with self.original.open("r+b") as handle:
             handle.truncate(50 * 1024 * 1024)

@@ -202,7 +202,7 @@ class RecognizerThreadTests(unittest.IsolatedAsyncioTestCase):
         release_models = threading.Event()
         lock = threading.Lock()
         request_ids = []
-        script = {"characters": ["甲"], "scenes": []}
+        script = {"characters": ["甲"], "scenes": [{"blocks": [{"type": "action", "text": "甲进门。"}]}]}
         collected = {"sources": [], "status": "unavailable"}
         video = {"api_key": "test", "file_id": "ready"}
 

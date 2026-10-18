@@ -33,10 +33,11 @@ from .content_coverage import content_gaps, merge_gap_repair, repair_windows
 from .errors import ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
-from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, openai_script, openai_transcribe
+from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, ark_review_target_text, openai_script, openai_transcribe
 from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import (
+    has_screenplay_body,
     normalize_script,
     quality_gate,
     restore_evidence_boundary_segments,
@@ -350,7 +351,7 @@ def _automated_review_context(
             compact_block = {key: value for key, value in block.items() if key in block_keys and value not in (None, "")}
             compact_block["blockIndex"] = block_index
             if block.get("type") in {"dialogue", "vo"}:
-                compact_block["text"] = block.get("sourceText") or block.get("rawText") or block.get("text") or ""
+                compact_block["text"] = ark_review_target_text(block)
             compact_scene["blocks"].append(compact_block)
         draft["scenes"].append(compact_scene)
     # Give the reviewer explicit original indices near each issue, including
@@ -366,7 +367,8 @@ def _automated_review_context(
         left, right = window["startSec"] - 0.5, window["endSec"] + 0.5
         window["replacementTargets"] = [
             {"sceneIndex": scene_index, "blockIndex": block_index,
-             "startSec": block["startSec"], "endSec": block["endSec"]}
+             "startSec": block["startSec"], "endSec": block["endSec"],
+             "text": ark_review_target_text(block), "speaker": block.get("speaker")}
             for scene_index, block_index, block in timed_blocks
             if block.get("type") in {"dialogue", "vo"}
             and block["startSec"] <= right and block["endSec"] >= left
@@ -426,6 +428,8 @@ def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
     tail_gap = quality.get("tailGapSec")
     if isinstance(tail_gap, (int, float)) and tail_gap >= 8:
         return True
+    if not quality_gate(quality)[0]:
+        return True
     return any(
         isinstance(issue, dict)
         and (
@@ -438,7 +442,7 @@ def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
 
 def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
     issues = [issue for issue in (quality.get("issues") or []) if isinstance(issue, dict)]
-    blocking = [issue for issue in issues if str(issue.get("severity") or "").upper() == "P0"]
+    blocking = quality_gate(quality)[1]
     if blocking:
         # Repair delivery blockers first. If the patch still has room, include
         # at most four subtitle-backed missing beats in the same review call.
@@ -472,6 +476,8 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
+    if getattr(error, "provider_code", "") == "empty_screenplay":
+        return True
     if is_account_balance_error(error):
         return True
     if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
@@ -496,6 +502,8 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
 
 
 def _task_error_message(error: BaseException) -> str:
+    if getattr(error, "provider_code", "") == "empty_screenplay":
+        return str(error)
     if is_account_balance_error(error):
         return "方舟账户欠费或余额不足，已停止无效重试；请管理员恢复账户后重新识别，原片和已采集结果已保留。"
     if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
@@ -690,10 +698,12 @@ async def _run_recognizer_with_media(
                     ark_error.status_code if ark_error else None,
                     safe_error_text(ark_error) if ark_error else "unknown",
                 )
-                if not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
+                if getattr(ark_error, "provider_code", "") == "empty_screenplay" or not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
                     raise ark_error or exc
         if ark_script is not None and ark_usage_data is not None:
             script = normalize_script(ark_script, row["title"])
+            if not has_screenplay_body(script):
+                raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
             quality, _approved, blocking = _evaluate_quality(script, "ark", evidence, route)
             initial_model = route["model"]
             final_model = initial_model
@@ -722,7 +732,9 @@ async def _run_recognizer_with_media(
                                         "reviewScope": "missing_video_segments",
                                         "unresolvedIssues": quality.get("blockingIssues", [])})
             may_auto_review = (
-                not has_content_gaps and _needs_automated_content_review(quality)
+                not quality.get("contentGapRanges") and _needs_automated_content_review(quality)
+                and (not has_content_gaps or not quality_gate(quality)[0])
+                and not any(error.get("balanceError") for error in quality.get("contentRepair", {}).get("errors", []))
                 and route.get("mode") not in {"lite", "lite_only"}
                 and bool(turbo_model)
             )
@@ -731,7 +743,7 @@ async def _run_recognizer_with_media(
                 context = _automated_review_context(script, review_issues, quality=quality)
                 review_metadata.update({
                     "reviewModel": turbo_model,
-                    "attemptCount": 2,
+                    "attemptCount": review_metadata["attemptCount"] + 1,
                     "reviewScope": context["scope"],
                     "triggeringIssues": review_issues,
                 })
@@ -767,7 +779,7 @@ async def _run_recognizer_with_media(
                         review_route,
                     )
                     reviewed_content_issues = _automated_review_issues(reviewed_quality)
-                    final_usage = _merge_usage(ark_usage_data, reviewed_usage)
+                    final_usage = _merge_usage(final_usage, reviewed_usage)
                     regression = _review_regression_reason(quality, reviewed_quality)
                     review_metadata["accepted"] = regression is None
                     if regression:
@@ -781,6 +793,8 @@ async def _run_recognizer_with_media(
                         ]
                         review_metadata["unresolvedIssues"] = reviewed_content_issues
                         script = reviewed_script
+                        if "contentRepair" in quality:
+                            reviewed_quality["contentRepair"] = quality["contentRepair"]
                         quality = reviewed_quality
                         final_model = turbo_model
                 except ArkError as review_exc:
@@ -818,7 +832,7 @@ async def _run_recognizer_with_media(
         logger.warning("provider_failed provider=openai task_id=%s error=%s", row["id"], safe_error_text(exc))
         raise ArkError("OpenAI 备用识别失败，未生成未经证实的剧本") from exc
     if not script:
-        raise ArkError("OpenAI 未返回可用剧本，未生成未经证实的剧本")
+        raise ArkError("OpenAI 未返回可用剧本，已保留原始视频和已有版本。", provider_code="empty_screenplay")
     provider = "openai"
     script = normalize_script(script, row["title"])
     quality, _approved, _blocking = _evaluate_quality(script, provider, evidence, route)
@@ -864,6 +878,10 @@ async def process_task(task_id: str) -> None:
     try:
         mark_task_stage(task_id, status="running", stage="probing", progress_percent=12, message="正在读取视频信息")
         script, quality, usage, evidence = await run_recognizer(task_row(task_id))
+        if not has_screenplay_body(script):
+            # Stop before persistence. Failed rechecks use the existing snapshot
+            # restore path; initial failures refund once without paid retries.
+            raise ArkError("未生成可用剧本正文，已停止交付并保留原始视频和已有版本。", provider_code="empty_screenplay")
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000

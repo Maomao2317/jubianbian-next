@@ -40,6 +40,13 @@ class RecognitionCache:
         fingerprint = ["recognition-cache-1", EVIDENCE_VERSION, task_id, source_uri, info, settings]
         self.identity = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
 
+    def scoped(self, scope: str) -> RecognitionCache:
+        """Isolate a clip's media checkpoints from the full video and other clips."""
+        child = object.__new__(RecognitionCache)
+        child.identity = hashlib.sha256(f"{self.identity}:{scope}".encode()).hexdigest()
+        child.directory = self.directory / "segments" / child.identity
+        return child
+
     def load(self, kind: str) -> dict[str, Any] | None:
         try:
             value = json.loads((self.directory / f"{kind}.json").read_text(encoding="utf-8"))
@@ -123,13 +130,18 @@ class RecognitionCache:
         return target
 
 
+def _media_directories(directory: Path) -> list[Path]:
+    return [directory, *sorted((directory / "segments").glob("*/"))]
+
+
 def discard_local_proxy(task_id: str) -> None:
     """Release bulk disk space after success; evidence/remote checkpoints remain."""
-    for name in ("proxy.mp4", "proxy.json"):
-        try:
-            (cache_directory(task_id) / name).unlink(missing_ok=True)
-        except OSError:
-            logger.warning("recognition_cache_cleanup_failed kind=proxy")
+    for directory in _media_directories(cache_directory(task_id)):
+        for name in ("proxy.mp4", "proxy.json"):
+            try:
+                (directory / name).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("recognition_cache_cleanup_failed kind=proxy")
 
 
 def _prune_local_proxies() -> None:
@@ -145,10 +157,12 @@ def _prune_local_proxies() -> None:
                 "SELECT id FROM tasks WHERE status IN ('queued','running')")}
         root = config.DATA_DIR / "recognition-cache"
         for directory in root.iterdir() if root.exists() else []:
-            proxy = directory / "proxy.mp4"
-            if directory.name not in active and proxy.is_file() and proxy.stat().st_mtime < time.time() - 86400:
-                proxy.unlink(missing_ok=True)
-                (directory / "proxy.json").unlink(missing_ok=True)
+            if directory.name not in active:
+                for media_directory in _media_directories(directory):
+                    proxy = media_directory / "proxy.mp4"
+                    if proxy.is_file() and proxy.stat().st_mtime < time.time() - 86400:
+                        proxy.unlink(missing_ok=True)
+                        (media_directory / "proxy.json").unlink(missing_ok=True)
     except (OSError, sqlite3.Error):
         logger.warning("recognition_cache_prune_failed")
 
@@ -157,19 +171,20 @@ def cleanup_task_cache(task_id: str) -> None:
     """Used by normal task retention, with a strict guard against original keys."""
     from .storage import delete_media, _object_parts
     directory = cache_directory(task_id)
-    try:
-        value = json.loads((directory / "delivery.json").read_text(encoding="utf-8"))
-        uri = value["data"]["uri"]
-        bucket, key = _object_parts(uri)
-        prefix = "/".join(part for part in (config.OBJECT_STORAGE_PREFIX, "recognition", "") if part) + "/"
-        filename = key.removeprefix(prefix)
-        if bucket == config.OBJECT_STORAGE_BUCKET and key.startswith(prefix) and len(filename) == 68 and filename.endswith(".mp4"):
-            int(filename[:-4], 16)
-            delete_media(uri)
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    except Exception:
-        logger.warning("recognition_cache_cleanup_failed kind=object_proxy")
+    for media_directory in _media_directories(directory):
+        try:
+            value = json.loads((media_directory / "delivery.json").read_text(encoding="utf-8"))
+            uri = value["data"]["uri"]
+            bucket, key = _object_parts(uri)
+            prefix = "/".join(part for part in (config.OBJECT_STORAGE_PREFIX, "recognition", "") if part) + "/"
+            filename = key.removeprefix(prefix)
+            if bucket == config.OBJECT_STORAGE_BUCKET and key.startswith(prefix) and len(filename) == 68 and filename.endswith(".mp4"):
+                int(filename[:-4], 16)
+                delete_media(uri)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        except Exception:
+            logger.warning("recognition_cache_cleanup_failed kind=object_proxy")
     shutil.rmtree(directory, ignore_errors=True)
 
 

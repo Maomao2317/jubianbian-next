@@ -602,7 +602,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 "scenes": [{
                     "heading": "1-1 日 内 客厅",
                     "location": "客厅",
-                    "blocks": [{"type": "screen_text", "text": "你今天来了。", "startSec": 1, "endSec": 3}],
+                    "blocks": [{"type": "action", "text": "甲站在客厅。", "startSec": 0, "endSec": 3},
+                               {"type": "screen_text", "text": "你今天来了。", "startSec": 1, "endSec": 3}],
                 }],
             },
             "测试",
@@ -699,6 +700,24 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         approved, issues = quality_gate(approved_quality)
         self.assertTrue(approved)
         self.assertEqual(issues, [])
+
+    def test_p0_after_more_than_100_advisories_still_blocks_and_enters_review(self):
+        blocks = [{"type": "action", "text": "甲走向窗边。", "emotion": "紧张"} for _ in range(110)]
+        blocks.append({"type": "dialogue", "speaker": "未知说话人", "text": "我来了。", "uncertain": True})
+        quality = script_quality({"characters": ["甲"], "scenes": [{
+            "heading": "1-1 日 内 客厅", "location": "客厅", "blocks": blocks}]}, "test")
+        self.assertEqual(len(quality["issues"]), 100)
+        self.assertFalse(any(issue["severity"] == "P0" for issue in quality["issues"]))
+        self.assertFalse(quality_gate(quality)[0])
+        self.assertIn("台词归属错", [issue["tag"] for issue in quality["blockingIssues"]])
+        self.assertTrue(processing._needs_automated_content_review(quality))
+        self.assertIn("台词归属错", [issue["tag"] for issue in processing._automated_review_issues(quality)])
+
+    def test_legacy_truncated_p0_summary_cannot_be_approved(self):
+        quality = {"issues": [{"severity": "P1", "tag": "普通提示"}], "severityCounts": {"P0": 2}}
+        approved, blockers = quality_gate(quality)
+        self.assertFalse(approved)
+        self.assertEqual(blockers[0]["tag"], "阻断问题明细不完整")
 
     def test_evidence_layer_preserves_transcript_and_marks_missing_sources(self):
         evidence = collect_evidence(

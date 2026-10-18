@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from app.script import normalize_script, restore_evidence_boundary_segments, script_to_markdown
+from app.script import normalize_script, restore_evidence_boundary_segments, script_to_markdown, script_quality
 
 
 class OcrDialogueIntegrityTests(unittest.TestCase):
@@ -77,6 +77,38 @@ class OcrDialogueIntegrityTests(unittest.TestCase):
         }]}]
         self.assertEqual(restore_evidence_boundary_segments(script, evidence)["segments"], 1)
         self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "我今天决定离开。")
+
+    def test_only_exact_timed_asr_supported_subtitle_avoids_duplicate_text_warning(self):
+        script, evidence = self.fixture("我今天决定离开", "我今天决定离开")
+        evidence["sources"].append({"kind": "audio", "status": "available", "items": [{
+            "type": "transcript_segment", "text": "我今天决定离开", "startSec": 1, "endSec": 3}]})
+        before = deepcopy(evidence)
+        quality = script_quality(script, "test", evidence)
+        self.assertEqual(quality["ocrCoverage"], 100)
+        self.assertFalse(any(issue["tag"] == "疑似漏画面文字片段" for issue in quality["issues"]))
+        self.assertEqual(evidence, before)
+        for override, audio in (({"screenType": "name_tag"}, {}),
+                                ({"region": "full"}, {}),
+                                ({"text": "我今天决定离开姓名条"}, {}),
+                                ({}, {"startSec": 7, "endSec": 8}),
+                                ({"text": "甲"}, {"text": "甲"})):
+            changed = deepcopy(evidence)
+            changed["sources"][0]["items"][0].update(override)
+            changed["sources"][1]["items"][0].update(audio)
+            with self.subTest(override=override, audio=audio):
+                self.assertTrue(any(issue["tag"] == "疑似漏画面文字片段"
+                                    for issue in script_quality(script, "test", changed)["issues"]))
+
+    def test_repeated_subtitle_later_still_flags_missing_occurrence(self):
+        script, evidence = self.fixture("我今天决定离开", "我今天决定离开")
+        evidence["sources"][0]["items"].append({
+            **evidence["sources"][0]["items"][0], "startSec": 7, "endSec": 8})
+        evidence["sources"].append({"kind": "audio", "status": "available", "items": [{
+            "type": "transcript_segment", "text": "我今天决定离开", "startSec": 1, "endSec": 3}]})
+        missing = [issue for issue in script_quality(script, "test", evidence)["issues"]
+                   if issue["tag"] == "疑似漏画面文字片段"]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0]["startSec"], 7)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ def content_gaps(script: dict[str, Any], duration: float, minimum: float = 20) -
         for scene in script.get("scenes") or []
         for block in scene.get("blocks") or []
         if block.get("type") in {"action", "dialogue", "vo"}
+        and not block.get("suppressInOutput") and str(block.get("text") or "").strip()
         and valid_time(block.get("startSec")) and valid_time(block.get("endSec"))
         and 0 <= block["startSec"] <= block["endSec"] <= duration + 1
     )
