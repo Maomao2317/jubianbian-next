@@ -43,7 +43,7 @@ class ParallelUploadFlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "done")
         self.assertTrue(result["alreadyApproved"])
 
-    def test_running_filter_includes_quality_gate_tasks_for_owner(self):
+    def test_review_tasks_have_their_own_owner_filter(self):
         database = "file:jbb-running-filter?mode=memory&cache=shared"
 
         def open_db():
@@ -84,8 +84,10 @@ class ParallelUploadFlowTests(unittest.TestCase):
                 patch.object(routes, "current_user", return_value={"id": "user-1"}),
             ):
                 tasks = routes.list_tasks(FakeRequest(), status="running")
+                review_tasks = routes.list_tasks(FakeRequest(), status="review")
 
-            self.assertEqual({task["id"] for task in tasks}, {"running-1", "review-1"})
+            self.assertEqual({task["id"] for task in tasks}, {"running-1"})
+            self.assertEqual({task["id"] for task in review_tasks}, {"review-1"})
         finally:
             keeper.close()
 

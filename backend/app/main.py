@@ -28,6 +28,8 @@ from .routes import (
     admin_user_ledger,
     admin_user_status,
     admin_users,
+    approve_task,
+    approve_tasks_batch,
     create_task,
     create_tasks_batch,
     create_upload_batch,
@@ -116,6 +118,8 @@ app.add_api_route("/api/admin/tasks/{task_id}/retry", admin_retry_task, methods=
 app.add_api_route("/api/admin/tasks/{task_id}/restore-recheck", admin_restore_task_recheck, methods=["POST"])
 app.add_api_route("/api/admin/audit-logs", admin_audit_logs, methods=["GET"])
 app.add_api_route("/api/tasks", list_tasks, methods=["GET"])
+app.add_api_route("/api/tasks/approve-batch", approve_tasks_batch, methods=["POST"])
+app.add_api_route("/api/tasks/{task_id}/approve", approve_task, methods=["POST"])
 app.add_api_route("/api/tasks/{task_id}", task_detail, methods=["GET"])
 app.add_api_route("/api/tasks/{task_id}/events", task_event_list, methods=["GET"])
 app.add_api_route("/api/tasks", create_task, methods=["POST"])

@@ -800,7 +800,7 @@ async def _run_recognizer_with_media(
                 except ArkError as review_exc:
                     review_metadata["reviewError"] = safe_error_text(review_exc)
                     quality["warning"] = (
-                        "Turbo 自动复核失败，已保留 Lite 草稿并转管理员复核。"
+                        "Turbo 自动复核失败，已保留 Lite 草稿并等待用户复核。"
                         if not quality_gate(quality)[0]
                         else "Turbo 自动复核失败，已保留通过 P0 门禁的 Lite 结果并记录提示。"
                     )
@@ -887,7 +887,7 @@ async def process_task(task_id: str) -> None:
         elapsed_ms = (time.perf_counter() - started) * 1000
         # A successful provider response is not automatically a deliverable
         # screenplay. P0 source-fidelity findings keep the generated script
-        # available for inspection but put the task behind the admin review
+        # available for inspection but put the task behind the owner review
         # gate. P1 editing hints stay visible without blocking delivery.
         approved, blocking = quality_gate(quality)
         quality["deliveryStatus"] = "approved" if approved else "review_required"
@@ -895,17 +895,17 @@ async def process_task(task_id: str) -> None:
         completed_recheck = has_pending_recheck(task_id)
         if completed_recheck:
             # Even a clean automatic gate cannot replace a version that was
-            # already delivered. An administrator must compare the candidate
+            # already delivered. The owner must compare the candidate
             # with the preserved snapshot and explicitly accept it.
             quality["deliveryStatus"] = "review_required"
             quality["recheck"] = {
                 "previousVersionPreserved": True,
-                "adminApprovalRequired": True,
+                "userApprovalRequired": True,
             }
         can_deliver = approved and not completed_recheck
         final_status = "done" if can_deliver else "review"
         final_stage = "done" if can_deliver else "review"
-        final_message = "识别完成" if can_deliver else "识别完成，等待管理员复核"
+        final_message = "识别完成" if can_deliver else "识别完成，等待用户复核"
         update_task(
             task_id,
             status=final_status,

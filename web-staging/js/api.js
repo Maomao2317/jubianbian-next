@@ -421,6 +421,8 @@
     getAdminUsers(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/users") + (search ? "?" + search : "")); },
     getAdminTasks(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/tasks") + (search ? "?" + search : "")); },
     getAdminTask(id) { return this.request(this.url("/admin/tasks/:id", { id })); },
+    approveTask(id) { return this.request(this.url("/tasks/:id/approve", { id }), { method: "POST" }); },
+    approveTasks(taskIds) { return this.request(this.url("/tasks/approve-batch"), { method: "POST", body: JSON.stringify({ taskIds }) }); },
     approveAdminTask(id) { return this.request(this.url("/admin/tasks/:id/approve", { id }), { method: "POST" }); },
     restoreAdminTaskRecheck(id) { return this.request(this.url("/admin/tasks/:id/restore-recheck", { id }), { method: "POST" }); },
     getAdminRecharges(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/recharges") + (search ? "?" + search : "")); },

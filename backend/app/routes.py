@@ -671,12 +671,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
 
 
 def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:
-    """Return a full task to an administrator for quality review.
-
-    User task details intentionally remain owner-scoped.  This separate route
-    is the only way for an administrator to inspect another user's review
-    result before approving it.
-    """
+    """Return full task details and batch navigation to an administrator."""
     _require_admin(request)
     task = get_task(task_id)
     if not task:
@@ -687,6 +682,12 @@ def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:
         "pending": bool(snapshot),
         "snapshotCreatedAt": snapshot["created_at"] if snapshot else None,
     }
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? ORDER BY batch_index, created_at, id",
+            (task["user_id"], task["batchId"]),
+        ).fetchall() if task.get("batchId") else []
+    task["episodes"] = [row_to_task(row, include_result=False) for row in rows]
     return task
 
 
@@ -868,13 +869,8 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         value = f"%{keyword.strip()}%"
         params.extend([value, value])
     if status and status != "all":
-        # Quality-gated tasks remain in the owner's normal processing view;
-        # the internal review state is never exposed as a user filter.
-        if status == "running":
-            clauses.append("status IN ('running', 'review')")
-        else:
-            clauses.append("status = ?")
-            params.append(status)
+        clauses.append("status = ?")
+        params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     # The workspace only needs metadata.  Do not read/parse result_json here:
     # completed screenplays can be large, and their full payload is fetched by
@@ -898,6 +894,69 @@ def task_detail(request: Request, task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
     task["events"] = task_events(task_id)
     return task
+
+
+def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
+    """Confirm owned drafts atomically, retaining findings and empty-body guards."""
+    ids = list(dict.fromkeys(task_ids))
+    approved_at = now_iso()
+    changed_ids = []
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        # One read per ID avoids SQLite's parameter limit on 999-episode batches.
+        rows = [connection.execute(
+            "SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id),
+        ).fetchone() for task_id in ids]
+        if any(row is None for row in rows):
+            raise HTTPException(status_code=404, detail="任务不存在或不属于当前账号")
+        for row in rows:
+            try:
+                candidate = json.loads(row["result_json"] or "{}")
+                quality = json.loads(row["quality_json"] or "{}")
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=409, detail="剧本数据异常，请重新识别")
+            if not isinstance(quality, dict) or not has_screenplay_body(candidate):
+                raise HTTPException(status_code=409, detail=f"{row['title']}的剧本正文为空或异常，不能确认通过；本次未确认任何任务")
+            if row["status"] == "done" and quality.get("deliveryStatus") == "approved":
+                continue
+            if row["status"] != "review":
+                raise HTTPException(status_code=409, detail="只有待复核的剧本可以确认，请刷新任务状态")
+            quality.update(deliveryStatus="approved", approvedAt=approved_at,
+                           approvedBy=user_id, approvalRole="user")
+            if isinstance(quality.get("recheck"), dict):
+                quality["recheck"]["adminApprovalRequired"] = False
+                quality["recheck"]["userApprovalRequired"] = False
+            connection.execute(
+                """UPDATE tasks SET status = 'done', stage = 'done', progress_percent = 100,
+                   completed_at = COALESCE(completed_at, ?), updated_at = ?, error = NULL,
+                   quality_json = ? WHERE id = ? AND user_id = ? AND status = 'review'""",
+                (approved_at, approved_at, json.dumps(quality, ensure_ascii=False), row["id"], user_id),
+            )
+            mark_recheck_resolved(connection, row["id"], "approved")
+            changed_ids.append(row["id"])
+        record_task_events(connection, [dict(task_id=task_id, event_type="user_approved",
+            message="用户自行复核确认，剧本可以下载", status="done", stage="done", progress_percent=100)
+            for task_id in changed_ids])
+    return {"ids": ids, "status": "done", "approvedCount": len(changed_ids),
+            "alreadyApprovedCount": len(ids) - len(changed_ids), "message": "复核完成，可以下载"}
+
+
+async def approve_task(request: Request, task_id: str) -> dict[str, Any]:
+    return _approve_user_tasks(current_user(request)["id"], [task_id])
+
+
+async def approve_tasks_batch(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="复核参数不是合法 JSON")
+    ids = payload.get("taskIds") if isinstance(payload, dict) else None
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 999 or any(
+        not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200 for task_id in ids
+    ):
+        raise HTTPException(status_code=400, detail="请提交 1 至 999 个待复核任务")
+    return _approve_user_tasks(user["id"], ids)
 
 
 def task_event_list(request: Request, task_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:

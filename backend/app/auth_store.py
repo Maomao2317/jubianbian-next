@@ -439,7 +439,7 @@ def init_db() -> None:
         )
         # ``review`` is a durable delivery state: the screenplay may be
         # inspected by its owner, but it must not be downloadable until an
-        # administrator has confirmed it.  Do not silently migrate legacy
+        # owner has confirmed it.  Do not silently migrate legacy
         # review rows to ``done``; doing so would bypass the quality gate.
         connection.execute(
             """
