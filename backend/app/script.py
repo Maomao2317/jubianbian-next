@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import math
 import re
 import unicodedata
 from typing import Any
@@ -1035,6 +1036,67 @@ def order_blocks_without_crossing_sentences(blocks: list[dict[str, Any]]) -> lis
             key=lambda pair: (pair[1].get("startSec", 0), pair[0]),
         )
     ]
+
+
+def merge_continuous_scenes(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Consolidate one continuous setting without changing any block content.
+
+    Actions, speech and captions often overlap. Compare the next start with
+    the whole accumulated interval, rather than requiring almost disjoint
+    intervals. A backwards time reset, unknown setting or explicit transition
+    is still a boundary. This also runs after additive repair restores its
+    temporary transition placeholders.
+    """
+    def episode(scene: dict[str, Any]) -> int:
+        return int(scene.get("_episodeOrder") or episode_from_text(scene.get("heading")) or 1)
+
+    def interval(scene: dict[str, Any]) -> tuple[float, float] | None:
+        start, end = scene.get("startSec"), scene.get("endSec")
+        if (type(start) in {int, float} and type(end) in {int, float}
+                and math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
+            return start, end
+        return None
+
+    def mergeable(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if episode(left) != episode(right) or any(
+            left.get(key) != right.get(key)
+            for key in ("location", "timeOfDay", "interiorExterior", "segmentType")
+        ):
+            return False
+        if (left.get("location") in {None, "", "待补充", "未知", "不明", "未标注地点"}
+                or left.get("timeOfDay") in {None, "", "不明"}
+                or left.get("interiorExterior") in {None, "", "不明"}):
+            return False
+        if any(block.get("type") == "transition" for scene in (left, right)
+               for block in scene.get("blocks") or []):
+            return False
+        a, b = interval(left), interval(right)
+        return bool(a and b and a[0] - 1.0 <= b[0] <= a[1] + 8.0)
+
+    merged: list[dict[str, Any]] = []
+    for scene in scenes:
+        if merged and mergeable(merged[-1], scene):
+            previous = merged[-1]
+            previous["blocks"].extend(scene.get("blocks") or [])
+            previous["characters"] = list(dict.fromkeys(
+                (previous.get("characters") or []) + (scene.get("characters") or [])
+            ))
+            if isinstance(scene.get("props"), list):
+                previous["props"] = list(previous.get("props") or []) + scene["props"]
+            previous["startSec"] = min(previous["startSec"], scene["startSec"])
+            previous["endSec"] = max(previous["endSec"], scene["endSec"])
+        else:
+            merged.append({**scene, "blocks": list(scene.get("blocks") or [])})
+    counts: dict[int, int] = {}
+    for scene in merged:
+        scene_episode = episode(scene)
+        counts[scene_episode] = counts.get(scene_episode, 0) + 1
+        scene["heading"] = re.sub(r"^\s*\d+-\d+", f"{scene_episode}-{counts[scene_episode]}",
+                                  str(scene.get("heading") or ""), count=1)
+        scene["blocks"] = order_blocks_without_crossing_sentences(scene["blocks"])
+        for key in ("_episodeOrder", "_sceneOrder", "_inputOrder"):
+            scene.pop(key, None)
+    return merged
 
 
 def clean_action_text(text: Any) -> str:
@@ -2078,54 +2140,7 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         )
 
     scenes = sorted(scenes, key=scene_sort_key)
-    # Providers often split every camera beat into a new scene even when the
-    # location, time and dramatic segment never changed. Merge adjacent
-    # compatible scenes before numbering so a five-minute clip does not become
-    # 1-1 through 1-17. Explicit transitions and large time gaps keep scenes
-    # separate.
-    merged_scenes: list[dict[str, Any]] = []
-
-    def mergeable(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        if any(left.get(key) != right.get(key) for key in ("_episodeOrder", "location", "timeOfDay", "interiorExterior", "segmentType")):
-            return False
-        if (left.get("location") in {None, "", "待补充", "未知", "不明", "未标注地点"}
-                or left.get("timeOfDay") == "不明" or left.get("interiorExterior") == "不明"):
-            return False
-        for scene in (left, right):
-            if any(block.get("type") == "transition" for block in scene.get("blocks") or []):
-                return False
-        left_end, right_start = left.get("endSec"), right.get("startSec")
-        return (isinstance(left_end, (int, float)) and isinstance(right_start, (int, float))
-                and -1.0 <= right_start - left_end <= 8.0)
-
-    for scene in scenes:
-        if merged_scenes and mergeable(merged_scenes[-1], scene):
-            previous = merged_scenes[-1]
-            previous["blocks"].extend(scene.get("blocks") or [])
-            previous["characters"] = list(dict.fromkeys(
-                (previous.get("characters") or []) + (scene.get("characters") or [])
-            ))
-            if isinstance(scene.get("props"), list):
-                previous["props"] = list(previous.get("props") or []) + scene["props"]
-            if isinstance(scene.get("startSec"), (int, float)):
-                previous["startSec"] = min(previous.get("startSec", scene["startSec"]), scene["startSec"])
-            if isinstance(scene.get("endSec"), (int, float)):
-                previous["endSec"] = max(previous.get("endSec", scene["endSec"]), scene["endSec"])
-        else:
-            merged_scenes.append(scene)
-    scenes = merged_scenes
-    scene_counts: dict[int, int] = {}
-    for scene in scenes:
-        scene_episode = int(scene.get("_episodeOrder") or episode_number)
-        scene_counts[scene_episode] = scene_counts.get(scene_episode, 0) + 1
-        scene["heading"] = re.sub(
-            r"^\s*\d+-\d+",
-            f"{scene_episode}-{scene_counts[scene_episode]}",
-            str(scene.get("heading") or ""),
-            count=1,
-        )
-        for key in ("_episodeOrder", "_sceneOrder", "_inputOrder"):
-            scene.pop(key, None)
+    scenes = merge_continuous_scenes(scenes)
     used_characters: list[str] = []
     for scene in scenes:
         for character in scene.get("characters", []):
@@ -2619,6 +2634,29 @@ def has_screenplay_body(script: Any) -> bool:
     )
 
 
+def screenplay_output_scenes(script: dict[str, Any]) -> list[dict[str, Any]]:
+    """Hide empty caption shells only in output, retaining all QA evidence.
+
+    Renumber visible headings per episode without mutating stored scenes or
+    their review indices. Title cards and textless transition markers remain.
+    """
+    scenes = []
+    counts: dict[str, int] = {}
+    for scene in script.get("scenes") or []:
+        if not any(not block.get("suppressInOutput") and (
+            str(block.get("text") or "").strip() or block.get("type") == "transition"
+        ) for block in scene.get("blocks") or []):
+            continue
+        heading = str(scene.get("heading") or "未标注场景")
+        match = re.match(r"^\s*(\d+)-\d+", heading)
+        if match:
+            episode = match.group(1)
+            counts[episode] = counts.get(episode, 0) + 1
+            heading = re.sub(r"^\s*\d+-\d+", f"{episode}-{counts[episode]}", heading, count=1)
+        scenes.append({**scene, "heading": heading})
+    return scenes
+
+
 def script_to_markdown(task: dict[str, Any]) -> str:
     script = task.get("result") or {}
     lines = [f"# {script.get('title') or task['title']}", ""]
@@ -2647,7 +2685,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         del block, block_type
         return ""
 
-    for scene in script.get("scenes", []):
+    for scene in screenplay_output_scenes(script):
         lines.extend([scene.get("heading", "未标注场景"), ""])
         cast = [str(name).strip() for name in (scene.get("characters") or []) if str(name).strip()]
         if cast:

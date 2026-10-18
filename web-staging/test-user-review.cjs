@@ -30,7 +30,7 @@ const context = vm.createContext({
 context.window.location = context.location;
 vm.runInContext(fs.readFileSync(path.join(__dirname, "js/config.js"), "utf8"), context);
 const source = fs.readFileSync(path.join(__dirname, "js/app.js"), "utf8");
-vm.runInContext(source.replace("  boot();", "  window.testUI = { normalizeUserTask, statusBadge, taskRow, batchRow, renderDetail, openUserReview, state };"), context);
+vm.runInContext(source.replace("  boot();", "  window.testUI = { normalizeUserTask, statusBadge, taskRow, batchRow, renderDetail, openUserReview, scriptPreview, state };"), context);
 const ui = context.window.testUI;
 const click = async (action, id) => {
   const button = { dataset: { action, id }, textContent: "操作", closest: () => ({ querySelectorAll: () => [] }) };
@@ -39,6 +39,22 @@ const click = async (action, id) => {
   }
 };
 (async () => {
+  const shells = { title: "合集", scenes: [
+    { heading: "1-1 日 内 客厅", blocks: [{ type: "dialogue", speaker: "甲", text: "我们出发。" }] },
+    { heading: "1-2 日 外 空标题", blocks: [{ type: "screen_text", text: "我们出发。", suppressInOutput: true }] },
+    { heading: "1-3 日 外 街道", blocks: [{ type: "screen_text", text: "三年后" }] },
+    { heading: "2-1 日 外 空标题", blocks: [] },
+    { heading: "2-2 日 内 客厅", blocks: [{ type: "transition", transitionType: "flashback" }] },
+  ] };
+  const savedShells = JSON.stringify(shells);
+  const preview = ui.scriptPreview(shells);
+  assert.doesNotMatch(preview, /空标题|1-3|2-2/);
+  assert.match(preview, /1-2 日 外 街道/);
+  assert.match(preview, /2-1 日 内 客厅/);
+  assert.match(preview, /三年后/);
+  assert.match(preview, /闪回/);
+  assert.equal((preview.match(/<section class="scene">/g) || []).length, 3);
+  assert.equal(JSON.stringify(shells), savedShells);
   assert.equal(ui.normalizeUserTask(task), task);
   assert.match(ui.statusBadge(task), /待复核/);
   assert.match(ui.taskRow(task), /查看并复核/);

@@ -148,7 +148,7 @@ def normalize_additive_repair(original: dict[str, Any], candidate: dict[str, Any
     action prose during normalization. Temporary transitions protect the old
     blocks from all prose/speaker transforms; none reach QA or a model call.
     """
-    from .script import normalize_script
+    from .script import merge_continuous_scenes, normalize_script
 
     remaining = [(block, scene) for scene in original.get("scenes") or []
                  for block in scene.get("blocks") or []]
@@ -178,4 +178,7 @@ def normalize_additive_repair(original: dict[str, Any], candidate: dict[str, Any
             scene["characters"] = list(dict.fromkeys(list(scene.get("characters") or []) + cast))
     if protected:
         raise ValueError("normalization lost a protected original block")
+    # The placeholders intentionally prevented merging during normalization.
+    # Restore only scene structure now, keeping protected prose verbatim.
+    result["scenes"] = merge_continuous_scenes(result.get("scenes") or [])
     return result

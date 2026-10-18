@@ -564,6 +564,19 @@
 
   function scriptPreview(script) {
     if (!script) return "";
+    const sceneCounts = new Map();
+    // Keep caption evidence in task data, but do not print an empty heading
+    // when every block was suppressed. Match screenplay export numbering.
+    const visibleScenes = (script.scenes || []).filter(scene => (scene.blocks || []).some(block =>
+      !block.suppressInOutput && (String(block.text || "").trim() || block.type === "transition")
+    )).map(scene => {
+      const heading = String(scene.heading || "");
+      const match = heading.match(/^\s*(\d+)-\d+/);
+      if (!match) return scene;
+      const count = (sceneCounts.get(match[1]) || 0) + 1;
+      sceneCounts.set(match[1], count);
+      return { ...scene, heading: heading.replace(/^\s*\d+-\d+/, `${match[1]}-${count}`) };
+    });
     function blockTime(block) {
       if (!Number.isFinite(Number(block.startSec))) return "";
       const start = Math.max(0, Math.round(Number(block.startSec)));
@@ -608,7 +621,7 @@
         <span>镜头剧本</span>
         <h2>${escapeHtml(script.title)}</h2>
       </div>
-      ${script.scenes.map((scene) => `<section class="scene">
+      ${visibleScenes.map((scene) => `<section class="scene">
         <h3>${escapeHtml(scene.heading)}</h3>
         ${(scene.characters || []).length ? `<p class="scene-cast">出场人物：${escapeHtml([...new Set(scene.characters || [])].join("、"))}</p>` : ""}
         <div class="scene-blocks">${(scene.blocks || []).map(renderBlock).join("")}</div>
