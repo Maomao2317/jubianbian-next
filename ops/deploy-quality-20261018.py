@@ -15,7 +15,7 @@ import time
 from urllib.request import urlopen
 
 BASE = Path(__file__).resolve().parent.parent
-BUILD = "quality-gpu-20261018"
+BUILD = "quality-gpu-20261018-r2"
 IMAGE = "jubianbian-release:" + BUILD
 SITES = [(Path('/opt/jubianbian-staging'), 'jubianbian-staging', 18000),
          (Path('/opt/jubianbian'), 'jubianbian', 8000)]

@@ -56,6 +56,22 @@ class CastEvidenceTests(unittest.TestCase):
         self.assertFalse(any(i["tag"] == "人物姓名缺少依据"
                              for i in script_quality(confirmed, "test")["issues"]))
 
+    def test_unnamed_role_relationship_and_appearance_labels_are_not_guessed_names(self):
+        for label in ("林先生", "林父", "父亲", "林大哥", "黑衣人", "保安甲", "顾医生"):
+            with self.subTest(label=label):
+                raw = episode(label)
+                raw.pop("characterProfiles")
+                script = normalize_script(raw, "未出现姓名条")
+                self.assertFalse(any(i["tag"] == "人物姓名缺少依据"
+                                     for i in script_quality(script, "test")["issues"]))
+                self.assertEqual(script["scenes"][0]["blocks"][0]["speaker"], label)
+
+    def test_two_character_personal_name_still_requires_evidence(self):
+        raw = episode("江川")
+        raw.pop("characterProfiles")
+        quality = script_quality(normalize_script(raw, "未知姓名"), "test")
+        self.assertTrue(any(i["tag"] == "人物姓名缺少依据" for i in quality["issues"]))
+
 
 if __name__ == "__main__":
     unittest.main()

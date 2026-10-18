@@ -45,6 +45,9 @@ def environment(root):
                HF_HOME=str(root / "cache/huggingface"),
                MODELSCOPE_CACHE=str(root / "cache/modelscope"),
                PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="True", OMP_NUM_THREADS="4")
+    # The mirror may not support Xet's token exchange. Plain HTTP downloads
+    # also work with the standard endpoint and reuse the same model cache.
+    env.setdefault("HF_HUB_DISABLE_XET", "1")
     if env.get("JBB_GPU_ASR_ENABLED") == "1":
         env.update(JBB_LOCAL_ASR_DEVICE="cuda", JBB_LOCAL_ASR_COMPUTE_TYPE="float16",
                    JBB_LOCAL_ASR_MODEL="small", JBB_LOCAL_ASR_CONCURRENCY="1",

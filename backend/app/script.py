@@ -2769,6 +2769,14 @@ def script_quality(
         name = character_label(profile.get("name"))
         if (re.fullmatch(r"[\u4e00-\u9fff]{2,4}", name)
                 and not _is_generic_character(name)
+                # Relationship, job and appearance labels are valid when the
+                # source never names a person; do not demand a name card for
+                # e.g. 林先生, 林父 or 黑衣人.
+                and not re.search(
+                    r"先生|女士|小姐|少爷|夫人|总裁|老师|医生|大夫|老板|保安|护士|司机|助理|秘书|"
+                    r"父亲|母亲|爸爸|妈妈|爷爷|奶奶|哥哥|姐姐|弟弟|妹妹|大哥|大姐|大叔|阿姨|"
+                    r"男子|女子|男人|女人|男孩|女孩|老人|老头|老太|妇人|少年|少女|"
+                    r"[红白黑蓝绿黄紫灰]衣|[父母爸妈爹娘哥姐弟妹爷奶]$", name)
                 and str(profile.get("firstAppearance") or "") == "首登外观/服装待核对"
                 and not any(str(profile.get(key) or "").strip()
                             for key in ("nameEvidence", "identityEvidence", "appearance", "clothing"))):
