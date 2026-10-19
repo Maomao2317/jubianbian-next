@@ -1,5 +1,30 @@
 # GPU OCR 配置与换机
 
+## 首尔迁回后恢复路由
+
+迁回时两环境的远端地址被清空。GPU 服务恢复 `ready=true`、
+`asrReady=true` 后，使用 `ops/restore-gpu-routing.py` 恢复已有 GPU
+路由；不要运行旧的整套源码覆盖部署。此工具保留每个环境当前镜像、
+版本、端口、数据卷及非 GPU 配置，只更新两种远端地址、令牌和超时。
+
+先审查、检查并推送工具，再在服务器 Git 检出仓库 fetch 同一提交，
+从该提交导出工具后运行。工具核对自身与 FETCH_HEAD，拒绝有排队、
+运行或上传任务的环境；正式环境要求同提交的测试验收记录已经通过。
+令牌只读取服务器已有的私有配置，不写入 Git。示例：
+
+```sh
+sudo python3 /tmp/restore-gpu-routing.py staging --commit <完整已推送SHA> \
+  --video /tmp/jbb-diag-video.mp4 --duration <ffprobe核对的实际秒数>
+sudo python3 /tmp/restore-gpu-routing.py production --commit <同一SHA> \
+  --video /tmp/jbb-diag-video.mp4 --duration <同一样片实际秒数>
+```
+
+验收复用服务器已有视频，在真实应用容器的独立进程并行执行 OCR/ASR，
+检查两个 GPU provider、完整采样和鉴权失败后的真实 CPU 回退。
+清空收费 API 密钥，不更新业务任务、积分或结果。私有备份与验收记录
+保存在 `/opt/jubianbian-gpu-restore-20261019/`。失败恢复原配置；若验收时
+有新任务进入，延后容器回滚以保护正在执行的任务。
+
 GPU 语音可通过 `service.env` 的 `JBB_GPU_ASR_ENABLED=1` 启用。保留 Whisper small、beam=5、原短句 VAD 和逐词时间戳，CUDA float16 推理；`status` 同时检查 `asrReady=true`。应用端另设 `JBB_ASR_REMOTE_URL`（同 OCR 地址）、`JBB_ASR_REMOTE_TOKEN`（同私有 token）和60秒超时。无损16k单声道 PCM 传输，空结果、不完整响应、故障或超时回退原 CPU 识别。ASR 启动失败不会关闭 OCR。
 
 small 模型保存在 `cache/whisper-small`，首次安装需要下载；可用 `HF_ENDPOINT` 指定镜像。安装器默认 `HF_HUB_DISABLE_XET=1`，避免镜像的 Xet 令牌交换返回401。依赖变化后在已验证环境更新 `requirements.lock`，再执行 `bundle`，将语音模型和新 wheel 一并纳入换机缓存。迁移后无需重复下载这些文件。
