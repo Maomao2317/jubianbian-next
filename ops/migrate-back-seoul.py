@@ -121,13 +121,17 @@ def prepare(token, password):
 
 
 def build(token, password):
-    bundle = fetch('config', token, password)
+    bundle = ROOT/'config'
+    if not bundle.exists():
+        bundle = fetch('config', token, password)
     release = bundle/'release'
     manifest = json.loads((release/'manifest.json').read_text())
     assert all(digest(release/p) == h for p, h in manifest['files'].items())
     assert json.loads(subprocess.check_output(['docker', 'image', 'inspect', BASE_IMAGE]))[0]['Id'] == BASE_IMAGE
     dockerfile = release/'Dockerfile.return'
-    lines = ['FROM '+BASE_IMAGE]
+    base_tag = 'jubianbian-return:verified-base'
+    run('docker', 'tag', BASE_IMAGE, base_tag)
+    lines = ['FROM '+base_tag]
     lines += ['COPY '+p+' /app/'+p for p in sorted(manifest['files'])]
     lines += ['COPY ops/verify-repair-recovery.py /app/verify-repair-recovery.py']
     dockerfile.write_text('\n'.join(lines)+'\n')
