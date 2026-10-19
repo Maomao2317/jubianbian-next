@@ -65,6 +65,8 @@ window.APP_CONFIG = {
     evidence_wait: "采集语音和字幕中",
     transcribing: "提取台词",
     vision: "分析画面与情绪",
+    repairing: "核对并补全缺失片段",
+    reviewing: "复核台词和画面内容",
     merging: "整理字幕与画面",
     exporting: "生成导出文件",
     review: "等待用户复核",

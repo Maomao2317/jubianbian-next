@@ -121,11 +121,16 @@ def merge_gap_repair(original: dict[str, Any], clip: dict[str, Any], window: dic
             copied_scene["blocks"] = blocks
             new_scenes.append(copied_scene)
             added += len(blocks)
-    result["scenes"] = [
-        {**deepcopy(scene), "blocks": [deepcopy(block)]}
-        for scene in list(result.get("scenes") or []) + new_scenes
-        for block in scene.get("blocks") or []
-    ]
+    fragments = []
+    for scene in list(result.get("scenes") or []) + new_scenes:
+        # Per-block shells allow chronological insertion. Keep their parent
+        # identity so unknown time/place labels don't turn one source scene
+        # into dozens of screenplay scenes after the blocks are restored.
+        group = scene.get("continuityGroup") or uuid4().hex
+        fragments.extend({**deepcopy(scene), "continuityGroup": group,
+                          "blocks": [deepcopy(block)]}
+                         for block in scene.get("blocks") or [])
+    result["scenes"] = fragments
     for scene in result["scenes"]:
         # The title supplies the episode number during normalization.
         scene["heading"] = re.sub(r"^\s*\d+-\d+\s*", "", str(scene.get("heading") or ""))

@@ -41,6 +41,7 @@ from .config import (
     ARK_UPLOAD_PROXY_TRIGGER_MB,
     ARK_UPLOAD_PROXY_VIDEO_BITRATE,
     ARK_RESPONSE_TIMEOUT_SECONDS,
+    ARK_STREAM_IDLE_TIMEOUT_SECONDS,
     ARK_THINKING_TYPE,
     ARK_UPLOAD_ATTEMPTS,
     ARK_UPLOAD_MAX_IN_FLIGHT,
@@ -338,7 +339,7 @@ def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
     response_id = ""
     try:
         with _ark_request_semaphore:
-            with urlopen(request, timeout=ARK_RESPONSE_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=min(ARK_RESPONSE_TIMEOUT_SECONDS, ARK_STREAM_IDLE_TIMEOUT_SECONDS)) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):

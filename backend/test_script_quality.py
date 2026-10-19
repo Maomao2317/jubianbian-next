@@ -96,11 +96,15 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 raise TimeoutError("read operation timed out")
 
         with (
-            patch.object(providers, "urlopen", return_value=DisconnectingResponse()),
+            patch.object(providers, "urlopen", return_value=DisconnectingResponse()) as create,
+            patch.object(providers, "ARK_STREAM_IDLE_TIMEOUT_SECONDS", 45),
+            patch.object(providers, "ARK_RESPONSE_TIMEOUT_SECONDS", 420),
             patch.object(providers, "_ark_poll_response", return_value=completed) as poll,
         ):
             payload = providers.ark_stream_response({"model": "test", "input": "hello"}, "key")
         poll.assert_called_once_with("resp-test", "key")
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(create.call_args.kwargs["timeout"], 45)
         self.assertEqual(payload, completed)
 
     def test_ark_poll_retries_transient_network_without_losing_response(self):

@@ -12,6 +12,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .media import default_batch_title, episode_from_filename, is_default_batch_title, title_with_episode
 from .script import apply_batch_character_continuity, normalize_script
+from .recognition_cache import restore_cached_scene_groups
 
 # Read adapters keep the API shape independent from SQLite column names.
 def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, Any]:
@@ -21,18 +22,20 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
     task["title"] = display_title
     raw_result_json = task.pop("result_json", None)
     raw_result = json.loads(raw_result_json) if include_result and raw_result_json else None
+    quality_json = task.pop("quality_json", None)
+    task["quality"] = json.loads(quality_json) if include_result and quality_json else None
     # Normalize on read as well as on generation so older tasks immediately
     # benefit from the same punctuation, VO, scene-granularity and micro-detail
     # rules without rewriting their stored source response.
     if include_result and raw_result:
         try:
+            if (task["quality"] or {}).get("contentRepair"):
+                raw_result = restore_cached_scene_groups(task["id"], raw_result)
             task["result"] = normalize_script(raw_result, display_title)
         except (ArkError, TypeError, ValueError, KeyError):
             task["result"] = raw_result
     else:
         task["result"] = None
-    quality_json = task.pop("quality_json", None)
-    task["quality"] = json.loads(quality_json) if include_result and quality_json else None
     raw_evidence = task.pop("evidence_json", None)
     task["evidence"] = json.loads(raw_evidence) if include_result and raw_evidence else None
     task["fileName"] = file_name

@@ -1063,7 +1063,9 @@ def merge_continuous_scenes(scenes: list[dict[str, Any]]) -> list[dict[str, Any]
             for key in ("location", "timeOfDay", "interiorExterior", "segmentType")
         ):
             return False
-        if (left.get("location") in {None, "", "待补充", "未知", "不明", "未标注地点"}
+        same_parent = bool(left.get("continuityGroup") and
+                           left.get("continuityGroup") == right.get("continuityGroup"))
+        if not same_parent and (left.get("location") in {None, "", "待补充", "未知", "不明", "未标注地点"}
                 or left.get("timeOfDay") in {None, "", "不明"}
                 or left.get("interiorExterior") in {None, "", "不明"}):
             return False
@@ -1085,6 +1087,8 @@ def merge_continuous_scenes(scenes: list[dict[str, Any]]) -> list[dict[str, Any]
                 previous["props"] = list(previous.get("props") or []) + scene["props"]
             previous["startSec"] = min(previous["startSec"], scene["startSec"])
             previous["endSec"] = max(previous["endSec"], scene["endSec"])
+            if previous.get("continuityGroup") != scene.get("continuityGroup"):
+                previous.pop("continuityGroup", None)
         else:
             merged.append({**scene, "blocks": list(scene.get("blocks") or [])})
     counts: dict[int, int] = {}
@@ -2104,6 +2108,8 @@ def normalize_script(script: Any, title: str) -> dict[str, Any]:
         scene["_episodeOrder"] = scene_episode
         scene["_sceneOrder"] = raw_scene_number
         scene["_inputOrder"] = index
+        if isinstance(raw_scene.get("continuityGroup"), str) and raw_scene["continuityGroup"]:
+            scene["continuityGroup"] = raw_scene["continuityGroup"]
         raw_props = raw_scene.get("props") or raw_scene.get("propsState") or raw_scene.get("items")
         if isinstance(raw_props, (list, dict)):
             # Keep only evidence-oriented item state; do not synthesize an

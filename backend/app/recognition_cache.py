@@ -12,6 +12,7 @@ import threading
 import time
 from contextlib import closing
 from pathlib import Path
+from copy import deepcopy
 from typing import Any
 
 from . import config
@@ -25,6 +26,45 @@ _next_prune = 0.0
 
 def cache_directory(task_id: str) -> Path:
     return config.DATA_DIR / "recognition-cache" / hashlib.sha256(task_id.encode()).hexdigest()
+
+
+def restore_cached_scene_groups(task_id: str, script: dict[str, Any]) -> dict[str, Any]:
+    """Recover legacy repair parent identities from retained model audits.
+
+    Only exact text/speaker/time matches within an identical setting qualify.
+    Ambiguous matches and unavailable audits leave the scene unchanged. This
+    read adapter never changes saved business data or any screenplay block.
+    """
+    def identity(block):
+        return tuple(block.get(key) for key in ("type", "text", "speaker", "startSec", "endSec"))
+
+    setting = ("location", "timeOfDay", "interiorExterior", "segmentType")
+    parents = []
+    for path in sorted(cache_directory(task_id).glob("model_*.json")):
+        if path.name != "model_initial.json" and not path.name.startswith("model_segment_"):
+            continue
+        try:
+            audit = json.loads(path.read_text(encoding="utf-8"))["data"]["normalizedScript"]
+            for index, scene in enumerate(audit.get("scenes") or []):
+                blocks = scene.get("blocks") or []
+                if len(blocks) > 1:
+                    group = hashlib.sha256(f"{task_id}:{path.name}:{index}".encode()).hexdigest()
+                    parents.append((tuple(scene.get(key) for key in setting),
+                                    {identity(block) for block in blocks}, group))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    if not parents:
+        return script
+    result = deepcopy(script)
+    for scene in result.get("scenes") or []:
+        if scene.get("continuityGroup") or not scene.get("blocks"):
+            continue
+        keys = {identity(block) for block in scene["blocks"]}
+        groups = {group for fields, blocks, group in parents
+                  if fields == tuple(scene.get(key) for key in setting) and keys <= blocks}
+        if len(groups) == 1:
+            scene["continuityGroup"] = groups.pop()
+    return result
 
 
 class RecognitionCache:

@@ -134,6 +134,10 @@ ARK_UPLOAD_MAX_IN_FLIGHT = max(
 # live container, so keep a 2-minute safety margin above the observed range.
 # This remains configurable per deployment through the environment.
 ARK_RESPONSE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_RESPONSE_TIMEOUT_SECONDS", "420")))
+# SSE can stop delivering events after the stored response is already ready.
+# Recover by its response ID promptly; this is an idle socket limit, not a
+# deadline on generation or on the existing stored-response polling budget.
+ARK_STREAM_IDLE_TIMEOUT_SECONDS = max(10.0, float(os.getenv("ARK_STREAM_IDLE_TIMEOUT_SECONDS", "45")))
 ARK_RESPONSE_POLL_SECONDS = max(1.0, float(os.getenv("ARK_RESPONSE_POLL_SECONDS", "5")))
 ARK_RESPONSE_POLL_TIMEOUT_SECONDS = max(
     ARK_RESPONSE_TIMEOUT_SECONDS,

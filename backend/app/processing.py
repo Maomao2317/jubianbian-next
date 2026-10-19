@@ -721,6 +721,8 @@ async def _run_recognizer_with_media(
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
             has_content_gaps = bool(quality.get("contentGapRanges"))
             if has_content_gaps and turbo_model and route.get("mode") not in {"lite", "lite_only"}:
+                mark_task_stage(row["id"], status="running", stage="repairing", progress_percent=72,
+                                message="正在核对并补全缺失片段")
                 script, quality, repair_usage = await repair_content_gaps(
                     path, row["title"], duration, script, evidence, route,
                     cache=prepared_video.get("_cache"),
@@ -739,6 +741,8 @@ async def _run_recognizer_with_media(
                 and bool(turbo_model)
             )
             if may_auto_review:
+                mark_task_stage(row["id"], status="running", stage="reviewing", progress_percent=78,
+                                message="正在复核台词和画面内容")
                 review_issues = _automated_review_issues(quality)
                 context = _automated_review_context(script, review_issues, quality=quality)
                 review_metadata.update({

@@ -2,9 +2,14 @@
 from collections import Counter
 from copy import deepcopy
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 from app.content_coverage import merge_gap_repair, normalize_additive_repair
 from app.script import merge_continuous_scenes, normalize_script, screenplay_output_scenes, script_to_markdown
+from app import recognition_cache
 
 
 def scene(index, start, end, *, kind="dialogue", text=None, **fields):
@@ -106,6 +111,49 @@ class SceneConsolidationTests(unittest.TestCase):
             self.assertIn(source["blocks"][0], blocks)
         self.assertEqual([b["startSec"] for b in blocks], [0, 20, 25, 35, 50])
         self.assertFalse(any("contentRepair" in b["text"] for b in blocks))
+
+    def test_repair_keeps_unknown_setting_parent_without_combining_distinct_parents(self):
+        original = normalize_script({"scenes": [scene(1, 45, 50, timeOfDay="不明") ]}, "第1集")
+        parent = original["scenes"][0]
+        parent["blocks"].extend([deepcopy(parent["blocks"][0]), deepcopy(parent["blocks"][0])])
+        for i, block in enumerate(parent["blocks"]):
+            block.update(text=f"保留原句{i}。", rawText=f"保留原句{i}。", finalText=f"保留原句{i}。",
+                         startSec=45 + i * 2, endSec=47 + i * 2)
+        clip = {"scenes": [scene(1, 0, 8, timeOfDay="不明"),
+                           scene(2, 8, 16, timeOfDay="不明")]}
+        before = deepcopy(original)
+        candidate, _ = merge_gap_repair(original, clip, {"startSec": 0, "endSec": 20}, 0, 20)
+        result = normalize_additive_repair(original, candidate, "第1集")
+        self.assertEqual(len(result["scenes"]), 3)
+        self.assertEqual(result["scenes"][-1]["blocks"], parent["blocks"])
+        self.assertEqual(original, before)
+        again = normalize_script(result, "第1集")
+        self.assertEqual(len(again["scenes"]), 3)
+        self.assertEqual(script_to_markdown({"result": result}), script_to_markdown({"result": again}))
+
+    def test_legacy_parent_recovery_requires_exact_audit_and_keeps_all_blocks(self):
+        parent = scene(1, 45, 90, timeOfDay="不明")
+        parent["blocks"] = [scene(i, 45 + i, 46 + i)["blocks"][0] for i in range(1, 25)]
+        fragments = [{**deepcopy(parent), "heading": f"1-{i+1} 不明 内 客厅",
+                      "startSec": b["startSec"], "endSec": b["endSec"], "blocks": [deepcopy(b)]}
+                     for i, b in enumerate(parent["blocks"])]
+        raw = {"scenes": fragments}
+        before = deepcopy(raw)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(recognition_cache.config, "DATA_DIR", Path(tmp)):
+            directory = recognition_cache.cache_directory("legacy")
+            directory.mkdir(parents=True)
+            (directory / "model_initial.json").write_text(json.dumps({"data": {"normalizedScript": {"scenes": [parent]}}}), encoding="utf-8")
+            grouped = recognition_cache.restore_cached_scene_groups("legacy", raw)
+            result = normalize_script(grouped, "第1集")
+            self.assertEqual(len(result["scenes"]), 1)
+            self.assertEqual(Counter(b["text"] for b in parent["blocks"]),
+                             Counter(b["text"] for b in result["scenes"][0]["blocks"]))
+            changed = deepcopy(raw)
+            changed["scenes"][1]["blocks"][0]["text"] = "不在原始审计中的文字"
+            restored = recognition_cache.restore_cached_scene_groups("legacy", changed)
+            self.assertNotIn("continuityGroup", restored["scenes"][1])
+            self.assertEqual(recognition_cache.restore_cached_scene_groups("missing", raw), raw)
+        self.assertEqual(raw, before)
 
 
 if __name__ == "__main__":
