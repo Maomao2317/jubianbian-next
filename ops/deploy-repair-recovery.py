@@ -78,12 +78,20 @@ def published_source(manifest):
     assert re.fullmatch(r'[0-9a-f]{40}', commit), 'Invalid source commit'
     assert ref.startswith('refs/heads/codex/') and '..' not in ref, 'Invalid release ref'
     repo = Path('/opt/jubianbian-github-check')
-    git = ['git', '-c', 'safe.directory='+str(repo), '-C', str(repo)]
+    git = ['git', '-c', 'safe.directory='+str(repo), '-c', 'http.version=HTTP/1.1',
+           '-c', 'http.lowSpeedLimit=1', '-c', 'http.lowSpeedTime=30', '-C', str(repo)]
     env = {k:v for k,v in os.environ.items() if k.lower() not in
            {'http_proxy', 'https_proxy', 'all_proxy'}}
     remote = subprocess.check_output(git+['remote', 'get-url', 'origin'], env=env).decode().strip()
     assert remote == 'https://github.com/Maomao2317/jubianbian-next.git', 'Unexpected release repository'
-    run(git+['fetch', '--no-tags', 'origin', ref], env=env)
+    for attempt in range(3):
+        try:
+            run(git+['fetch', '--no-tags', 'origin', ref], env=env, timeout=90)
+            break
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            if attempt == 2:
+                raise
+            print('PUBLISHED_GIT_FETCH_RETRY', attempt+1, flush=True)
     fetched = subprocess.check_output(git+['rev-parse', 'FETCH_HEAD'], env=env).decode().strip()
     assert fetched == commit, 'Pushed Git revision does not match release'
     run(git+['merge-base', '--is-ancestor', manifest['baseCommit'], commit], env=env)
@@ -110,12 +118,12 @@ def deploy(project,port,site,image,manifest,source):
     paths = sorted(ALLOWED)+['fangzhou.env','release-image.yml','.staging-deploy-hold']
     existed = {}
     for path in paths:
-        source = root/path
-        existed[path] = source.exists()
-        if source.exists():
+        original = root/path
+        existed[path] = original.exists()
+        if original.exists():
             target = backup/path
             target.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copy2(source,target)
+            shutil.copy2(original,target)
     rollback_override = backup/'rollback-compose.yml'
     rollback_override.write_text('services:\n  app:\n    image: '+rollback+'\n')
     record = dict(baseCommit=manifest['baseCommit'],patch=manifest['patch'],build=BUILD,image=image,
