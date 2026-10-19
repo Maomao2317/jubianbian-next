@@ -147,7 +147,7 @@ def freeze(password):
     original = Path('/opt/jubianbian/Caddyfile').read_text()
     guard = ('\n    @return_writes method POST PUT PATCH DELETE\n    handle @return_writes {\n'
              '        header Retry-After 120\n        respond "Server migration in progress. Please retry shortly." 503\n    }\n')
-    guarded = original.replace('\n    handle /_jbb_return_', guard+'    handle /_jbb_return_')
+    guarded = original if '@return_writes method' in original else original.replace('\n    handle /_jbb_return_', guard+'    handle /_jbb_return_')
     assert guarded.count('@return_writes method') in (2, 3)
     caddy(guarded)
     for name in VOLUMES:
@@ -155,7 +155,10 @@ def freeze(password):
             assert db.execute("select count(*) from tasks where status in ('queued','running','uploading')").fetchone()[0] == 0, 'Active tasks; defer freeze'
     run('systemctl', 'stop', 'jubianbian-staging-deploy.timer', 'jubianbian-staging-monitor.timer')
     run('docker', 'stop', '-t', '60', *[p+'-app-1' for p in PROJECTS])
-    before = json.loads(Path('/opt/jbb-migration-20261019/base-manifest.json').read_text())
+    baseline = Path('/opt/jbb-migration-20261019/base-manifest.json')
+    if not baseline.exists():
+        baseline = Path('/opt/jbb-migration-20261019/initial/manifest.json')
+    before = json.loads(baseline.read_text())
     after = {}
     changed = []
     target = ROOT/'final'
