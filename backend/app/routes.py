@@ -75,6 +75,7 @@ from .rechecks import (
     restore_recheck_snapshot,
 )
 from .script import has_screenplay_body, script_to_markdown
+from .user_view import user_events, user_task
 from .storage import (
     delete_media,
     is_object_uri,
@@ -494,10 +495,16 @@ def admin_users(request: Request, keyword: str = "", status: str = "all", limit:
     with db() as connection:
         total = connection.execute(f"SELECT COUNT(*) AS count FROM users u {where}", params).fetchone()["count"]
         rows = connection.execute(
-            f"SELECT u.id, u.email, u.name, u.role, u.is_active, u.credits, u.plan, u.created_at, u.last_login_at, (SELECT COUNT(*) FROM tasks t WHERE t.user_id = u.id) AS task_count, (SELECT COALESCE(SUM(t.credits_used), 0) FROM tasks t WHERE t.user_id = u.id AND t.status = 'done') AS total_used FROM users u {where} ORDER BY u.created_at DESC, u.id LIMIT ? OFFSET ?",
-            (*params, limit, offset),
+            f"""SELECT u.id, u.email, u.name, u.role, u.is_active, u.credits, u.plan, u.created_at, u.last_login_at,
+                (SELECT COUNT(*) FROM tasks t WHERE t.user_id = u.id) AS task_count,
+                CASE WHEN EXISTS (SELECT 1 FROM credit_ledger c WHERE c.user_id = u.id AND c.entry_type = 'consume')
+                THEN MAX(0, -(SELECT COALESCE(SUM(c.amount), 0) FROM credit_ledger c
+                              WHERE c.user_id = u.id AND c.entry_type IN ('consume', 'refund'))) / ?
+                ELSE (SELECT COALESCE(SUM(t.credits_used), 0) FROM tasks t WHERE t.user_id = u.id)
+                END AS total_used FROM users u {where} ORDER BY u.created_at DESC, u.id LIMIT ? OFFSET ?""",
+            (float(POINTS_PER_MINUTE), *params, limit, offset),
         ).fetchall()
-    return {"items": [{**dict(row), "isActive": bool(row["is_active"]), "createdAt": row["created_at"], "lastLoginAt": row["last_login_at"], "taskCount": int(row["task_count"]), "totalUsed": int(row["total_used"])} for row in rows], "total": int(total), "limit": limit, "offset": offset}
+    return {"items": [{**dict(row), "isActive": bool(row["is_active"]), "createdAt": row["created_at"], "lastLoginAt": row["last_login_at"], "taskCount": int(row["task_count"]), "totalUsed": float(row["total_used"])} for row in rows], "total": int(total), "limit": limit, "offset": offset}
 
 
 async def admin_user_status(request: Request, user_id: str) -> dict[str, Any]:
@@ -885,7 +892,7 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         # created task must be visible first. Keep the id as a deterministic
         # tie-breaker for tasks created in the same timestamp tick.
         rows = connection.execute(f"SELECT {list_columns} FROM tasks {where} ORDER BY created_at DESC, id DESC", params).fetchall()
-    return [row_to_task(row, include_result=False) for row in rows]
+    return [user_task(row_to_task(row, include_result=False)) for row in rows]
 
 
 def task_detail(request: Request, task_id: str) -> dict[str, Any]:
@@ -893,7 +900,7 @@ def task_detail(request: Request, task_id: str) -> dict[str, Any]:
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
     task["events"] = task_events(task_id)
-    return task
+    return user_task(task)
 
 
 def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
@@ -962,7 +969,7 @@ async def approve_tasks_batch(request: Request) -> dict[str, Any]:
 def task_event_list(request: Request, task_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
     if not task_row(task_id, current_user(request)["id"]):
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
-    return task_events(task_id, limit)
+    return user_events(task_events(task_id, limit))
 
 
 async def create_upload_batch(request: Request) -> dict[str, Any]:
@@ -1262,7 +1269,7 @@ async def create_task(
         REQUEST_ID.get(),
     )
     background.add_task(process_task, task_id)
-    return get_task(task_id, user["id"])  # type: ignore[return-value]
+    return user_task(get_task(task_id, user["id"]))  # type: ignore[arg-type]
 
 
 async def create_tasks_batch(
@@ -1334,7 +1341,7 @@ async def create_tasks_batch(
     result = []
     for item in prepared:
         record_task_event(item["id"], "created", "任务已进入队列", status="queued", stage="queued", progress_percent=4)
-        result.append(get_task(item["id"], user["id"]))
+        result.append(user_task(get_task(item["id"], user["id"])))
     return {"tasks": result, "count": len(result)}
 
 
@@ -1373,7 +1380,7 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
     record_task_event(task_id, "retry", "任务已重新排队", status="queued", stage="queued", progress_percent=4)
     logger.info("task_retry task_id=%s request_id=%s", task_id, REQUEST_ID.get())
     background.add_task(process_task, task_id)
-    return get_task(task_id, user_id)  # type: ignore[return-value]
+    return user_task(get_task(task_id, user_id))  # type: ignore[arg-type]
 
 
 def delete_task(request: Request, task_id: str) -> Response:

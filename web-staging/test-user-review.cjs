@@ -12,13 +12,15 @@ const node = selector => {
 const calls = [];
 const script = { title: "第1集", scenes: [{ heading: "客厅", blocks: [{ type: "dialogue", speaker: "林长风", text: "我们出发吧。" }] }] };
 const task = { id: "one", status: "review", stage: "review", title: "第1集", fileName: "1.mp4", batchId: "batch", createdAt: new Date().toISOString(), result: script,
-  quality: { blockingIssues: [{ severity: "P0", description: "请核对缺失画面" }] } };
+  quality: { issues: [{ severity: "重点核对", description: "00:32–00:38：这段画面中的字幕或文字可能有遗漏，建议回看原视频核对。" }] } };
 const api = {
   getTask: async id => ({ ...task, id }),
-  getAdminTask: async id => ({ ...task, id, episodes: [task, { ...task, id: "two" }] }),
+  getAdminTask: async id => ({ ...task, id, quality: { blockingIssues: [{ severity: "P0", description: "独立 OCR 覆盖率 0%" }] }, episodes: [task, { ...task, id: "two" }] }),
   approveTask: async id => { calls.push(["single", id]); task.status = "done"; },
   approveTasks: async ids => { calls.push(["batch", ...ids]); },
   listTasks: async () => [], getQueueSummary: async () => ({}),
+  getAdminOverview: async () => ({ users: {}, tasks: {} }),
+  getAdminUsers: async () => ({ total: 1, items: [{ id: "user", name: "test", credits: 1330, totalUsed: 73, taskCount: 999 }] }),
 };
 const context = vm.createContext({
   window: { addEventListener() {}, AppAPI: api },
@@ -30,7 +32,7 @@ const context = vm.createContext({
 context.window.location = context.location;
 vm.runInContext(fs.readFileSync(path.join(__dirname, "js/config.js"), "utf8"), context);
 const source = fs.readFileSync(path.join(__dirname, "js/app.js"), "utf8");
-vm.runInContext(source.replace("  boot();", "  window.testUI = { normalizeUserTask, statusBadge, taskRow, batchRow, renderDetail, openUserReview, scriptPreview, state };"), context);
+vm.runInContext(source.replace("  boot();", "  window.testUI = { normalizeUserTask, statusBadge, taskRow, batchRow, renderDetail, openUserReview, scriptPreview, renderAdmin, renderHeader, state };"), context);
 const ui = context.window.testUI;
 const click = async (action, id) => {
   const button = { dataset: { action, id }, textContent: "操作", closest: () => ({ querySelectorAll: () => [] }) };
@@ -64,7 +66,9 @@ const click = async (action, id) => {
   ui.state.taskId = "one";
   ui.renderDetail();
   assert.match(node("#main").innerHTML, /我们出发吧/);
-  assert.match(node("#main").innerHTML, /P0.*请核对缺失画面/);
+  assert.match(node("#main").innerHTML, /重点核对.*00:32–00:38/);
+  assert.doesNotMatch(node("#main").innerHTML, /ASR|OCR|覆盖率|P0/);
+  assert.deepEqual(Array.from(context.window.APP_CONFIG.statusFilters, item => item.id), ["all", "queued", "running", "done"]);
   assert.match(node("#main").innerHTML, /确认复核并开放下载/);
   assert.doesNotMatch(node("#main").innerHTML, /data-action="download"/);
   const group = { id: "batch", title: "测试剧", tasks: [task, { ...task, id: "two" }] };
@@ -84,7 +88,18 @@ const click = async (action, id) => {
   assert.match(node("#modalRoot").innerHTML, /任务详情/);
   assert.match(node("#modalRoot").innerHTML, /我们出发吧/);
   assert.match(node("#modalRoot").innerHTML, /选择剧集/);
+  assert.match(node("#modalRoot").innerHTML, /P0.*独立 OCR 覆盖率 0%/);
+  assert.match(node("#modalRoot").innerHTML, /消耗 0.0 分钟/);
   assert.doesNotMatch(node("#modalRoot").innerHTML, /data-action="admin-approve"|免费重试|免费重新复核/);
   assert.doesNotMatch(source, /admin-done-recheck|admin-review-retry/);
+  ui.renderHeader();
+  assert.doesNotMatch(node("#header").innerHTML, /核心识别测试版/);
+  ui.state.view = "admin";
+  ui.state.adminTab = "users";
+  ui.state.profile = { role: "admin" };
+  await ui.renderAdmin();
+  assert.match(node("#main").innerHTML, /1330.0<\/strong> 积分/);
+  assert.match(node("#main").innerHTML, /73.0 \/ 266.0 分钟/);
+  assert.doesNotMatch(node("#main").innerHTML, /999 \/|调整分钟额度/);
   console.log("User review UI checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

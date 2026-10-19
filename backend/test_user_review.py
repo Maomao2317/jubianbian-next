@@ -134,3 +134,57 @@ class UserReviewTests(unittest.TestCase):
         self.add_task("active", status="running")
         self.assertEqual([task["id"] for task in routes.list_tasks(None, status="running")], ["active"])
         self.assertEqual({task["id"] for task in routes.list_tasks(None, status="review")}, {"one", "two"})
+
+    def test_customer_copy_hides_internal_diagnostics_and_admin_retains_them(self):
+        issue = {"severity": "P0", "tag": "疑似漏台词片段", "description": "独立 ASR OCR 模型覆盖率 0%",
+                 "startSec": 32.1, "endSec": 38, "scene": 1, "block": 2}
+        with auth_store.db() as c:
+            c.execute("UPDATE tasks SET quality_json=?, provider='ark', model='internal-model' WHERE id='one'",
+                      (json.dumps({"issues": [issue], "blockingIssues": [issue], "evidenceSources": {"ASR": "vendor"}}),))
+        task_store.record_task_event("one", "review_required", "独立 OCR ASR 模型覆盖率 0%", status="review", stage="review")
+        detail = routes.task_detail(None, "one")
+        self.assertEqual(detail["status"], "review")
+        self.assertEqual(len(detail["quality"]["issues"]), 1)
+        self.assertIn("00:32–00:38", detail["quality"]["issues"][0]["description"])
+        self.assertIn("第 1 场第 2 段", detail["quality"]["issues"][0]["description"])
+        self.assertIn("对白可能有遗漏", detail["quality"]["issues"][0]["description"])
+        for data in (detail, routes.list_tasks(None), routes.task_event_list(None, "one", 100)):
+            text = json.dumps(data, ensure_ascii=False)
+            for internal in ("ASR", "OCR", "internal-model", "覆盖率", "P0", "vendor"):
+                self.assertNotIn(internal, text)
+        with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
+            admin = routes.admin_task_detail(None, "one")
+            self.assertEqual(admin["quality"]["issues"], [issue])
+            self.assertEqual(admin["model"], "internal-model")
+            self.assertIn("独立 OCR", admin["events"][0]["message"])
+        with self.assertRaises(HTTPException):
+            routes.download_task(None, "one", "md")
+        self.approve(["one"])
+        self.assertIn("我们出发吧", routes.download_task(None, "one", "md").body.decode())
+
+    def test_unknown_issue_never_echoes_raw_text_and_body_is_preserved(self):
+        from app.user_view import user_issue, user_result
+        self.assertNotIn("OCR", str(user_issue({"tag": "new-OCR-provider", "description": "secret-model"})))
+        self.assertIn("尚未完成核对", user_issue({"tag": "独立音频转写缺失"})["description"])
+        script = {**self.script, "model": "secret", "evidence": {"OCR": "secret"}}
+        script["scenes"][0]["blocks"][0]["evidence"] = "ASR"
+        public = user_result(script)
+        self.assertEqual(public["scenes"][0]["blocks"][0]["text"], "我们出发吧。")
+        self.assertNotIn("secret", str(public))
+        self.assertNotIn("ASR", str(public))
+
+    def test_admin_minutes_use_net_consumption_without_converting_balance(self):
+        with auth_store.db() as c:
+            c.execute("INSERT INTO users (id,email,password_hash,name,credits,created_at) VALUES ('owner','test@example.invalid','unused','test',1330,?)", (auth_store.now_iso(),))
+        with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
+            # Legacy accounts with no consumption ledger retain task-minute fallback, including review.
+            self.assertEqual(routes.admin_users(None, limit=20, offset=0)["items"][0]["totalUsed"], 4)
+            with auth_store.db() as c:
+                for amount, kind in ((-25, "consume"), (10, "refund"), (100, "recharge")):
+                    c.execute("INSERT INTO credit_ledger (user_id,amount,balance_after,entry_type,created_at) VALUES ('owner',?,1330,?,?)",
+                              (amount, kind, auth_store.now_iso()))
+                c.execute("DELETE FROM tasks WHERE id='two'")
+            user = routes.admin_users(None, keyword="test@", status="active", limit=20, offset=0)["items"][0]
+            self.assertEqual(user["credits"], 1330)
+            self.assertEqual(user["totalUsed"], 3)
+            self.assertEqual(user["taskCount"], 1)
