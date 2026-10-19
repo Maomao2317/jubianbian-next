@@ -67,9 +67,9 @@ def seal(name, password):
 
 
 def fetch(name, token, password):
-    url = 'https://jubianbian.com/_jbb_return_'+token+'/'+name
-    curl = ['curl', '--fail', '--silent', '--show-error', '--resolve',
-            'jubianbian.com:443:82.156.205.129']
+    # Encrypted archives also work when the source hostname's TLS is blocked.
+    url = 'http://82.156.205.129/_jbb_return_'+token+'/'+name
+    curl = ['curl', '--fail', '--silent', '--show-error']
     info = json.loads(subprocess.check_output(curl+['--max-time', '30', url+'.json']))
     enc = ROOT/(name+'.enc')
     run(*curl, '--retry', '3', '-C', '-', '-o', enc, url+'.enc')
@@ -144,7 +144,7 @@ def freeze(password):
     guard = ('\n    @return_writes method POST PUT PATCH DELETE\n    handle @return_writes {\n'
              '        header Retry-After 120\n        respond "Server migration in progress. Please retry shortly." 503\n    }\n')
     guarded = original.replace('\n    handle /_jbb_return_', guard+'    handle /_jbb_return_')
-    assert guarded.count('@return_writes method') == 2
+    assert guarded.count('@return_writes method') in (2, 3)
     caddy(guarded)
     for name in VOLUMES:
         with sqlite3.connect('file:'+str(volume(name)/'jubianbian.sqlite3')+'?mode=ro', uri=True) as db:
@@ -257,13 +257,26 @@ def forward():
     print('BEIJING_FORWARDS_TO_SINGLE_SEOUL_WRITER', flush=True)
 
 
+def transfer_http(token):
+    text = Path('/opt/jubianbian/Caddyfile').read_text()
+    assert 'http://82.156.205.129' not in text
+    text += ('\nhttp://82.156.205.129 {\n    handle /_jbb_return_'+token+'/* {\n'
+             '        uri strip_prefix /_jbb_return_'+token+'\n'
+             '        reverse_proxy 172.18.0.1:19020\n    }\n'
+             '    handle {\n        respond 404\n    }\n}\n')
+    caddy(text)
+    print('ENCRYPTED_ARCHIVE_HTTP_ROUTE_READY', flush=True)
+
+
 if __name__ == '__main__':
     os.umask(0o077)
     ROOT.mkdir(mode=0o700, exist_ok=True)
     action = sys.argv[1]
-    if action in ['prepare', 'build', 'freeze', 'restore']:
+    if action in ['prepare', 'build', 'freeze', 'restore', 'transfer-http']:
         credentials = json.loads(sys.stdin.read())
-        if action == 'freeze':
+        if action == 'transfer-http':
+            transfer_http(credentials['token'])
+        elif action == 'freeze':
             freeze(credentials['password'])
         else:
             {'prepare': prepare, 'build': build, 'restore': restore}[action](credentials['token'], credentials['password'])
