@@ -28,6 +28,7 @@ FILES = {'backend/app/routes.py', 'backend/app/user_view.py', 'backend/test_user
          'web-staging/index.html', 'web-staging/js/app.js', 'web-staging/js/config.js',
          'web-staging/test-user-review.cjs'}
 SELF = 'ops/deploy-customer-copy-staging.py'
+SUPPORT_FILES = set()
 
 
 def run(args, **kwargs):
@@ -93,13 +94,13 @@ def main(commit):
     assert git('ls-remote', 'origin', ref).decode().split()[0] == commit, 'Commit must be pushed first'
     run(['git', '-c', 'safe.directory=' + str(REPO), '-C', REPO, 'merge-base', '--is-ancestor', BASE_COMMIT, commit])
     changed = set(git('diff', '--name-only', BASE_COMMIT, commit).decode().splitlines())
-    assert changed == FILES | {SELF}, 'Unexpected release scope'
+    assert changed == FILES | {SELF} | SUPPORT_FILES, 'Unexpected release scope'
     digests = {}
-    for path in FILES | {SELF}:
+    for path in FILES | {SELF} | SUPPORT_FILES:
         data = (BASE / path).read_bytes()
         assert data == git('show', commit + ':' + path), path + ': differs from pushed source'
         digests[path] = hashlib.sha256(data).hexdigest()
-        if path == SELF:
+        if path not in FILES:
             continue
         exists = bool(git('ls-tree', BASE_COMMIT, '--', path).strip())
         if exists:
@@ -158,9 +159,12 @@ def main(commit):
         replaced = True
         compose(BUILD, 'up', '-d', '--no-build', '--no-deps', 'app')
         record['health'] = health(BUILD)
-        for path in ['index.html', 'js/app.js', 'js/config.js']:
+        for relative in sorted(FILES):
+            if not relative.startswith('web-staging/') or relative.endswith('.cjs'):
+                continue
+            path = relative.removeprefix('web-staging/')
             with urlopen('http://127.0.0.1:18000/' + path, timeout=5) as response:
-                assert hashlib.sha256(response.read()).hexdigest() == digests['web-staging/' + path]
+                assert hashlib.sha256(response.read()).hexdigest() == digests[relative]
         current = inspect(PROJECT)
         current_env = environment(current)
         assert {k: v for k, v in current_env.items() if k != 'JBB_BUILD_VERSION'} == {k: v for k, v in old_env.items() if k != 'JBB_BUILD_VERSION'}

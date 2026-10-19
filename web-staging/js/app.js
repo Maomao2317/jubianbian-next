@@ -116,6 +116,10 @@
     return Math.max(1, Math.ceil(seconds / 60));
   }
 
+  function mobileUploadDisabled() {
+    return Boolean(window.matchMedia?.("(max-width: 620px)").matches);
+  }
+
   function parseHash() {
     const parts = (location.hash || "#/tasks").replace(/^#\/?/, "").split("/");
     state.view = parts[0] === "task" && parts[1] ? "detail" : (parts[0] === "admin" ? "admin" : "list");
@@ -247,6 +251,20 @@
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近任务</h2><p>平台实时处理概况</p></div><span>实时数据</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>消耗</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => { const label = item.status === "review" ? "待用户复核" : item.status === "done" ? "成功" : item.status === "failed" ? "失败" : item.status === "running" ? "进行中" : "排队中"; return `<tr><td><button class="row-link" data-action="admin-review" data-id="${item.id}">${escapeHtml(item.title || item.id)}</button></td><td>${escapeHtml(item.email || item.user_id || item.name || "-")}</td><td>${label}</td><td>${item.credits_used || 0} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`; }).join("") || `<tr><td colspan="5">暂无任务</td></tr>`}</tbody></table></div></div>`;
       }
       $("#main").innerHTML = `<section class="admin-page" aria-busy="false"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户额度和任务处理</p></div><a class="secondary-btn admin-back-btn" href="#/tasks"><span aria-hidden="true">←</span>返回工作台</a></div><div class="admin-nav">${nav}</div>${body}<p class="admin-note">分析、转化漏斗、留存、Eval、码管理暂保留入口，后续版本开放。</p></section>`;
+      // Keep the same table and actions on every screen; mobile cards use its headers as labels.
+      document.querySelectorAll(".admin-table-wrap table").forEach(table => {
+        const labels = Array.from(table.querySelectorAll("thead th"), header => header.textContent.trim());
+        table.querySelectorAll("tbody tr").forEach(row => {
+          Array.from(row.children).forEach((cell, index) => {
+            if (cell.colSpan !== 1) return;
+            cell.setAttribute("data-label", labels[index] || "");
+            const value = document.createElement("div");
+            value.className = "admin-cell-value";
+            while (cell.firstChild) value.appendChild(cell.firstChild);
+            cell.appendChild(value);
+          });
+        });
+      });
     } catch (error) {
       if (requestId !== state.adminRequestId) return;
       document.querySelector(".admin-page")?.setAttribute("aria-busy", "false");
@@ -516,6 +534,7 @@
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
         <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
+          <p class="mobile-upload-note">手机端可查看已有任务。上传视频和新建任务请使用电脑端。</p>
           <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
           ${state.queue.blocked ? `<div class="queue-blocked-notice">当前排队预计超过 10 小时，暂时不能继续上传，请稍后再试。</div>` : state.queue.waitMinutes ? `<div class="queue-summary">当前预计排队 ${formatEta(state.queue.waitMinutes)} · 可同时处理 ${state.queue.workerConcurrency || 8} 个视频</div>` : ""}
           <div class="toolbar">
@@ -1339,7 +1358,7 @@
       return;
     }
     if (action === "logout") { await logout(); return; }
-    if (action === "create") { if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; } openCreateModal(); }
+    if (action === "create") { if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; } if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; } openCreateModal(); }
     if (action === "close-modal") $("#modalRoot").innerHTML = "";
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
@@ -1389,6 +1408,7 @@
       rerenderCreateModal(titleValue);
     }
     if (action === "submit-task") {
+      if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; }
       const files = state.upload.files || (state.upload.file ? [state.upload.file] : []);
       const title = $("#taskTitle") ? $("#taskTitle").value.trim() : "";
       if (!files.length || !state.upload.durationSec) return;

@@ -10,6 +10,8 @@ const node = selector => {
   return nodes.get(selector);
 };
 const calls = [];
+const prompts = [];
+let mobile = false;
 const script = { title: "第1集", scenes: [{ heading: "客厅", blocks: [{ type: "dialogue", speaker: "林长风", text: "我们出发吧。" }] }] };
 const task = { id: "one", status: "review", stage: "review", title: "第1集", fileName: "1.mp4", batchId: "batch", createdAt: new Date().toISOString(), result: script,
   quality: { issues: [{ severity: "重点核对", description: "00:32–00:38：这段画面中的字幕或文字可能有遗漏，建议回看原视频核对。" }] } };
@@ -21,9 +23,11 @@ const api = {
   listTasks: async () => [], getQueueSummary: async () => ({}),
   getAdminOverview: async () => ({ users: {}, tasks: {} }),
   getAdminUsers: async () => ({ total: 1, items: [{ id: "user", name: "test", credits: 1330, totalUsed: 73, taskCount: 999 }] }),
+  adjustAdminCredits: async (id, payload) => { calls.push(["credit", id, { ...payload }]); },
+  createTask: async () => { throw new Error("Mobile upload must not call the API"); },
 };
 const context = vm.createContext({
-  window: { addEventListener() {}, AppAPI: api },
+  window: { addEventListener() {}, AppAPI: api, matchMedia: () => ({ matches: mobile }), prompt: () => prompts.shift() ?? null },
   document: { addEventListener: (event, handler) => { (handlers[event] ||= []).push(handler); },
     querySelector: node, querySelectorAll: () => [] },
   location: { protocol: "http:" }, Intl, Date, Map, Set, console, setTimeout: () => 1,
@@ -97,9 +101,29 @@ const click = async (action, id) => {
   ui.state.view = "admin";
   ui.state.adminTab = "users";
   ui.state.profile = { role: "admin" };
+  ui.renderHeader();
+  assert.match(node("#header").innerHTML, /class="credit-pill"[\s\S]*class="text-btn admin-link" href="#\/admin"/);
+  ui.state.profile = { role: "user" };
+  ui.renderHeader();
+  assert.doesNotMatch(node("#header").innerHTML, /admin-link/);
+  ui.state.profile = { role: "admin" };
   await ui.renderAdmin();
   assert.match(node("#main").innerHTML, /1330.0<\/strong> 积分/);
   assert.match(node("#main").innerHTML, /73.0 \/ 266.0 分钟/);
   assert.doesNotMatch(node("#main").innerHTML, /999 \/|调整分钟额度/);
+  mobile = true;
+  const beforeUpload = calls.length;
+  await click("create");
+  await click("submit-task");
+  assert.equal(calls.length, beforeUpload);
+  assert.match(node("#toast").textContent, /请使用电脑端/);
+  assert.doesNotMatch(node("#modalRoot").innerHTML, /create-modal/);
+  prompts.push("2", "手机端测试充值");
+  await click("admin-credit", "user");
+  assert.deepEqual(calls.at(-1), ["credit", "user", { rmb_amount: 2, reason: "手机端测试充值" }]);
+  const afterRecharge = calls.length;
+  prompts.push("2", null);
+  await click("admin-credit", "user");
+  assert.equal(calls.length, afterRecharge); // Cancelling never changes a balance.
   console.log("User review UI checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });
