@@ -74,9 +74,11 @@ def main():
             target = context/path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(git('show', args.commit+':'+path))
-        (context/'Dockerfile').write_text('FROM '+prod['Image']+'\nCOPY backend /app/backend\nCOPY web-staging /app/web-staging\n')
+        base_tag = 'jubianbian-app:stability-base-'+args.commit[:12]
+        subprocess.run(['docker', 'tag', prod['Image'], base_tag], check=True)
+        (context/'Dockerfile').write_text('FROM '+base_tag+'\nCOPY backend /app/backend\nCOPY web-staging /app/web-staging\n')
         tag = 'jubianbian-app:stability-'+args.commit[:12]
-        subprocess.run(['docker', 'build', '--network=none', '-t', tag, context], check=True)
+        subprocess.run(['docker', 'build', '--pull=false', '--network=none', '-t', tag, context], check=True)
         image = json.loads(output(['docker', 'image', 'inspect', tag]))[0]['Id']
         with (release/'backend-tests.log').open('wb') as log:
             subprocess.run(['docker', 'run', '--rm', '--network', 'none', '-e',
