@@ -276,6 +276,35 @@ def matching_character_counts(reference: str, candidate: str) -> tuple[int, int,
     return matched, len(reference), len(candidate)
 
 
+def ordered_segment_coverages(segments: list[dict[str, Any]], candidate: str) -> list[int]:
+    """Allocate screenplay characters once, in transcript order, for timing drift.
+
+    Matching every sentence against the entire screenplay independently lets
+    the same occurrence hide a missing repetition. Keep one ordered alignment
+    and require enough exact occurrences before relaxing time checks on repeats.
+    """
+    reference = "".join(segment["text"] for segment in segments)
+    matches = SequenceMatcher(None, reference, candidate).get_matching_blocks()
+    result, offset, match_index = [], 0, 0
+    for segment in segments:
+        text = segment["text"]
+        end = offset + len(text)
+        while match_index < len(matches) and matches[match_index].a + matches[match_index].size <= offset:
+            match_index += 1
+        matched = 0
+        for index in range(match_index, len(matches)):
+            item = matches[index]
+            if item.a >= end:
+                break
+            matched += max(0, min(end, item.a + item.size) - max(offset, item.a))
+        coverage = round(100 * matched / len(text)) if text else 100
+        if text and reference.count(text) > candidate.count(text) and reference.count(text) > 1:
+            coverage = 0
+        result.append(coverage)
+        offset = end
+    return result
+
+
 def subtitle_aligned_evidence(
     script: dict[str, Any],
     evidence: dict[str, Any] | None,
@@ -3044,6 +3073,7 @@ def script_quality(
     transcript_reference = ""
     ocr_reference = ""
     transcript_segments: list[dict[str, Any]] = []
+    transcript_alignment_segments: list[dict[str, Any]] = []
     ocr_segments: list[dict[str, Any]] = []
     evidence_problem_ranges: list[dict[str, Any]] = []
     evidence_sources: dict[str, dict[str, Any]] = {}
@@ -3081,6 +3111,7 @@ def script_quality(
                 }
                 if source.get("kind") == "audio" and item.get("type") == "transcript_segment":
                     transcript_segments.append(segment)
+                    transcript_alignment_segments.append(segment)
                     for word in item.get("words") or []:
                         if isinstance(word, dict) and evidence_comparison_text(word.get("text")) in {"咋", "啊", "呵", "嗯", "哦", "哎", "唉", "呃", "哈"}:
                             transcript_segments.append({**word, "text": evidence_comparison_text(word["text"])})
@@ -3186,6 +3217,10 @@ def script_quality(
     # Overall coverage can remain deceptively high when one short line is
     # missing from a long clip. Check each time-anchored ASR segment as well so
     # the reviewer can seek directly to the likely omission.
+    ordered_coverages = {
+        id(segment): coverage for segment, coverage in zip(
+            transcript_alignment_segments, ordered_segment_coverages(transcript_alignment_segments, spoken_candidate))
+    }
     for segment in transcript_segments:
         segment_text = str(segment.get("text") or "")
         if not segment_text:
@@ -3203,17 +3238,11 @@ def script_quality(
         matched, segment_size, _ = matching_character_counts(segment_text, candidate)
         segment_coverage = round(100 * matched / segment_size) if segment_size else 100
         # Provider timestamps are approximate and often drift across a scene
-        # boundary. For a normal-length segment, a verbatim match elsewhere
-        # in the ordered screenplay is evidence of timing drift rather than a
-        # missing line; keep short one- or two-character beats strict so they
-        # are still recovered and checked individually.
-        if len(segment_text) >= 4 and segment_text in spoken_candidate:
+        # boundary. Accept an ordered match, rather than reusing text from a
+        # different occurrence. Short beats keep their strict time checks.
+        drift_threshold = 100 if len(segment_text) < 6 else 72
+        if len(segment_text) >= 4 and ordered_coverages.get(id(segment), 0) >= drift_threshold:
             continue
-        if len(segment_text) >= 6:
-            global_matched, global_size, _ = matching_character_counts(segment_text, spoken_candidate)
-            global_coverage = round(100 * global_matched / global_size) if global_size else 0
-            if global_coverage >= 72:
-                continue
         if segment_coverage >= 72:
             continue
         filler = evidence_comparison_text(segment_text) in {"咋", "啊", "呵", "嗯", "哦", "哎", "唉", "呃", "哈"}

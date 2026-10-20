@@ -3,14 +3,11 @@ from __future__ import annotations
 import json
 import gzip
 import math
-import threading
-import time
 from urllib.request import Request, build_opener, ProxyHandler
 from . import config
+from .remote_circuit import remote_attempt
 
 PROTOCOL = "jbb-asr-1"
-_lock = threading.Lock()
-_retry_after = 0.0
 
 
 def settings():
@@ -55,13 +52,9 @@ def validate_result(value, duration: float, samples: int):
 
 
 def request_asr(pcm: bytes, duration: float):
-    global _retry_after
-    with _lock:
-        if time.monotonic() < _retry_after:
-            raise RuntimeError("GPU ASR cooling down")
     if not config.ASR_REMOTE_TOKEN or not pcm or len(pcm) % 2 or len(pcm) > 3600 * 32000:
         raise ValueError("invalid ASR request")
-    try:
+    with remote_attempt("asr", config.ASR_REMOTE_URL, config.ASR_REMOTE_TOKEN, config.ASR_REMOTE_TIMEOUT_SECONDS):
         # Speech PCM compresses well; transport remains bit-for-bit lossless.
         payload = gzip.compress(pcm, compresslevel=1)
         request = Request(config.ASR_REMOTE_URL + "/asr", data=payload, method="POST", headers={
@@ -75,7 +68,3 @@ def request_asr(pcm: bytes, duration: float):
         if len(raw) > 4_000_000:
             raise ValueError("oversized ASR response")
         return validate_result(json.loads(raw), duration, len(pcm) // 2)
-    except Exception:
-        with _lock:
-            _retry_after = time.monotonic() + 30
-        raise

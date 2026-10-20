@@ -1,5 +1,6 @@
 """GPU ASR keeps complete audio, original decoding settings and CPU recovery."""
 import copy
+from contextlib import nullcontext
 import gzip
 import io
 import json
@@ -64,7 +65,7 @@ class RemoteAsrTests(unittest.TestCase):
         response = io.BytesIO(json.dumps(self.result()).encode())
         opener = Mock()
         opener.open.return_value = response
-        with (patch.object(remote_asr, "_retry_after", 0),
+        with (patch.object(remote_asr, "remote_attempt", return_value=nullcontext()),
               patch.object(remote_asr.config, "ASR_REMOTE_TOKEN", "private-test-token"),
               patch.object(remote_asr.config, "ASR_REMOTE_URL", "http://private"),
               patch.object(remote_asr, "build_opener", return_value=opener)):

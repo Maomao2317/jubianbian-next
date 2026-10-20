@@ -2,16 +2,13 @@
 from __future__ import annotations
 import json
 import math
-import threading
-import time
 from pathlib import Path
 from urllib.request import Request, build_opener, ProxyHandler
 from .config import (OCR_REMOTE_URL, OCR_REMOTE_TOKEN, OCR_REMOTE_TIMEOUT_SECONDS,
                      OCR_SAMPLE_INTERVAL_SECONDS, OCR_MAX_FRAMES)
+from .remote_circuit import remote_attempt
 
 PROTOCOL = "jbb-ocr-1"
-_lock = threading.Lock()
-_retry_after = 0.0
 
 
 def validate_result(value, duration: float, expected_frames: int) -> dict:
@@ -40,13 +37,9 @@ def validate_result(value, duration: float, expected_frames: int) -> dict:
 
 
 def request_ocr(path: Path, duration: float, expected_frames: int) -> dict:
-    global _retry_after
-    with _lock:
-        if time.monotonic() < _retry_after:
-            raise RuntimeError("GPU OCR cooling down")
     if not OCR_REMOTE_TOKEN:
         raise ValueError("GPU OCR token missing")
-    try:
+    with remote_attempt("ocr", OCR_REMOTE_URL, OCR_REMOTE_TOKEN, OCR_REMOTE_TIMEOUT_SECONDS):
         with path.open("rb") as video:
             request = Request(OCR_REMOTE_URL + "/ocr", data=video, method="POST", headers={
                 "Authorization": "Bearer " + OCR_REMOTE_TOKEN,
@@ -59,7 +52,3 @@ def request_ocr(path: Path, duration: float, expected_frames: int) -> dict:
             if len(raw) > 4_000_000:
                 raise ValueError("oversized OCR response")
             return validate_result(json.loads(raw), duration, expected_frames)
-    except Exception:
-        with _lock:
-            _retry_after = time.monotonic() + 30
-        raise

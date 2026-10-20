@@ -193,7 +193,7 @@ class RecognitionCheckpointTests(unittest.TestCase):
             patch.object(providers, "object_storage_enabled", return_value=True),
             patch.object(providers, "ark_account_key", return_value="key"),
             patch.object(providers, "_ark_upload_proxy", return_value=(self.original, self.root / "temporary")) as encode,
-            patch.object(providers, "upload_recognition_proxy", side_effect=OSError("object network unavailable")),
+            patch.object(providers, "upload_recognition_proxy", side_effect=TimeoutError("视频传输超时")),
             patch.object(providers, "_ark_upload_prepared_video", return_value=("file", "key")) as files,
             patch.object(providers, "ark_wait_for_file"),
         ):
@@ -239,17 +239,16 @@ class RecognitionCheckpointTests(unittest.TestCase):
         self.assertTrue(self.original.exists())
 
     def test_streaming_storage_put_never_overwrites_original_key(self):
-        client = Mock()
         with (patch.object(storage, "OBJECT_STORAGE_BUCKET", "bucket"),
               patch.object(storage, "OBJECT_STORAGE_PREFIX", "videos"),
-              patch.object(storage, "_client", return_value=client)):
+              patch.object(storage, "_bounded_transfer") as transfer):
             uri = storage.upload_recognition_proxy(self.original, "fingerprint")
-        args = client.put_object.call_args.kwargs
-        self.assertTrue(args["Key"].startswith("videos/recognition/"))
-        self.assertNotEqual(args["Key"], "videos/task.mp4")
-        self.assertEqual(args["ContentLength"], self.original.stat().st_size)
-        self.assertIn(args["Key"], uri)
-        self.assertTrue(args["Body"].closed)
+        operation, bucket, key, path, deadline = transfer.call_args.args
+        self.assertEqual((operation, bucket, path), ("upload", "bucket", self.original))
+        self.assertTrue(key.startswith("videos/recognition/"))
+        self.assertNotEqual(key, "videos/task.mp4")
+        self.assertIn(key, uri)
+        self.assertEqual(deadline, storage.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)
 
 
 class EvidenceReuseTests(unittest.TestCase):

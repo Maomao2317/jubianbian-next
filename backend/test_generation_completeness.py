@@ -26,6 +26,31 @@ def audio_evidence(blocks):
 
 
 class GenerationCompletenessTests(unittest.TestCase):
+    def test_repeated_line_elsewhere_cannot_cover_an_omitted_occurrence(self):
+        repeated = "这个秘密千万不要告诉别人"
+        speech = [line(repeated, 1, 3), line("我先出去看看情况", 15, 18),
+                  line(repeated, 50, 53), line("你一定要平安回来", 70, 73)]
+        script = normalize_script({"scenes": [scene("1-1", [speech[0], speech[1], speech[3]])]}, "第1集")
+        quality = script_quality(script, "test", audio_evidence(speech))
+        missing = [issue for issue in quality["issues"] if issue["tag"] == "疑似漏台词片段"]
+        self.assertTrue(any(issue.get("startSec") == 50 and issue["severity"] == "P0" for issue in missing))
+        self.assertFalse(quality_gate(quality)[0])
+        self.assertTrue(processing._needs_automated_content_review(quality))
+
+    def test_unique_line_with_timestamp_drift_is_not_a_false_omission(self):
+        speech = [line("这个秘密千万不要告诉别人", 1, 3), line("你一定要平安回来", 50, 53)]
+        script = normalize_script({"scenes": [scene("1-1", [
+            {**speech[0], "startSec": 8, "endSec": 10}, speech[1]])]}, "第1集")
+        quality = script_quality(script, "test", audio_evidence(speech))
+        self.assertNotIn("疑似漏台词片段", [issue["tag"] for issue in quality["issues"]])
+
+    def test_every_repeated_occurrence_with_timing_drift_can_still_be_matched(self):
+        speech = [line("这个秘密千万不要告诉别人", 1, 3), line("这个秘密千万不要告诉别人", 50, 53)]
+        script = normalize_script({"scenes": [scene("1-1", [
+            {**speech[0], "startSec": 8, "endSec": 10}, speech[1]])]}, "第1集")
+        quality = script_quality(script, "test", audio_evidence(speech))
+        self.assertNotIn("疑似漏台词片段", [issue["tag"] for issue in quality["issues"]])
+
     def test_five_minute_seventeen_camera_beats_become_five_scenes_without_lost_lines(self):
         locations = ["客厅"] * 4 + ["厨房"] * 4 + ["院子"] * 3 + ["街道"] * 3 + ["卧室"] * 3
         raw = {"characters": ["甲"], "scenes": [

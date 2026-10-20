@@ -6,6 +6,9 @@ import shutil
 import tempfile
 import hashlib
 import time
+import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
@@ -13,6 +16,9 @@ from urllib.parse import quote, unquote, urlparse
 from .config import (
     DATA_DIR,
     DOWNLOAD_CONCURRENCY,
+    MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS,
+    MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+    MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS,
     ARK_UPLOAD_MAX_IN_FLIGHT,
     OBJECT_STORAGE_ACCESS_KEY,
     OBJECT_STORAGE_ADDRESSING_STYLE,
@@ -73,7 +79,7 @@ def _client(*, delivery: bool = False) -> Any:
             signature_version="s3v4",
             s3={"addressing_style": OBJECT_STORAGE_ADDRESSING_STYLE},
             connect_timeout=10 if delivery else 60,
-            read_timeout=60,
+            read_timeout=30 if delivery else 60,
             retries={"total_max_attempts": 2, "mode": "standard"} if delivery else {"max_attempts": 4, "mode": "adaptive"},
         ),
     )
@@ -105,7 +111,7 @@ def media_info(uri: str | Path) -> dict[str, Any] | None:
     if is_object_uri(uri):
         try:
             bucket, key = _object_parts(uri)
-            payload = _client().head_object(Bucket=bucket, Key=key)
+            payload = _client(delivery=True).head_object(Bucket=bucket, Key=key)
             return {"size": int(payload.get("ContentLength") or 0), "etag": str(payload.get("ETag") or "").strip('"')}
         except Exception:
             return None
@@ -128,12 +134,46 @@ def upload_recognition_proxy(path: Path, identity: str) -> str:
     if not 0 < size <= ARK_VIDEO_SAFE_BYTES:
         raise ValueError("识别副本超过安全大小上限")
     key = "/".join(part for part in (OBJECT_STORAGE_PREFIX, "recognition", hashlib.sha256(identity.encode()).hexdigest() + ".mp4") if part)
-    # A streaming body avoids another 40 MiB multipart allocation. These
-    # objects inherit the bucket's private policy; only scoped URLs are shared.
-    with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT), path.open("rb") as body:
-        _client(delivery=True).put_object(Bucket=OBJECT_STORAGE_BUCKET, Key=key, Body=body,
-                                          ContentLength=size, ContentType="video/mp4")
+    # Kill and reap the transport before allowing Files fallback. A timed-out
+    # thread would otherwise keep uploading while the fallback runs alongside it.
+    with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT,
+                  timeout=MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS):
+        _bounded_transfer("upload", OBJECT_STORAGE_BUCKET, key, path,
+                          MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)
     return f"s3://{OBJECT_STORAGE_BUCKET}/{quote(key, safe='/')}"
+
+
+def _bounded_transfer(operation: str, bucket: str, key: str, path: Path, timeout: float) -> None:
+    payload = json.dumps(dict(operation=operation, bucket=bucket, key=key, path=str(path.resolve())))
+    try:
+        result = subprocess.run([sys.executable, "-m", "app.storage"], input=payload,
+                                text=True, encoding="utf-8", capture_output=True, timeout=timeout,
+                                cwd=Path(__file__).resolve().parents[1])
+    except subprocess.TimeoutExpired:
+        # subprocess.run kills and waits for its child, including socket stalls
+        # during continuously progressing transfers (not covered by read_timeout).
+        raise TimeoutError("视频传输超时，系统将自动尝试恢复") from None
+    if result.returncode:
+        # Never expose SDK output: it may contain signed URLs or credentials.
+        raise OSError("视频传输暂时失败，系统将自动尝试恢复")
+
+
+def _transfer_main() -> None:
+    """Isolated transport; credentials remain in inherited environment only."""
+    value = json.load(sys.stdin)
+    client = _client(delivery=True)
+    if value["operation"] == "upload":
+        path = Path(value["path"])
+        with path.open("rb") as body:
+            client.put_object(Bucket=value["bucket"], Key=value["key"], Body=body,
+                              ContentLength=path.stat().st_size, ContentType="video/mp4")
+    elif value["operation"] == "download":
+        from boto3.s3.transfer import TransferConfig
+        client.download_file(value["bucket"], value["key"], value["path"],
+                             Config=TransferConfig(max_concurrency=1, use_threads=False,
+                                                   num_download_attempts=2))
+    else:
+        raise ValueError("Unsupported media operation")
 
 
 def delete_media(uri: str | Path) -> None:
@@ -152,13 +192,17 @@ def materialize_media(uri: str | Path, task_id: str) -> tuple[Path, Path | None]
     temp_dir = Path(tempfile.mkdtemp(prefix=f"jbb-media-{task_id[:18]}-", dir=DATA_DIR))
     target = temp_dir / "source.mp4"
     try:
-        from boto3.s3.transfer import TransferConfig
-        with capacity("media-download", DOWNLOAD_CONCURRENCY) as queue_ms:
+        with capacity("media-download", DOWNLOAD_CONCURRENCY,
+                      timeout=MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS) as queue_ms:
             started = time.perf_counter()
-            _client().download_file(bucket, key, str(target), Config=TransferConfig(max_concurrency=1, use_threads=False))
-            logger.info("media_step task_id=%s operation=download queue_ms=%.1f duration_ms=%.1f", task_id, queue_ms, (time.perf_counter() - started) * 1000)
-        if not target.is_file() or target.stat().st_size <= 0:
-            raise OSError("对象存储下载为空")
+            completed = False
+            try:
+                _bounded_transfer("download", bucket, key, target, MEDIA_DOWNLOAD_TIMEOUT_SECONDS)
+                if not target.is_file() or target.stat().st_size <= 0:
+                    raise OSError("对象存储下载为空")
+                completed = True
+            finally:
+                logger.info("media_step task_id=%s operation=download queue_ms=%.1f duration_ms=%.1f completed=%s", task_id, queue_ms, (time.perf_counter() - started) * 1000, completed)
         return target, temp_dir
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -168,3 +212,10 @@ def materialize_media(uri: str | Path, task_id: str) -> tuple[Path, Path | None]
 def cleanup_materialized(temp_dir: Path | None) -> None:
     if temp_dir is not None:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    try:
+        _transfer_main()
+    except Exception:
+        sys.exit(1)
