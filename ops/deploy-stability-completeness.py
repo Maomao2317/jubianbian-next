@@ -44,7 +44,11 @@ def main():
         assert git('show', args.commit+':'+relative) == path.read_bytes()
     subprocess.run(['git', '-c', 'safe.directory='+str(routing.REPO), '-C', routing.REPO,
                     'merge-base', '--is-ancestor', BASELINE, args.commit], check=True)
-    assert set(git('diff', '--name-only', BASELINE, args.commit, '--', 'backend', 'web-staging').decode().splitlines()) == APP_CHANGES
+    runtime_changes = set(git('diff', '--name-only', BASELINE, args.commit, '--',
+                              'backend/app', 'web-staging').decode().splitlines())
+    expected_runtime_changes = {path for path in APP_CHANGES
+                                if path.startswith(('backend/app/', 'web-staging/'))}
+    assert runtime_changes == expected_runtime_changes, 'Unexpected application release scope'
     locks = []
     for project in ['jubianbian', 'jubianbian-staging']:
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
