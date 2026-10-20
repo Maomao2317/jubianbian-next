@@ -8,13 +8,37 @@ import unittest
 from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import auth_store, config, processing, providers, recognition_cache, rechecks, task_store
 from app.errors import ArkError, is_account_balance_error
 
 
 class AccountBalanceTests(unittest.TestCase):
+    def test_upload_capacity_timeout_requeues_without_refund_or_snapshot_restore(self):
+        row = {
+            "id": "task", "title": "episode", "file_name": "episode.mp4",
+            "attempts": 0, "user_id": "user", "credits_used": 5,
+        }
+        failure = ArkError("upload slot busy", provider_code="video_upload_capacity_timeout")
+        with (
+            patch.object(processing, "task_row", return_value=row),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(processing, "run_recognizer", new_callable=AsyncMock, side_effect=failure),
+            patch.object(processing, "update_task") as update,
+            patch.object(processing, "record_task_event") as event,
+            patch.object(processing, "_refund_task_once") as refund,
+            patch.object(processing, "has_pending_recheck") as pending_recheck,
+        ):
+            asyncio.run(processing.process_task("task"))
+
+        self.assertEqual(update.call_count, 1)
+        self.assertEqual(update.call_args.kwargs["status"], "queued")
+        self.assertEqual(update.call_args.kwargs["attempts"], 1)
+        self.assertEqual(event.call_args.args[1], "retry")
+        refund.assert_not_called()
+        pending_recheck.assert_not_called()
+
     def test_explicit_balance_messages_and_codes_are_recognized(self):
         for status, message, code in (
             (403, "The request failed because your account has an overdue balance.", ""),

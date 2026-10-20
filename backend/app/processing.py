@@ -480,7 +480,12 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
         return True
     if is_account_balance_error(error):
         return True
-    if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
+    provider_code = str(getattr(error, "provider_code", ""))
+    if provider_code == "video_upload_capacity_timeout":
+        # Admission failed before a request was sent, so the bounded task retry
+        # cannot duplicate an accepted upload or model request.
+        return False
+    if provider_code.startswith(("video_proxy_", "video_source_", "video_upload_")):
         return True
     text = str(error).casefold()
     status_code = getattr(error, "status_code", None)
@@ -526,11 +531,14 @@ def _media_progress_callback(task_id: str):
     last_stage = ""
     last_percent = -1
     last_write = 0.0
+    stage_started = time.monotonic()
     stages = {
         "compression_queued": (16, "等待服务器压缩"),
         "compressing": (16, "正在服务器压缩视频"),
+        "video_upload_wait": (32, "正在等待识别上传通道"),
         "video_upload": (32, "正在提交识别视频"),
         "video_upload_retry": (32, "识别视频上传重试中"),
+        "video_upload_capacity_timeout": (32, "识别上传通道繁忙，系统将自动恢复"),
         "video_read_retry": (62, "正在重新读取识别视频"),
         "video_preparing": (36, "正在准备识别视频"),
         "evidence_wait": (40, "正在等待语音和字幕采集完成"),
@@ -538,12 +546,19 @@ def _media_progress_callback(task_id: str):
     }
 
     def progress(stage: str, percent: int | None) -> None:
-        nonlocal last_stage, last_percent, last_write
+        nonlocal last_stage, last_percent, last_write, stage_started
+        now = time.monotonic()
+        changed_stage = stage != last_stage
+        if changed_stage:
+            if last_stage:
+                logger.info(
+                    "task_media_stage_duration task_id=%s stage=%s duration_ms=%.1f",
+                    task_id, last_stage, (now - stage_started) * 1000,
+                )
+            last_stage, last_percent, stage_started = stage, -1, now
         if stage not in stages:
             return
-        now = time.monotonic()
         value = max(0, min(100, int(percent or 0)))
-        changed_stage = stage != last_stage
         if not changed_stage and (value <= last_percent or (value < 100 and now - last_write < 1.0)):
             return
         overall, message = stages[stage]
@@ -555,7 +570,7 @@ def _media_progress_callback(task_id: str):
                     stage_progress_percent=value if stage == "compressing" else None)
         if changed_stage:
             record_task_event(task_id, "stage", message, status="running", stage=stage, progress_percent=overall)
-        last_stage, last_percent, last_write = stage, value, now
+        last_percent, last_write = value, now
 
     return progress
 

@@ -76,6 +76,20 @@ class CompressionProgressTests(unittest.TestCase):
         self.assertEqual(update.call_args_list[2].kwargs["progress_percent"], 19)
         self.assertIsNone(update.call_args.kwargs["stage_progress_percent"])
 
+    def test_upload_stage_duration_log_is_scoped_to_task_id(self):
+        with (patch.object(processing.time, "monotonic", side_effect=[0, .1, .5]),
+              patch.object(processing, "logger") as log,
+              patch.object(processing, "update_task"),
+              patch.object(processing, "record_task_event")):
+            callback = processing._media_progress_callback("task-123")
+            callback("video_upload_wait", None)
+            callback("video_upload", None)
+        self.assertTrue(any(
+            call.args[0] == "task_media_stage_duration task_id=%s stage=%s duration_ms=%.1f"
+            and call.args[1:3] == ("task-123", "video_upload_wait")
+            for call in log.info.call_args_list
+        ))
+
     def test_migration_api_round_trip_and_stale_progress_reset(self):
         database = "file:jbb-compression-progress?mode=memory&cache=shared"
 

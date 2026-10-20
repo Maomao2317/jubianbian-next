@@ -293,6 +293,41 @@ class EvidenceReuseTests(unittest.TestCase):
 
 
 class UploadBudgetTests(unittest.TestCase):
+    def test_capacity_wait_is_retryable_but_ambiguous_upload_failures_are_not(self):
+        waiting = ArkError("upload slot busy", provider_code="video_upload_capacity_timeout")
+        ambiguous = ArkError("connection ended after send", provider_code="video_upload_retry_exhausted")
+        unreadable = ArkError("source missing", provider_code="video_source_unreadable")
+        self.assertFalse(processing._is_non_retryable_provider_error(waiting))
+        self.assertTrue(processing._is_non_retryable_provider_error(ambiguous))
+        self.assertTrue(processing._is_non_retryable_provider_error(unreadable))
+
+    def test_upload_body_capacity_wait_has_a_deadline_and_is_retryable(self):
+        slot = Mock()
+        slot.acquire.return_value = False
+        callback = Mock()
+        path = Path("proxy.mp4")
+        with (patch.object(providers, "_ark_upload_body_semaphore", slot),
+              patch.object(providers.time, "monotonic", side_effect=[5, 5])):
+            with self.assertRaises(ArkError) as caught:
+                with providers._ark_upload_body_capacity(path, callback, deadline=10):
+                    self.fail("capacity was unexpectedly acquired")
+        self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
+        self.assertEqual(slot.acquire.call_args.kwargs["timeout"], 5)
+        self.assertEqual([call.args[0] for call in callback.call_args_list],
+                         ["video_upload_wait", "video_upload_capacity_timeout"])
+
+    def test_expired_first_upload_budget_is_retryable_without_sending(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "proxy.mp4"
+            path.write_bytes(b"video")
+            with (patch.object(providers.time, "monotonic", return_value=5),
+                  patch.object(providers, "ark_http") as request):
+                with self.assertRaises(ArkError) as caught:
+                    providers._ark_upload_prepared_video(path, "key", 1, deadline=4)
+        self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
+        self.assertFalse(processing._is_non_retryable_provider_error(caught.exception))
+        request.assert_not_called()
+
     def test_total_budget_overrides_old_three_attempt_240_second_configuration(self):
         clock = [0.0]
         timeouts = []

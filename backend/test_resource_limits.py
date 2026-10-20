@@ -25,6 +25,17 @@ def hold_slot(directory, ready):
 
 
 class SharedCapacityTests(unittest.TestCase):
+    def test_upload_cooldown_timeout_is_classified_as_pre_request_capacity_wait(self):
+        with (patch.object(providers.provider_budget, "wait_cooldown", side_effect=TimeoutError),
+              patch.object(providers, "urlopen") as request,
+              patch.object(providers, "_ark_http_capacity") as capacity):
+            with self.assertRaises(ArkError) as caught:
+                providers.ark_http("POST", "/files", api_key="key", upload=True,
+                                   upload_deadline=time.monotonic() + .1)
+        self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
+        request.assert_not_called()
+        capacity.assert_not_called()
+
     def test_other_process_waits_and_crashed_owner_releases_lock(self):
         context = multiprocessing.get_context("spawn")
         with tempfile.TemporaryDirectory() as root:
@@ -65,7 +76,7 @@ class SharedCapacityTests(unittest.TestCase):
             with self.assertRaises(ArkError) as caught:
                 providers.ark_http("POST", "/files", api_key="key", upload=True,
                                    upload_deadline=time.monotonic() + .1)
-            self.assertEqual(caught.exception.provider_code, "video_upload_retry_exhausted")
+            self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
             request.assert_not_called()
 
     def test_stream_recovery_keeps_shared_slot_until_poll_finishes(self):
