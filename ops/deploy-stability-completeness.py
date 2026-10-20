@@ -154,13 +154,24 @@ def main():
                  if line.removeprefix('export ').partition('=')[0].strip() != 'JBB_BUILD_VERSION']
         envfile.write_text('\n'.join(lines+['JBB_BUILD_VERSION='+BUILD])+'\n')
         envfile.chmod(0o600)
-        override = 'services:\n  app:\n    image: '+prepared['image']+'\n    environment:\n'
-        override += ''.join('      '+key+': "'+value+'"\n' for key,value in DEFAULTS.items())
-        (root/'release-image.yml').write_text(override)
+        # Earlier releases may supply settings solely through this override.
+        # Snapshot the effective environment so replacing the file cannot drop
+        # those settings. Escape Compose interpolation and keep secrets private.
+        pinned_env = {**old_env, **DEFAULTS, 'JBB_BUILD_VERSION': BUILD}
+        override = {'services': {'app': {'image': prepared['image'], 'environment': {
+            key: value.replace('$', '$$') for key, value in pinned_env.items()
+        }}}}
+        override_file = root/'release-image.yml'
+        override_file.touch(mode=0o600, exist_ok=True)
+        override_file.chmod(0o600)
+        override_file.write_text(json.dumps(override, ensure_ascii=True, indent=2)+'\n')
         (root/'.staging-deploy-hold').write_text('Pinned '+BUILD+'; source '+args.commit+'; backup '+str(backup)+'\n')
         planned = json.loads(output(command+['config', '--format', 'json'], env=process_env))
-        planned_env = {k:str(v) for k,v in planned['services']['app']['environment'].items()}
-        assert all(old_env.get(k) == v for k,v in planned_env.items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'), 'Unrelated configuration changed'
+        # Compose's rendered config keeps escaped dollars; the container gets
+        # the literal value after one interpolation escape is removed.
+        planned_env = {k:str(v).replace('$$', '$')
+                       for k,v in planned['services']['app']['environment'].items()}
+        assert planned_env == pinned_env, 'Effective configuration changed unexpectedly'
         assert planned_env['JBB_BUILD_VERSION'] == BUILD and planned['services']['app']['image'] == prepared['image']
         assert all(planned_env.get(k) == v for k, v in DEFAULTS.items())
         routing.assert_idle(project)
