@@ -23,7 +23,7 @@ def _claim_next_task(connection, active_users: Counter, last_user: str | None):
     # scanned and transferred the same large queue while choosing one task.
     rows = connection.execute(
         """SELECT task.id, task.user_id
-           FROM (SELECT DISTINCT user_id FROM tasks
+           FROM (SELECT DISTINCT user_id FROM tasks INDEXED BY idx_tasks_ready_user
                  WHERE status = 'queued' AND stage = 'queued') AS owner
            JOIN tasks AS task ON task.id = (
                SELECT ready.id FROM tasks AS ready

@@ -103,6 +103,7 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
         connection.execute(
             "CREATE TABLE tasks (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER)"
         )
+        connection.execute("CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id) WHERE status = 'queued' AND stage = 'queued'")
         connection.execute(
             "INSERT INTO tasks VALUES ('task', 'user', 'queued', 'queued', '1', '', 0, 0, NULL, NULL, 0)"
         )
@@ -163,6 +164,8 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 created_at TEXT, updated_at TEXT, progress_percent INTEGER,
                 attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER
             );
+            CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id)
+              WHERE status = 'queued' AND stage = 'queued';
             CREATE TABLE users (id TEXT PRIMARY KEY, credits INTEGER);
             CREATE TABLE credit_ledger (
                 user_id TEXT, amount INTEGER, balance_after INTEGER,
@@ -206,6 +209,7 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         connection.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, user_id TEXT)")
+        connection.execute("CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id) WHERE status = 'queued' AND stage = 'queued'")
         names = [f"{index:02d}" for index in range(1, 18)]
         connection.executemany("INSERT INTO tasks VALUES (?, 'queued', 'queued', ?, '', 0, 'user')", [(name, name) for name in names])
         connection.commit()
@@ -258,6 +262,7 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         connection.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, user_id TEXT)")
+        connection.execute("CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id) WHERE status = 'queued' AND stage = 'queued'")
 
         @contextmanager
         def database():

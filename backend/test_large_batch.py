@@ -34,7 +34,7 @@ class LargeBatchTests(unittest.TestCase):
                 progress_percent INTEGER, error TEXT, created_at TEXT, updated_at TEXT,
                 batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER
             );
-            CREATE INDEX idx_ready ON tasks(user_id, created_at, id)
+            CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id)
               WHERE status = 'queued' AND stage = 'queued';
             CREATE TABLE task_events (
                 id INTEGER PRIMARY KEY, task_id TEXT, event_type TEXT, status TEXT,

@@ -168,6 +168,7 @@ class FairSchedulingTests(unittest.TestCase):
         self.connection = sqlite3.connect(":memory:")
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT)")
+        self.connection.execute("CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id) WHERE status = 'queued' AND stage = 'queued'")
         self.addCleanup(self.connection.close)
 
     def enqueue(self, user, count, stage="queued"):

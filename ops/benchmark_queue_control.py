@@ -17,9 +17,11 @@ def current_query():
 
 def run():
     query = current_query()
+    unhinted_query = query.replace(" FROM tasks INDEXED BY idx_tasks_ready_user", " FROM tasks", 1)
+    assert unhinted_query != query, "expected a forced ready-queue index"
     baseline = "SELECT id, user_id FROM tasks WHERE status = 'queued' AND stage = 'queued' ORDER BY created_at, id"
     results = []
-    for size, owners in [(100, 1), (999, 1), (999, 10), (10000, 100)]:
+    for size, owners, uploading in [(100, 1, 0), (999, 1, 0), (999, 10, 0), (10000, 100, 0), (1000, 100, 50000)]:
         with sqlite3.connect(":memory:") as connection:
             connection.row_factory = sqlite3.Row
             connection.executescript("""
@@ -31,12 +33,16 @@ def run():
                 CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id)
                   WHERE status = 'queued' AND stage = 'queued';
             """)
-            connection.executemany("INSERT INTO tasks VALUES (?,?,'queued','queued',?)", [
-                (f"task-{index:06}", f"user-{index % owners:03}", "2026-10-15T00:00:00Z") for index in range(size)
+            connection.executemany("INSERT INTO tasks VALUES (?,?,?,?,?)", [
+                (f"task-{index:06}", f"user-{index % owners:03}", "queued", "queued", "2026-10-15T00:00:00Z")
+                for index in range(size)
+            ] + [
+                (f"upload-{index:06}", f"upload-user-{index % owners:03}", "queued", "uploading", "2026-10-15T00:00:00Z")
+                for index in range(uploading)
             ])
             measurements = {}
             expected = None
-            for label, sql in [("previous", baseline), ("current", query)]:
+            for label, sql in [("baseline", baseline), ("unhinted", unhinted_query), ("indexed", query)]:
                 samples = []
                 for _ in range(31):
                     start = time.perf_counter()
@@ -50,8 +56,9 @@ def run():
                 assert heads == expected, "FIFO heads changed"
                 measurements[label + "_median_ms"] = round(statistics.median(samples), 3)
                 measurements[label + "_rows_fetched"] = len(rows)
-            results.append({"queued": size, "users": owners, **measurements,
-                            "plan": [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + query)]})
+            results.append({"queued": size, "users": owners, "uploading": uploading, **measurements,
+                            "unhinted_plan": [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + unhinted_query)],
+                            "indexed_plan": [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + query)]})
     print(json.dumps(results, indent=2))
 
 
