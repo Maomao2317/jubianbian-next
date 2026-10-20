@@ -30,13 +30,18 @@ def main():
         new_quality = script_quality(deepcopy(new_script), 'audit', deepcopy(evidence))
         slowest = max(slowest, time.monotonic() - tick)
         def issues(quality):
-            return Counter((x.get('severity'), x.get('tag'), x.get('startSec'), x.get('endSec'))
-                           for x in quality.get('issues', []))
+            def signatures(items):
+                return Counter((x.get('severity'), x.get('tag'), x.get('startSec'), x.get('endSec'))
+                               for x in items)
+            # Display issues are capped at 100; include the complete blocking
+            # list without counting its overlap with display issues twice.
+            return signatures(quality.get('issues', [])) | signatures(quality.get('blockingIssues', []))
         old, new = issues(old_quality), issues(new_quality)
         counts['checked'] += 1
         counts['withEvidence'] += bool(evidence)
         counts['stricterTasks'] += bool(new - old)
         counts['fewerIssueTasks'] += bool(old - new)
+        counts['displayCappedTasks'] += len(old_quality.get('issues', [])) == 100 or len(new_quality.get('issues', [])) == 100
         for key, count in (new - old).items():
             added[str(key[1])] += count
         for key, count in (old - new).items():

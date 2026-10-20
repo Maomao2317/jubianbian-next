@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 from urllib.request import urlopen
+from urllib.parse import quote
 
 BASELINE = '5447b05a79786cbdb17bb76746e3946cd4f5e3cc'
 BUILD = 'stability-completeness-20261020-r1'
@@ -176,7 +177,7 @@ def main():
         print(args.step, verify_files(project, manifest), flush=True)
         for relative, digest in manifest.items():
             if relative.startswith('web-staging/') and not relative.endswith('.cjs'):
-                with urlopen('http://127.0.0.1:'+str(port)+'/'+relative.removeprefix('web-staging/'), timeout=5) as response:
+                with urlopen('http://127.0.0.1:'+str(port)+'/'+quote(relative.removeprefix('web-staging/'), safe='/'), timeout=5) as response:
                     assert hashlib.sha256(response.read()).hexdigest() == digest
         smoke = "import tempfile; from pathlib import Path; from app import remote_circuit as r; from unittest.mock import patch; t=tempfile.TemporaryDirectory(); g=r.RemoteCircuit(Path(t.name)); p=patch.object(r,'circuit',g); p.start(); q=patch.object(r,'_probe',side_effect=TimeoutError()).start();\ntry:\n with r.remote_attempt('asr','http://offline','fixture',1): raise AssertionError('not admitted')\nexcept TimeoutError: pass\ntry:\n with r.remote_attempt('asr','http://offline','fixture',1): raise AssertionError('not admitted')\nexcept r.CircuitOpen: print('CPU_FALLBACK_GATE_VERIFIED')\nassert q.call_count==1\nt.cleanup()"
         print(output(['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', project+'-app-1', 'python', '-c', smoke]).decode().strip(), flush=True)
