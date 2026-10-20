@@ -13,8 +13,8 @@ import subprocess
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = 'a2b769c63f14ef2acb21d15cead4cab5b6a7e1ce'
-BUILD = 'worker-recovery-20261020-r1'
+BASELINE = '2fccb7d'
+BUILD = 'worker-recovery-20261020-r2'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
@@ -22,10 +22,7 @@ DEFAULTS = {'JBB_MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS': '600',
             'JBB_MEDIA_DOWNLOAD_TIMEOUT_SECONDS': '300',
             'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '90',
             'JBB_GPU_CIRCUIT_COOLDOWN_SECONDS': '30'}
-APP_CHANGES = {'backend/app/processing.py', 'backend/app/providers.py',
-               'backend/app/worker.py', 'backend/test_account_balance.py',
-               'backend/test_batch_concurrency.py', 'backend/test_recognition_cache.py',
-               'backend/test_resource_limits.py', 'backend/test_video_proxy.py'}
+APP_CHANGES = {'backend/app/worker.py'}
 
 
 def main():
