@@ -20,6 +20,187 @@ def sixteen_lane_settings():
 
 
 class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_scan_retries_a_temporary_database_error(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE tasks (id TEXT, status TEXT, updated_at TEXT)")
+        connection.commit()
+        scans = 0
+        scan_completed = asyncio.Event()
+
+        @contextmanager
+        def database():
+            nonlocal scans
+            scans += 1
+            if scans == 1:
+                raise sqlite3.OperationalError("temporary database lock")
+            with connection:
+                yield connection
+            scan_completed.set()
+
+        with (patch.object(worker, "db", database),
+              patch.object(worker, "WORKER_CONCURRENCY", 1),
+              patch.object(worker, "_expire_incomplete_uploads", AsyncMock()),
+              patch.object(worker, "_claim_next_task", return_value=None),
+              patch.object(worker.logger, "exception")):
+            running = asyncio.create_task(worker.run_worker())
+            try:
+                await asyncio.wait_for(scan_completed.wait(), 2)
+                self.assertGreaterEqual(scans, 2)
+                self.assertFalse(running.done())
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                connection.close()
+
+    async def test_cleanup_and_queue_poll_errors_do_not_stop_worker(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE tasks (id TEXT, status TEXT, updated_at TEXT)")
+        connection.commit()
+
+        @contextmanager
+        def database():
+            with connection:
+                yield connection
+
+        claim_calls = 0
+        task_started = asyncio.Event()
+
+        def claim(*_args):
+            nonlocal claim_calls
+            claim_calls += 1
+            if claim_calls == 1:
+                raise sqlite3.OperationalError("temporary queue lock")
+            if claim_calls == 2:
+                return "task", "user"
+            return None
+
+        async def process(_task_id):
+            task_started.set()
+
+        with (patch.object(worker, "db", database),
+              patch.object(worker, "WORKER_CONCURRENCY", 1),
+              patch.object(worker, "_expire_incomplete_uploads", AsyncMock(
+                  side_effect=[sqlite3.OperationalError("temporary cleanup lock"), None])),
+              patch.object(worker, "_claim_next_task", side_effect=claim),
+              patch.object(worker, "record_task_event"),
+              patch.object(worker, "process_task", side_effect=process),
+              patch.object(worker.logger, "exception")):
+            running = asyncio.create_task(worker.run_worker())
+            try:
+                await asyncio.wait_for(task_started.wait(), 2)
+                self.assertGreaterEqual(claim_calls, 2)
+                self.assertFalse(running.done())
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                connection.close()
+
+    async def test_cancelled_early_task_is_requeued_without_stopping_worker(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER)"
+        )
+        connection.execute(
+            "INSERT INTO tasks VALUES ('task', 'user', 'queued', 'queued', '1', '', 0, 0, NULL, NULL, 0)"
+        )
+        connection.commit()
+
+        @contextmanager
+        def database():
+            with connection:
+                yield connection
+
+        second_started = asyncio.Event()
+        finish_second = asyncio.Event()
+        calls = 0
+        child_tasks = []
+
+        async def process(task_id):
+            nonlocal calls
+            child_tasks.append(asyncio.current_task())
+            calls += 1
+            if calls == 1:
+                raise asyncio.CancelledError()
+            second_started.set()
+            await finish_second.wait()
+            with connection:
+                connection.execute(
+                    "UPDATE tasks SET status = 'done', stage = 'done' WHERE id = ?",
+                    (task_id,),
+                )
+
+        with (patch.object(worker, "db", database),
+              patch.object(worker, "WORKER_CONCURRENCY", 1),
+              patch.object(worker, "_expire_incomplete_uploads", AsyncMock()),
+              patch.object(worker, "record_task_event"),
+              patch.object(worker, "process_task", side_effect=process)):
+            running = asyncio.create_task(worker.run_worker())
+            try:
+                await asyncio.wait_for(second_started.wait(), 2)
+                row = connection.execute("SELECT status, stage, attempts FROM tasks WHERE id = 'task'").fetchone()
+                self.assertEqual(tuple(row), ("running", "queued", 1))
+                self.assertFalse(running.done())
+                self.assertEqual(calls, 2)
+                finish_second.set()
+                await asyncio.wait_for(child_tasks[-1], 2)
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                finish_second.set()
+                await asyncio.gather(*child_tasks, return_exceptions=True)
+                connection.close()
+
+    async def test_startup_recovers_abandoned_paid_task_without_requeueing_it(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT,
+                created_at TEXT, updated_at TEXT, progress_percent INTEGER,
+                attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER
+            );
+            CREATE TABLE users (id TEXT PRIMARY KEY, credits INTEGER);
+            CREATE TABLE credit_ledger (
+                user_id TEXT, amount INTEGER, balance_after INTEGER,
+                entry_type TEXT, reason TEXT, created_at TEXT
+            );
+            CREATE TABLE task_recheck_snapshots (
+                id INTEGER PRIMARY KEY, task_id TEXT, snapshot_json TEXT,
+                state TEXT, created_at TEXT, resolved_at TEXT
+            );
+            INSERT INTO tasks VALUES ('task', 'user', 'running', 'vision', '1', '1', 62, 0, NULL, NULL, 3);
+            INSERT INTO users VALUES ('user', 10);
+            """
+        )
+
+        @contextmanager
+        def database():
+            with connection:
+                yield connection
+
+        with (patch.object(worker, "db", database),
+              patch.object(worker, "WORKER_CONCURRENCY", 1),
+              patch.object(worker, "_expire_incomplete_uploads", AsyncMock()),
+              patch.object(worker, "record_task_event"),
+              patch.object(worker, "process_task", new_callable=AsyncMock) as process):
+            running = asyncio.create_task(worker.run_worker())
+            try:
+                await asyncio.sleep(0)
+                row = connection.execute("SELECT status, stage, credits_used FROM tasks WHERE id = 'task'").fetchone()
+                self.assertEqual(tuple(row), ("failed", "failed", 0))
+                self.assertEqual(connection.execute("SELECT credits FROM users WHERE id = 'user'").fetchone()[0], 25)
+                ledger_rows = connection.execute("SELECT amount, entry_type FROM credit_ledger").fetchall()
+                self.assertEqual([tuple(row) for row in ledger_rows], [(15, "refund")])
+                process.assert_not_awaited()
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                connection.close()
+
     async def test_sixteen_episodes_run_and_seventeenth_waits_for_a_free_slot(self):
         settings = sixteen_lane_settings()
         connection = sqlite3.connect(":memory:")
@@ -130,6 +311,66 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
                     event.set()
                 await asyncio.gather(*child_tasks, return_exceptions=True)
                 connection.close()
+
+
+class WorkerRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER)"
+        )
+        self.connection.execute(
+            "CREATE TABLE task_recheck_snapshots (id INTEGER PRIMARY KEY, task_id TEXT, snapshot_json TEXT, state TEXT, created_at TEXT, resolved_at TEXT)"
+        )
+        self.connection.execute("CREATE TABLE users (id TEXT PRIMARY KEY, credits INTEGER)")
+        self.connection.execute(
+            "CREATE TABLE credit_ledger (user_id TEXT, amount INTEGER, balance_after INTEGER, entry_type TEXT, reason TEXT, created_at TEXT)"
+        )
+        self.connection.execute(
+            "INSERT INTO tasks VALUES ('task', 'user', 'running', 'vision', '1', '', 62, 0, NULL, NULL, 3)"
+        )
+        self.connection.execute("INSERT INTO users VALUES ('user', 10)")
+        self.connection.commit()
+
+        @contextmanager
+        def database():
+            with self.connection:
+                yield self.connection
+
+        self.database = database
+        self.addCleanup(self.connection.close)
+
+    def test_after_provider_stage_fails_without_repeating_request_and_refunds_once(self):
+        with (patch.object(worker, "db", self.database),
+              patch.object(worker, "record_task_event") as event):
+            worker._recover_unexpected_task_exit("task", RuntimeError("provider interrupted"))
+            row = self.connection.execute("SELECT status, stage, attempts FROM tasks WHERE id = 'task'").fetchone()
+            self.assertEqual(tuple(row), ("failed", "failed", 0))
+            self.assertEqual(self.connection.execute("SELECT credits FROM users WHERE id = 'user'").fetchone()[0], 25)
+            self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM credit_ledger").fetchone()[0], 1)
+            worker._recover_unexpected_task_exit("task", RuntimeError("duplicate recovery"))
+            self.assertEqual(self.connection.execute("SELECT credits FROM users WHERE id = 'user'").fetchone()[0], 25)
+            self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM credit_ledger").fetchone()[0], 1)
+            self.assertEqual(event.call_args.args[1], "worker_interrupted")
+
+    def test_interrupted_recheck_restores_previous_result_without_refund(self):
+        def restore(connection, task_id, **kwargs):
+            self.assertEqual(task_id, "task")
+            self.assertEqual(kwargs["allowed_statuses"], ("running",))
+            connection.execute("UPDATE tasks SET status = 'done', stage = 'done' WHERE id = ?", (task_id,))
+            return True
+
+        with (patch.object(worker, "db", self.database),
+              patch.object(worker, "restore_recheck_snapshot_with_connection", side_effect=restore),
+              patch.object(worker, "_refund_task_once") as refund,
+              patch.object(worker, "record_task_event") as event):
+            worker._recover_unexpected_task_exit("task", asyncio.CancelledError())
+
+        row = self.connection.execute("SELECT status, stage FROM tasks WHERE id = 'task'").fetchone()
+        self.assertEqual(tuple(row), ("done", "done"))
+        refund.assert_not_called()
+        self.assertEqual(event.call_args.args[1], "worker_recovered")
 
 
 class ModelConcurrencyTests(unittest.TestCase):

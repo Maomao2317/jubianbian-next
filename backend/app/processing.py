@@ -866,10 +866,16 @@ async def _run_recognizer_with_media(
     }, evidence
 
 
-def _refund_task_once(task_id: str, user_id: str, charged_minutes: int) -> bool:
+def _refund_task_once(
+    task_id: str,
+    user_id: str,
+    charged_minutes: int,
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> bool:
     """Refund a failed task exactly once, including the ledger entry."""
     refund_points = max(0, int(charged_minutes)) * POINTS_PER_MINUTE
-    with db() as connection:
+    def apply_refund(connection: sqlite3.Connection) -> bool:
         claimed = connection.execute(
             "UPDATE tasks SET credits_used = 0, updated_at = ? WHERE id = ? AND credits_used > 0",
             (now_iso(), task_id),
@@ -885,7 +891,12 @@ def _refund_task_once(task_id: str, user_id: str, charged_minutes: int) -> bool:
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (user_id, refund_points, balance_after, "refund", "task recognition failed", now_iso()),
         )
-    return True
+        return True
+
+    if connection is not None:
+        return apply_refund(connection)
+    with db() as connection:
+        return apply_refund(connection)
 
 
 async def process_task(task_id: str) -> None:

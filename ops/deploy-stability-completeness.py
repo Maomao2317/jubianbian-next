@@ -13,8 +13,8 @@ import subprocess
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = '5447b05a79786cbdb17bb76746e3946cd4f5e3cc'
-BUILD = 'stability-completeness-20261020-r1'
+BASELINE = 'a2b769c63f14ef2acb21d15cead4cab5b6a7e1ce'
+BUILD = 'worker-recovery-20261020-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
@@ -22,12 +22,10 @@ DEFAULTS = {'JBB_MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS': '600',
             'JBB_MEDIA_DOWNLOAD_TIMEOUT_SECONDS': '300',
             'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '90',
             'JBB_GPU_CIRCUIT_COOLDOWN_SECONDS': '30'}
-APP_CHANGES = {'backend/app/config.py', 'backend/app/storage.py',
-               'backend/app/remote_asr.py', 'backend/app/remote_ocr.py',
-               'backend/app/remote_circuit.py', 'backend/app/script.py',
-               'backend/test_generation_completeness.py', 'backend/test_recognition_cache.py',
-               'backend/test_remote_asr.py', 'backend/test_remote_circuit.py',
-               'backend/test_storage_transfer.py'}
+APP_CHANGES = {'backend/app/processing.py', 'backend/app/providers.py',
+               'backend/app/worker.py', 'backend/test_account_balance.py',
+               'backend/test_batch_concurrency.py', 'backend/test_recognition_cache.py',
+               'backend/test_resource_limits.py', 'backend/test_video_proxy.py'}
 
 
 def main():
@@ -52,7 +50,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-stability-20261020-'+args.commit[:12])
+    release = Path('/opt/jbb-worker-recovery-20261020-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     files = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--', 'backend', 'web-staging').decode().split('\0') if p]
