@@ -13,16 +13,15 @@ import subprocess
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = '2fccb7d'
-BUILD = 'worker-recovery-20261020-r2'
+BASELINE = 'a9fecf9b205fb87f41e6caa66a834428eca2048c'
+BUILD = 'cross-region-upload-20261020-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
-DEFAULTS = {'JBB_MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS': '600',
-            'JBB_MEDIA_DOWNLOAD_TIMEOUT_SECONDS': '300',
-            'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '90',
-            'JBB_GPU_CIRCUIT_COOLDOWN_SECONDS': '30'}
-APP_CHANGES = {'backend/app/worker.py'}
+# This release explicitly replaces the old 90-second override. Preserve every
+# other runtime setting, including the upload concurrency and Files fallback.
+DEFAULTS = {'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '900'}
+APP_CHANGES = {'backend/app/config.py'}
 
 
 def main():
@@ -51,7 +50,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-worker-recovery-20261020-'+args.commit[:12])
+    release = Path('/opt/jbb-cross-region-upload-20261020-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     files = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--', 'backend', 'web-staging').decode().split('\0') if p]
@@ -156,13 +155,14 @@ def main():
         envfile.write_text('\n'.join(lines+['JBB_BUILD_VERSION='+BUILD])+'\n')
         envfile.chmod(0o600)
         override = 'services:\n  app:\n    image: '+prepared['image']+'\n    environment:\n'
-        override += ''.join('      '+key+': "'+old_env.get(key, value)+'"\n' for key,value in DEFAULTS.items())
+        override += ''.join('      '+key+': "'+value+'"\n' for key,value in DEFAULTS.items())
         (root/'release-image.yml').write_text(override)
         (root/'.staging-deploy-hold').write_text('Pinned '+BUILD+'; source '+args.commit+'; backup '+str(backup)+'\n')
         planned = json.loads(output(command+['config', '--format', 'json'], env=process_env))
         planned_env = {k:str(v) for k,v in planned['services']['app']['environment'].items()}
         assert all(old_env.get(k) == v for k,v in planned_env.items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'), 'Unrelated configuration changed'
         assert planned_env['JBB_BUILD_VERSION'] == BUILD and planned['services']['app']['image'] == prepared['image']
+        assert all(planned_env.get(k) == v for k, v in DEFAULTS.items())
         routing.assert_idle(project)
         assert routing.inspect(project)['Id'] == previous['Id']
         replaced = True
@@ -173,6 +173,9 @@ def main():
         assert routing.mounts(current) == routing.mounts(previous)
         assert current['HostConfig']['PortBindings'] == previous['HostConfig']['PortBindings']
         assert {k:v for k,v in routing.environment(current).items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'} == {k:v for k,v in old_env.items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'}
+        assert all(routing.environment(current).get(k) == v for k, v in DEFAULTS.items())
+        timeout_check = "from app import config; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; print('UPLOAD_DEADLINE_VERIFIED', config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)"
+        print(output(['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', project+'-app-1', 'python', '-c', timeout_check]).decode().strip(), flush=True)
         print(args.step, verify_files(project, manifest), flush=True)
         for relative, digest in manifest.items():
             if relative.startswith('web-staging/') and not relative.endswith('.cjs'):
@@ -181,6 +184,7 @@ def main():
         smoke = "import tempfile; from pathlib import Path; from app import remote_circuit as r; from unittest.mock import patch; t=tempfile.TemporaryDirectory(); g=r.RemoteCircuit(Path(t.name)); p=patch.object(r,'circuit',g); p.start(); q=patch.object(r,'_probe',side_effect=TimeoutError()).start();\ntry:\n with r.remote_attempt('asr','http://offline','fixture',1): raise AssertionError('not admitted')\nexcept TimeoutError: pass\ntry:\n with r.remote_attempt('asr','http://offline','fixture',1): raise AssertionError('not admitted')\nexcept r.CircuitOpen: print('CPU_FALLBACK_GATE_VERIFIED')\nassert q.call_count==1\nt.cleanup()"
         print(output(['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', project+'-app-1', 'python', '-c', smoke]).decode().strip(), flush=True)
         record.update(verified=True, configurationPreserved=True, dataMountsPreserved=True,
+                      changedConfiguration=DEFAULTS,
                       sourceFilesVerified=len(manifest), sameImageAsStaging=args.step=='production',
                       verifiedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
         recordfile.write_text(json.dumps(record, indent=2))

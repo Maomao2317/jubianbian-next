@@ -29,7 +29,9 @@ SHARED_MODEL_CONCURRENCY = max(1, min(16, int(os.getenv("JBB_SHARED_MODEL_CONCUR
 DOWNLOAD_CONCURRENCY = max(1, min(8, int(os.getenv("JBB_DOWNLOAD_CONCURRENCY", "2"))))
 MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", "600")))
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "300")))
-MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS = max(10.0, float(os.getenv("JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS", "90")))
+# Cross-region uploads can take several minutes even for a valid 15 MiB proxy.
+# Keep a finite process deadline while allowing a 40 MiB proxy at 50 KiB/s.
+MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS = max(10.0, float(os.getenv("JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS", "900")))
 GPU_CIRCUIT_COOLDOWN_SECONDS = max(5.0, float(os.getenv("JBB_GPU_CIRCUIT_COOLDOWN_SECONDS", "30")))
 LOCAL_ASR_CONCURRENCY = max(1, min(2, int(os.getenv("JBB_LOCAL_ASR_CONCURRENCY", "1"))))
 LOCAL_ASR_CPU_THREADS = max(1, min(8, int(os.getenv("JBB_LOCAL_ASR_CPU_THREADS", "4"))))
