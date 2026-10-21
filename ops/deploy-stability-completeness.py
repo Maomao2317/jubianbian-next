@@ -13,15 +13,15 @@ import subprocess
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = 'a9fecf9b205fb87f41e6caa66a834428eca2048c'
-BUILD = 'cross-region-upload-20261020-r1'
+BASELINE = '4717af841da9d6d7d1b0dd568b1b8c286a337f6f'
+BUILD = 's3-compatible-upload-20261021-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
-# This release explicitly replaces the old 90-second override. Preserve every
-# other runtime setting, including the upload concurrency and Files fallback.
+# Preserve the verified upload deadline and every other runtime setting,
+# including upload concurrency and the Files fallback.
 DEFAULTS = {'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '900'}
-APP_CHANGES = {'backend/app/config.py'}
+APP_CHANGES = {'backend/app/storage.py'}
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-cross-region-upload-20261020-'+args.commit[:12])
+    release = Path('/opt/jbb-compatible-upload-20261021-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     files = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--', 'backend', 'web-staging').decode().split('\0') if p]

@@ -1,6 +1,7 @@
 """Real child transports against a local S3 fixture; no cloud credentials or APIs."""
 import hashlib
 import importlib.util
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -68,7 +69,7 @@ class StorageTransferTests(unittest.TestCase):
             "JBB_OBJECT_STORAGE_ACCESS_KEY": "fixture-access", "JBB_OBJECT_STORAGE_SECRET_KEY": "fixture-secret",
             "JBB_OBJECT_STORAGE_REGION": "us-east-1", "JBB_OBJECT_STORAGE_ADDRESSING_STYLE": "path",
             "JBB_DATA_DIR": str(self.root), "NO_PROXY": "127.0.0.1,localhost",
-            "AWS_REQUEST_CHECKSUM_CALCULATION": "when_required", "AWS_RESPONSE_CHECKSUM_VALIDATION": "when_required",
+            "AWS_REQUEST_CHECKSUM_CALCULATION": "when_supported", "AWS_RESPONSE_CHECKSUM_VALIDATION": "when_required",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -80,6 +81,34 @@ class StorageTransferTests(unittest.TestCase):
         storage._bounded_transfer("download", "fixture", "ok.mp4", target, 15)
         self.assertEqual(self.uploads, [self.body])
         self.assertEqual(target.read_bytes(), self.body)
+
+    def test_https_upload_retains_fixed_length_under_sdk_checksum_default(self):
+        class RequestCaptured(Exception):
+            pass
+
+        def capture(request, **_kwargs):
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            self.assertEqual(int(headers["content-length"]), len(self.body))
+            self.assertNotIn("transfer-encoding", headers)
+            self.assertNotIn("content-encoding", headers)
+            self.assertNotIn("x-amz-trailer", headers)
+            self.assertEqual(request.body.read(), self.body)
+            # Stop before the socket opens; no credentials or media leave the test.
+            raise RequestCaptured()
+
+        with patch.multiple(storage, OBJECT_STORAGE_ENABLED=True,
+                            OBJECT_STORAGE_ENDPOINT="https://fixture.invalid",
+                            OBJECT_STORAGE_BUCKET="fixture",
+                            OBJECT_STORAGE_ACCESS_KEY="fixture-access",
+                            OBJECT_STORAGE_SECRET_KEY="fixture-secret",
+                            OBJECT_STORAGE_REGION="us-east-1",
+                            OBJECT_STORAGE_ADDRESSING_STYLE="path"):
+            client = storage._client(delivery=True)
+        self.addCleanup(client.close)
+        client.meta.events.register("before-send.s3.PutObject", capture)
+        with self.assertRaises(RequestCaptured):
+            client.put_object(Bucket="fixture", Key="fixture.mp4", Body=io.BytesIO(self.body),
+                              ContentLength=len(self.body), ContentType="video/mp4")
 
     def test_continuously_progressing_download_is_killed_reaped_and_cleaned(self):
         children = []

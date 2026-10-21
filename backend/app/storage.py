@@ -78,6 +78,10 @@ def _client(*, delivery: bool = False) -> Any:
         config=Config(
             signature_version="s3v4",
             s3={"addressing_style": OBJECT_STORAGE_ADDRESSING_STYLE},
+            # Optional SDK checksum trailers use aws-chunked framing, which
+            # some S3-compatible upload gateways cannot reliably receive.
+            # Keep required checksums and the explicit Content-Length PUT.
+            request_checksum_calculation="when_required",
             connect_timeout=10 if delivery else 60,
             read_timeout=30 if delivery else 60,
             retries={"total_max_attempts": 2, "mode": "standard"} if delivery else {"max_attempts": 4, "mode": "adaptive"},
