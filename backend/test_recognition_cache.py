@@ -122,7 +122,7 @@ class RecognitionCheckpointTests(unittest.TestCase):
             providers.ark_recognize_range(*args, cache=self.cache)
         encode.assert_not_called()
         files.assert_not_called()
-        upload.assert_called_once_with(clip.proxy(), clip.identity)
+        upload.assert_called_once_with(clip.proxy(), clip.identity, progress_callback=None)
         self.assertEqual(recognize.call_args.kwargs["prepared_video"]["_video_uri"], uri)
         self.assertIsNone(self.cache.load("delivery"))
 

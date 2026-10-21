@@ -481,7 +481,7 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
     if is_account_balance_error(error):
         return True
     provider_code = str(getattr(error, "provider_code", ""))
-    if provider_code == "video_upload_capacity_timeout":
+    if provider_code in {"video_upload_capacity_timeout", "video_proxy_capacity_timeout"}:
         # Admission failed before a request was sent, so the bounded task retry
         # cannot duplicate an accepted upload or model request.
         return False
@@ -533,6 +533,8 @@ def _media_progress_callback(task_id: str):
     last_write = 0.0
     stage_started = time.monotonic()
     stages = {
+        "source_download_wait": (6, "等待读取原视频"),
+        "source_download": (6, "正在读取原视频"),
         "compression_queued": (16, "等待服务器压缩"),
         "compressing": (16, "正在服务器压缩视频"),
         "video_upload_wait": (32, "正在等待识别上传通道"),
@@ -564,10 +566,14 @@ def _media_progress_callback(task_id: str):
         overall, message = stages[stage]
         if stage == "compressing":
             overall += int(value * 0.14)
-        # Stage percentages are real encoding progress, not the whole task's
+        elif stage == "source_download":
+            overall += int(value * 0.08)
+        elif stage == "video_upload":
+            overall += int(value * 0.03)
+        # Stage percentages are real media progress, not the whole task's
         # progress. Keep writes to at most once/second and events to transitions.
         update_task(task_id, stage=stage, progress_percent=overall,
-                    stage_progress_percent=value if stage == "compressing" else None)
+                    stage_progress_percent=value if percent is not None and stage in {"compressing", "source_download", "video_upload"} else None)
         if changed_stage:
             record_task_event(task_id, "stage", message, status="running", stage=stage, progress_percent=overall)
         last_percent, last_write = value, now
@@ -585,8 +591,9 @@ def _collect_task_evidence(path: Path, title: str, duration: float, cache: Recog
 
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Collect evidence, then use Ark with an explicit OpenAI fallback."""
+    progress = _media_progress_callback(row["id"])
     cache = await asyncio.to_thread(recognition_cache, row["id"], row["stored_path"])
-    path, materialized_dir = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"])
+    path, materialized_dir = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"], progress_callback=progress)
     duration = float(row["duration_sec"] or 0)
     try:
         probed = await asyncio.to_thread(probe_duration, path)
@@ -604,7 +611,6 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
             _evidence_collector_executor, copy_context().run,
             _collect_task_evidence, path, row["title"], duration, cache,
         )
-        progress = _media_progress_callback(row["id"])
 
         async def prepare_media() -> dict[str, Any]:
             prepared = await asyncio.to_thread(

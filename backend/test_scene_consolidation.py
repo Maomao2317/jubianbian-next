@@ -21,6 +21,15 @@ def scene(index, start, end, *, kind="dialogue", text=None, **fields):
 
 
 class SceneConsolidationTests(unittest.TestCase):
+    def test_two_minute_forty_beats_keep_every_line_and_real_setting_changes(self):
+        fragments = [scene(i + 1, i * 3, (i + 1) * 3,
+                           location="客厅" if i < 20 else "厨房") for i in range(40)]
+        result = normalize_script({"scenes": fragments}, "第1集")
+        self.assertEqual(len(result["scenes"]), 2)
+        self.assertEqual([b["text"] for s in result["scenes"] for b in s["blocks"]],
+                         [b["text"] for s in fragments for b in s["blocks"]])
+        self.assertEqual([s["heading"] for s in result["scenes"]], ["1-1 日 内 客厅", "1-2 日 内 厨房"])
+
     def test_nested_and_overlapping_beats_form_one_scene_in_stable_time_order(self):
         raw = {"scenes": [scene(1, 66, 85, kind="action", text="甲把杯子递给乙。"),
                           scene(2, 79, 82), scene(3, 80, 88), scene(4, 85.93, 88.65),

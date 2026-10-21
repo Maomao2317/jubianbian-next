@@ -136,7 +136,7 @@
     let text = displayStatus === "running"
       ? cfg.stageText[displayStage]
       : cfg.statusText[displayStatus] || displayStatus;
-    if (displayStatus === "running" && displayStage === "compressing") text += ` ${compressionPercent(task)}%`;
+    if (mediaProgressLabel(task)) text += ` ${compressionPercent(task)}%`;
     return `<span class="badge ${displayStatus}"><span class="badge-dot"></span>${escapeHtml(text)}</span>`;
   }
 
@@ -146,6 +146,13 @@
 
   function compressionPercent(task) {
     return Math.max(0, Math.min(100, Math.floor(Number(task.stageProgressPercent) || 0)));
+  }
+
+  function mediaProgressLabel(task) {
+    if (task.status !== "running") return "";
+    if (task.stage === "compressing") return "压缩";
+    if (task.stageProgressPercent == null) return "";
+    return { source_download: "原视频读取", video_upload: "识别视频提交" }[task.stage] || "";
   }
 
   function normalizeUserTask(task) {
@@ -353,8 +360,9 @@
       timeAgo(task.createdAt),
     ];
     const compressing = task.status === "running" && task.stage === "compressing";
-    const percent = compressing ? compressionPercent(task) : (task.progressPercent || 0);
-    const progressLabel = compressing ? "服务器压缩进度" : "处理进度";
+    const mediaLabel = mediaProgressLabel(task);
+    const percent = mediaLabel ? compressionPercent(task) : (task.progressPercent || 0);
+    const progressLabel = mediaLabel === "压缩" ? "服务器压缩进度" : mediaLabel ? `${mediaLabel}进度` : "处理进度";
     const progress = task.status === "running" || task.status === "queued"
       ? `<div class="row-progress ${compressing ? "compression-progress" : ""}" role="progressbar" aria-label="${progressLabel}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`
       : "";
@@ -556,18 +564,18 @@
   }
 
   function pipeline(task) {
-    const compressing = task.stage === "compressing";
-    const preparing = ["compression_queued", "compressing", "video_upload", "video_upload_retry", "video_preparing", "evidence_wait"].includes(task.stage);
+    const mediaLabel = mediaProgressLabel(task);
+    const preparing = ["source_download_wait", "source_download", "compression_queued", "compressing", "video_upload_wait", "video_upload", "video_upload_retry", "video_preparing", "evidence_wait"].includes(task.stage);
     const steps = preparing ? [cfg.pipeline[0], cfg.pipeline[1], { id: task.stage, label: cfg.stageText[task.stage] }, ...cfg.pipeline.slice(2)] : cfg.pipeline;
     const currentIndex = steps.findIndex((item) => item.id === (["video_read_retry", "repairing", "reviewing"].includes(task.stage) ? "vision" : task.stage));
-    const percent = compressing ? compressionPercent(task) : (task.progressPercent || 0);
+    const percent = mediaLabel ? compressionPercent(task) : (task.progressPercent || 0);
     const note = preparing ? "服务器后台处理中，原片已保留，可以离开本页" : "后台处理中，可以离开本页";
     return `<div class="progress-panel">
       <div class="progress-head">
         <div><strong>${escapeHtml(cfg.stageText[task.stage] || "正在处理")}</strong><span>${note}</span></div>
-        <b>${compressing ? `压缩 ${percent}%` : `${percent}%`}</b>
+        <b>${mediaLabel ? `${mediaLabel} ${percent}%` : `${percent}%`}</b>
       </div>
-      <div class="main-progress" role="progressbar" aria-label="${compressing ? "服务器压缩进度" : "处理进度"}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>
+      <div class="main-progress" role="progressbar" aria-label="${mediaLabel === "压缩" ? "服务器压缩进度" : mediaLabel ? `${mediaLabel}进度` : "处理进度"}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>
       <div class="pipeline">${steps.map((step, index) => {
         const className = index < currentIndex ? "done" : index === currentIndex ? "active" : "";
         return `<div class="pipeline-step ${className}"><i>${index < currentIndex ? "✓" : index + 1}</i><span>${step.label}</span></div>`;

@@ -13,15 +13,17 @@ import subprocess
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = '4717af841da9d6d7d1b0dd568b1b8c286a337f6f'
-BUILD = 's3-compatible-upload-20261021-r1'
+BASELINE = '13f7849b3679b4c1c1b9f3c7eb5c8b947411dd98'
+BUILD = 'media-reliability-20261021-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
 # Preserve the verified upload deadline and every other runtime setting,
 # including upload concurrency and the Files fallback.
 DEFAULTS = {'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '900'}
-APP_CHANGES = {'backend/app/storage.py'}
+APP_CHANGES = {'backend/app/storage.py', 'backend/app/providers.py', 'backend/app/processing.py',
+               'web-staging/js/app.js', 'web-staging/js/config.js', 'web-staging/index.html'}
+FRONTEND_TEST_CHANGES = {'web-staging/test-compression-progress.cjs'}
 
 
 def main():
@@ -42,7 +44,7 @@ def main():
                     'merge-base', '--is-ancestor', BASELINE, args.commit], check=True)
     runtime_changes = set(git('diff', '--name-only', BASELINE, args.commit, '--',
                               'backend/app', 'web-staging').decode().splitlines())
-    expected_runtime_changes = {path for path in APP_CHANGES
+    expected_runtime_changes = {path for path in APP_CHANGES | FRONTEND_TEST_CHANGES
                                 if path.startswith(('backend/app/', 'web-staging/'))}
     assert runtime_changes == expected_runtime_changes, 'Unexpected application release scope'
     locks = []
@@ -50,7 +52,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-compatible-upload-20261021-'+args.commit[:12])
+    release = Path('/opt/jbb-media-reliability-20261021-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     files = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--', 'backend', 'web-staging').decode().split('\0') if p]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 import re
 import shutil
@@ -34,6 +34,7 @@ from .config import (
     ARK_UPLOAD_PROXY_AUDIO_BITRATE,
     ARK_UPLOAD_PROXY_MAX_HEIGHT,
     ARK_UPLOAD_PROXY_MAX_IN_FLIGHT,
+    MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS,
     ARK_UPLOAD_PROXY_MAX_MB,
     ARK_UPLOAD_PROXY_PRESET,
     ARK_UPLOAD_PROXY_TIMEOUT_SECONDS,
@@ -70,7 +71,7 @@ from .content_coverage import slice_evidence
 from .evidence import evidence_summary
 from .logging_setup import logger, safe_error_text
 from .media import multipart_body, probe_duration
-from .script import character_label, normalize_script
+from .script import character_label, has_screenplay_body, normalize_script
 from .storage import is_object_uri, media_info, object_storage_enabled, presigned_get, upload_recognition_proxy
 from .recognition_cache import RecognitionCache
 from .resource_limits import capacity, provider_budget
@@ -485,6 +486,27 @@ def _run_ffmpeg_proxy(command: list[str], duration: float, callback: MediaProgre
             process.stdout.close()
 
 
+@contextmanager
+def _ark_proxy_capacity():
+    deadline = time.monotonic() + MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS
+    acquired = _ark_proxy_semaphore.acquire(timeout=max(0, deadline - time.monotonic()))
+    try:
+        with ExitStack() as stack:
+            try:
+                if not acquired:
+                    raise TimeoutError("proxy queue wait exceeded")
+                stack.enter_context(capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT,
+                                             timeout=max(0, deadline - time.monotonic())))
+            except TimeoutError as exc:
+                raise ArkError("视频压缩通道繁忙，系统将自动恢复；原片已保留。",
+                               provider_code="video_proxy_capacity_timeout") from exc
+            # Only admission timeouts are safe to classify as pre-work retries.
+            yield
+    finally:
+        if acquired:
+            _ark_proxy_semaphore.release()
+
+
 def _ark_upload_proxy(path: Path, duration_sec: float = 0, *, progress_callback: MediaProgress | None = None) -> tuple[Path, Path | None]:
     """Make a validated delivery proxy without altering the ASR/OCR source."""
     try:
@@ -516,7 +538,7 @@ def _ark_upload_proxy(path: Path, duration_sec: float = 0, *, progress_callback:
     try:
         # Limit both encoding jobs and their decoder/encoder threads, separately
         # from uploads/model calls. Queue wait does not use the encoding timeout.
-        with _ark_proxy_semaphore, capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT):
+        with _ark_proxy_capacity():
             started = time.perf_counter()
             _report_media_progress(progress_callback, "compressing", 0)
             duration = duration_sec if duration_sec > 0 and math.isfinite(duration_sec) else probe_duration(path)
@@ -781,7 +803,7 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
         try:
             _report_media_progress(progress_callback, "video_upload", None)
             started = time.perf_counter()
-            uri = upload_recognition_proxy(upload_path, cache.identity)
+            uri = upload_recognition_proxy(upload_path, cache.identity, progress_callback=progress_callback)
             cache.save("delivery", {"uri": uri, "size": upload_path.stat().st_size})
             video_url = presigned_get(uri)
             logger.info("provider_step provider=ark operation=object_proxy_upload file=%s proxy_bytes=%s duration_ms=%.1f",
@@ -938,6 +960,7 @@ def ark_prompt(
         "1. heading 必须严格使用‘编号 时段 内外 地点’，例如‘1-1 夜 外 酒店门口’、‘1-2 日 内 酒店房间’；时段只用日、夜、清晨、黄昏或不明，内外只用内、外或不明。"
         "2. 不要新增剧情衔接、场次任务、目标、阻力、结果、环境说明、道具表或独立情绪段等字段；情绪直接写进▲画面动作或对白括号，正文只保留场次头、每场出场人物、▲画面动作、对白、声音、字幕和必要转场。characterProfiles 只用于人物一致性。"
         "3. 只有地点、时间或内外景真正变化才新建场景；同一场内按视频中的连续画面和动作顺序逐条整理，保留《剧拆拆》所需的画面节奏，不要把多个动作概括成一句剧情总结。"
+        "3c. 特写、近景、全景、正反打、换说话人、表情和动作变化只是同场镜头节奏，不是新场景，也不要写成transition；同一地点名称保持一致，不能用‘客厅近景’‘客厅另一角度’另起场次。不确定的日夜不要在同一连续片段反复切换。不按镜头数或视频时长设定场景数，真实换地点、时间跳跃和闪回仍须分场。"
         "3a. 只要画面从院门到厅堂、厅堂到院外、化妆区到拍摄区等明确换地点或换连续空间，就必须拆成新的场次，重新编号并填写该场实际出场人物；heading 必须使用‘1-2 日 内转外 地点/地点’或‘1-3 日 外 地点’这类可读格式，不能把多个地点塞进一个场次。时间或内外景发生连续转换时，timeOfDay/interiorExterior 可写‘傍晚转夜’、‘内转外’、‘外转内’。"
         "3b. 出场人物只列本场画面中出现或实际说话的人，不要把全片人物表、剧组全体、路人和未入画工作人员复制到每一场；只有动作或对白确实出现时才列入。"
         "4. 连续动作要完整覆盖因果和数量：每一次明确的拳击、推搡、开门、拿取、进出、转身离开都不能漏写；如果是第一拳、第二拳，要按实际顺序明确写出，不能只写‘打了几拳’或只写最后结果，也不能凭空增加动作。动作必须保留视频里实际听见/看见的动词和对象，不要把‘推’改写成‘撞’、把‘拿’概括成‘处理’。每个 action 必须包含规范人物名、动作、对象和结果，必要时补充可执行的表演提示；不要让句子以‘狠狠拽住’、‘随后离开’、‘故意看向’这类无主语短语开头；看不清时写‘未知人物’，不要猜。"
@@ -1502,6 +1525,11 @@ def ark_recognize(
                 _apply_ark_review(payload, review_context, duration_sec)
                 if patch_review else _parse_ark_script(payload)
             )
+            # Validate the actual deliverable inside the creation budget too:
+            # caption-only or suppressed content can normalize to an empty body.
+            script = normalize_script(raw_script, title)
+            if not has_screenplay_body(script):
+                raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
             break
         except ArkError as exc:
             if (patch_review and exc.provider_code == "output_limit"
@@ -1516,9 +1544,9 @@ def ark_recognize(
             # ``ark_stream_response``.  Only retry creation when the socket
             # failed before an ID was received; reuse the prepared file so a
             # transient disconnect never forces another upload/transcode.
-            if (exc.provider_code not in {"transient_network", "invalid_script_response"} and exc.status_code != 429) or attempt >= ARK_RESPONSE_CREATE_ATTEMPTS:
+            if (exc.provider_code not in {"transient_network", "invalid_script_response", "empty_screenplay"} and exc.status_code != 429) or attempt >= ARK_RESPONSE_CREATE_ATTEMPTS:
                 raise
-            if exc.provider_code == "invalid_script_response":
+            if exc.provider_code in {"invalid_script_response", "empty_screenplay"}:
                 # Regenerate once with the same source. Never turn a truncated
                 # prefix into an apparently successful empty screenplay.
                 if patch_review:
@@ -1533,6 +1561,7 @@ def ark_recognize(
                 else:
                     response_payload["input"][0]["content"][1]["text"] += (
                         "\n前次接口输出不完整。请重新生成符合指定JSON结构的完整对象，"
+                        "不得返回空场景或只有字幕的空正文；无对白片段应按画面记录真实动作，严禁编造。"
                         "必须正常结束整个对象，不得省略真实台词或越过问题范围。"
                     )
             logger.warning(
@@ -1543,7 +1572,6 @@ def ark_recognize(
             )
             time.sleep(min(5.0, float(attempt)))
     logger.info("provider_step provider=ark operation=response file=%s duration_ms=%.1f", path.name, (time.perf_counter() - response_started) * 1000)
-    script = normalize_script(raw_script, title)
     if audit_cache is not None:
         audit_cache.save("model_" + audit_kind, {"model": selected_model, "rawScript": raw_script,
                                                 "normalizedScript": script})

@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -41,13 +42,14 @@ class StorageTransferTests(unittest.TestCase):
 
             def do_GET(self):
                 self.headers_for(len(fixture.body))
-                if "stall" not in self.path:
+                if "stall" not in self.path and "progress" not in self.path:
                     self.wfile.write(fixture.body)
                     return
                 fixture.started.set()
                 try:
-                    for offset in range(0, len(fixture.body), 1024):
-                        self.wfile.write(fixture.body[offset:offset + 1024])
+                    chunk = 1024 if "stall" in self.path else 16384
+                    for offset in range(0, len(fixture.body), chunk):
+                        self.wfile.write(fixture.body[offset:offset + chunk])
                         self.wfile.flush()
                         time.sleep(.05)  # Progress never triggers a socket read timeout.
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -77,10 +79,18 @@ class StorageTransferTests(unittest.TestCase):
     def test_real_upload_and_download_preserve_all_bytes(self):
         source, target = self.root / "upload.mp4", self.root / "download.mp4"
         source.write_bytes(self.body)
-        storage._bounded_transfer("upload", "fixture", "ok.mp4", source, 15)
-        storage._bounded_transfer("download", "fixture", "ok.mp4", target, 15)
+        updates = []
+        storage._bounded_transfer("upload", "fixture", "ok.mp4", source, 15,
+                                  progress_callback=lambda stage, percent: updates.append((stage, percent)))
+        storage._bounded_transfer("download", "fixture", "ok.mp4", target, 15,
+                                  progress_callback=lambda stage, percent: updates.append((stage, percent)))
         self.assertEqual(self.uploads, [self.body])
         self.assertEqual(target.read_bytes(), self.body)
+        for stage in ("video_upload", "source_download"):
+            values = [percent for current, percent in updates if current == stage]
+            self.assertEqual((values[0], values[-1]), (0, 100))
+            self.assertTrue(any(0 < percent < 100 for percent in values))
+            self.assertEqual(values, sorted(values))
 
     def test_https_upload_retains_fixed_length_under_sdk_checksum_default(self):
         class RequestCaptured(Exception):
@@ -106,9 +116,25 @@ class StorageTransferTests(unittest.TestCase):
             client = storage._client(delivery=True)
         self.addCleanup(client.close)
         client.meta.events.register("before-send.s3.PutObject", capture)
-        with self.assertRaises(RequestCaptured):
-            client.put_object(Bucket="fixture", Key="fixture.mp4", Body=io.BytesIO(self.body),
-                              ContentLength=len(self.body), ContentType="video/mp4")
+        source = self.root / "https.mp4"
+        source.write_bytes(self.body)
+        payload = json.dumps(dict(operation="upload", bucket="fixture", key="fixture.mp4", path=str(source)))
+        with (patch.object(storage, "_client", return_value=client),
+              patch.object(storage.sys, "stdin", io.StringIO(payload)),
+              self.assertRaises(RequestCaptured)):
+            storage._transfer_main()
+
+    def test_byte_progress_is_delivered_while_child_is_still_running(self):
+        updates = []
+        with patch.object(storage, "DATA_DIR", self.root):
+            target, directory = storage.materialize_media("s3://fixture/progress.mp4", "progress",
+                progress_callback=lambda stage, value: updates.append((stage, value, time.monotonic())))
+        values = [(value, stamp) for stage, value, stamp in updates if stage == "source_download"]
+        intermediate = [stamp for value, stamp in values if 0 < value < 100]
+        self.assertTrue(intermediate)
+        self.assertGreater(values[-1][1] - intermediate[0], .25)
+        self.assertEqual(target.read_bytes(), self.body)
+        storage.cleanup_materialized(directory)
 
     def test_continuously_progressing_download_is_killed_reaped_and_cleaned(self):
         children = []
@@ -137,8 +163,12 @@ class StorageTransferTests(unittest.TestCase):
         storage.cleanup_materialized(directory)
 
     def test_child_failure_never_exposes_transport_output(self):
-        error = subprocess.CompletedProcess([], 1, "signed-url=private", "secret-key=private")
-        with patch.object(storage.subprocess, "run", return_value=error):
+        from unittest.mock import Mock
+        child = Mock(returncode=1, stdout=io.StringIO("signed-url=private\n"))
+        child.poll.return_value = 1
+        child.__enter__ = Mock(return_value=child)
+        child.__exit__ = Mock(return_value=False)
+        with patch.object(storage.subprocess, "Popen", return_value=child):
             with self.assertRaises(OSError) as raised:
                 storage._bounded_transfer("download", "fixture", "key", self.root / "file", 2)
         self.assertNotIn("private", str(raised.exception))

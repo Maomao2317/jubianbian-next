@@ -3,6 +3,7 @@ import asyncio
 import json
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 from fastapi import HTTPException
 from app import processing, providers, routes
 from app.errors import ArkError
@@ -11,7 +12,36 @@ from app.content_coverage import content_gaps
 
 
 class EmptyScreenplayTests(unittest.TestCase):
-    def test_empty_provider_and_normalized_result_stop_without_paid_regeneration(self):
+    def test_empty_or_caption_only_response_recovers_inside_creation_budget(self):
+        valid = {"scenes": [{"heading": "1-1 日 内 客厅", "blocks": [
+            {"type": "action", "text": "甲推开房门。", "startSec": 0, "endSec": 5}]}]}
+        for empty in ({"scenes": []}, {"scenes": [{"blocks": [
+                {"type": "screen_text", "text": "第1集"}]}]}):
+            with self.subTest(empty=empty):
+                outputs = [{"output_text": json.dumps(raw), "usage": {"input_tokens": 10, "output_tokens": 5,
+                           "total_tokens": 15}} for raw in (empty, valid)]
+                with (patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+                      patch.object(providers, "_ark_response_with_url_retry", side_effect=outputs) as request,
+                      patch.object(providers, "ark_prepare_video") as prepare,
+                      patch.object(providers.time, "sleep")):
+                    script, usage = providers.ark_recognize(Path("original.mp4"), "第1集", 5,
+                        prepared_video={"api_key": "fixture", "file_id": "prepared"})
+                self.assertTrue(has_screenplay_body(script))
+                self.assertEqual(request.call_count, 2)
+                prepare.assert_not_called()
+                self.assertEqual(usage["total_tokens"], 30)
+
+    def test_repeated_empty_response_stops_at_budget_without_task_level_retry(self):
+        with (patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+              patch.object(providers, "_ark_response_with_url_retry", return_value={"output_text": '{"scenes":[]}'}) as request,
+              patch.object(providers.time, "sleep")):
+            with self.assertRaises(ArkError) as caught:
+                providers.ark_recognize(Path("original.mp4"), "第1集", 5,
+                    prepared_video={"api_key": "fixture", "file_id": "prepared"})
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(processing._is_non_retryable_provider_error(caught.exception))
+
+    def test_exhausted_empty_result_cannot_restart_the_whole_paid_task(self):
         for operation in (lambda: providers._parse_ark_script({"output_text": '{"scenes":[]}'}),
                           lambda: normalize_script({"scenes": []}, "test")):
             with self.assertRaises(ArkError) as caught:

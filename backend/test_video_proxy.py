@@ -123,6 +123,55 @@ class CompressionProgressTests(unittest.TestCase):
 
 
 class VideoProxyTests(unittest.TestCase):
+    def test_work_timeout_is_not_misclassified_as_queue_timeout(self):
+        lane = threading.BoundedSemaphore(1)
+        with (patch.object(providers, "_ark_proxy_semaphore", lane),
+              patch.object(providers, "capacity", return_value=ExitStack())):
+            with self.assertRaisesRegex(TimeoutError, "work failed"):
+                with providers._ark_proxy_capacity():
+                    raise TimeoutError("work failed")
+        self.assertTrue(lane.acquire(blocking=False))
+        lane.release()
+
+    def test_local_compression_queue_times_out_before_work_and_recovers(self):
+        from app import resource_limits
+        with ExitStack() as stack, tempfile.TemporaryDirectory() as root:
+            source, create, run, _ = self.proxy_environment(stack)
+            lane = threading.BoundedSemaphore(1)
+            stack.enter_context(patch.object(providers, "_ark_proxy_semaphore", lane))
+            stack.enter_context(patch.object(providers, "MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", .03))
+            stack.enter_context(patch.object(resource_limits, "RESOURCE_DIR", Path(root)))
+            lane.acquire()
+            try:
+                with self.assertRaises(ArkError) as caught:
+                    providers._ark_upload_proxy(source, 120)
+                self.assertEqual(caught.exception.provider_code, "video_proxy_capacity_timeout")
+                self.assertFalse(processing._is_non_retryable_provider_error(caught.exception))
+                create.assert_not_called()
+                run.assert_not_called()
+            finally:
+                lane.release()
+            providers._ark_upload_proxy(source, 120)
+            run.assert_called_once()
+
+    def test_shared_compression_queue_timeout_releases_local_lane(self):
+        from app import resource_limits
+        with tempfile.TemporaryDirectory() as root, ExitStack() as stack:
+            source, create, run, _ = self.proxy_environment(stack)
+            lane = threading.BoundedSemaphore(1)
+            stack.enter_context(patch.object(providers, "_ark_proxy_semaphore", lane))
+            stack.enter_context(patch.object(providers, "ARK_UPLOAD_PROXY_MAX_IN_FLIGHT", 1))
+            stack.enter_context(patch.object(providers, "MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", .03))
+            stack.enter_context(patch.object(resource_limits, "RESOURCE_DIR", Path(root)))
+            with resource_limits.capacity("video-proxy", 1, directory=Path(root)):
+                with self.assertRaises(ArkError) as caught:
+                    providers._ark_upload_proxy(source, 120)
+                self.assertEqual(caught.exception.provider_code, "video_proxy_capacity_timeout")
+            self.assertTrue(lane.acquire(blocking=False))
+            lane.release()
+            create.assert_not_called()
+            run.assert_not_called()
+
     def source(self, size=320 * MIB):
         return SimpleNamespace(name="original.mp4", stem="original",
                                stat=Mock(return_value=SimpleNamespace(st_size=size)))

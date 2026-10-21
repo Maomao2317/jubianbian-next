@@ -44,4 +44,15 @@ assert.ok(ui.statusBadge(reading).includes("正在重新读取识别视频"));
 assert.ok(ui.pipeline(reading).includes("正在重新读取识别视频"));
 assert.match(ui.pipeline(reading), /pipeline-step active/);
 assert.doesNotMatch(ui.pipeline(reading), /压缩 0%|上传重试/);
+for (const [stage, label] of [["source_download", "原视频读取"], ["video_upload", "识别视频提交"]]) {
+  const transferring = { ...task, stage, stageProgressPercent: 47 };
+  assert.match(ui.statusBadge(transferring), /47%/);
+  assert.match(ui.taskRow(transferring), /aria-valuenow="47"/);
+  assert.ok(ui.pipeline(transferring).includes(`${label} 47%`));
+  assert.ok(ui.pipeline(transferring).includes(`${label}进度`));
+  assert.match(ui.taskRow({ ...transferring, stageProgressPercent: null }), /aria-valuenow="17"/);
+}
+for (const stage of ["source_download_wait", "video_upload_wait"]) {
+  assert.doesNotMatch(ui.statusBadge({ ...task, stage, stageProgressPercent: null }), /undefined|0%/);
+}
 console.log("Compression progress UI checks passed");
