@@ -14,7 +14,7 @@ import textwrap
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = '13f7849b3679b4c1c1b9f3c7eb5c8b947411dd98'
+BASELINE = '4f1a11864ad520448d696a6fbcea5774d70e8137'
 BUILD = 'content-reliability-20261022-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
@@ -22,9 +22,8 @@ SUPPORT = 'ops/restore-gpu-routing.py'
 # Preserve the verified upload deadline and every other runtime setting,
 # including upload concurrency and the Files fallback.
 DEFAULTS = {'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '900'}
-APP_CHANGES = {'backend/app/storage.py', 'backend/app/providers.py', 'backend/app/processing.py',
-               'web-staging/js/app.js', 'web-staging/js/config.js', 'web-staging/index.html'}
-FRONTEND_TEST_CHANGES = {'web-staging/test-compression-progress.cjs'}
+APP_CHANGES = {'backend/app/storage.py', 'backend/app/providers.py', 'backend/app/processing.py'}
+FRONTEND_TEST_CHANGES = set()
 
 
 def main():
