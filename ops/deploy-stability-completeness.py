@@ -10,11 +10,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import textwrap
 from urllib.request import urlopen
 from urllib.parse import quote
 
 BASELINE = '13f7849b3679b4c1c1b9f3c7eb5c8b947411dd98'
-BUILD = 'media-reliability-20261021-r1'
+BUILD = 'content-reliability-20261022-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
@@ -52,7 +53,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-media-reliability-20261021-'+args.commit[:12])
+    release = Path('/opt/jbb-content-reliability-20261022-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     files = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--', 'backend', 'web-staging').decode().split('\0') if p]
@@ -194,7 +195,88 @@ def main():
             if relative.startswith('web-staging/') and not relative.endswith('.cjs'):
                 with urlopen('http://127.0.0.1:'+str(port)+'/'+quote(relative.removeprefix('web-staging/'), safe='/'), timeout=5) as response:
                     assert hashlib.sha256(response.read()).hexdigest() == digest
-        smoke = "import tempfile; from pathlib import Path; from app import remote_circuit as r; from unittest.mock import patch; t=tempfile.TemporaryDirectory(); g=r.RemoteCircuit(Path(t.name)); p=patch.object(r,'circuit',g); p.start(); q=patch.object(r,'_probe',side_effect=TimeoutError()).start();\ntry:\n with r.remote_attempt('asr','http://offline','fixture',1): raise AssertionError('not admitted')\nexcept TimeoutError: pass\ntry:\n with r.remote_attempt('asr','http://offline','fixture',1): raise AssertionError('not admitted')\nexcept r.CircuitOpen: print('CPU_FALLBACK_GATE_VERIFIED')\nassert q.call_count==1\nt.cleanup()"
+        smoke = textwrap.dedent("""
+            import asyncio
+            import tempfile
+            from pathlib import Path
+            from unittest.mock import AsyncMock, patch
+            from app import processing, remote_circuit as circuit, storage
+            from app.errors import ArkError
+
+            rich = {"sources": [
+                {"kind": "audio", "status": "available", "items": [{"text": "完整对白"}]},
+                {"kind": "ocr", "status": "available", "items": []},
+                {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+            ]}
+            route = processing.select_ark_route(158, rich)
+            assert route["band"] == "complex" and "duration>=120s" in route["reasons"]
+
+            with tempfile.TemporaryDirectory() as root:
+                media = Path(root) / "clip.mp4"
+                media.write_bytes(b"video")
+                with patch.object(storage, "OBJECT_STORAGE_BUCKET", "fixture"), \
+                     patch.object(storage, "MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", 600), \
+                     patch.object(storage, "capacity") as capacity, \
+                     patch.object(storage, "_bounded_transfer"):
+                    storage.upload_recognition_proxy(media, "fixture", queue_timeout=30)
+                assert capacity.call_args.kwargs["timeout"] == 30
+
+            original = {"title": "第1集", "characters": ["甲"], "scenes": [{
+                "heading": "1-1 日 内 客厅", "location": "客厅",
+                "blocks": [{"type": "action", "text": "仅有结尾。",
+                            "startSec": 50, "endSec": 60}],
+            }]}
+            repair_quality = processing._evaluate_quality(
+                original, "ark", {"durationSec": 60},
+                {"model": "lite", "mode": "complexity", "band": "simple",
+                 "score": 0, "reasons": []}, recover_evidence=False,
+            )[0]
+            repair_quality["contentRepair"] = {
+                "attemptedRanges": [{"startSec": 0, "endSec": 50}],
+                "completedRanges": [], "errors": [],
+                "remainingRanges": [{"startSec": 0, "endSec": 50}],
+            }
+
+            async def verify_incomplete_requeues():
+                route = {"model": "lite", "mode": "complexity", "band": "simple",
+                         "score": 0, "reasons": []}
+                with patch.object(processing, "mark_task_stage"), \
+                     patch.object(processing, "ARK_API_KEYS", ("fixture",)), \
+                     patch.object(processing, "ARK_TURBO_MODEL", "turbo"), \
+                     patch.object(processing, "ark_recognize", return_value=(original, {})), \
+                     patch.object(processing, "repair_content_gaps",
+                                  AsyncMock(return_value=(original, repair_quality, {}))):
+                    try:
+                        await processing._run_recognizer_with_media(
+                            {"id": "fixture", "title": "第1集", "attempts": 0},
+                            Path("unused"), 60, {"durationSec": 60}, route, {}, None,
+                        )
+                    except ArkError as exc:
+                        assert exc.provider_code == "content_repair_incomplete"
+                        assert not processing._is_non_retryable_provider_error(exc)
+                        return
+                    raise AssertionError("Incomplete screenplay was deliverable")
+
+            asyncio.run(verify_incomplete_requeues())
+
+            with tempfile.TemporaryDirectory() as root:
+                isolated = circuit.RemoteCircuit(Path(root))
+                with patch.object(circuit, "circuit", isolated), \
+                     patch.object(circuit, "_probe", side_effect=TimeoutError()) as probe:
+                    try:
+                        with circuit.remote_attempt("asr", "http://offline", "fixture", 1):
+                            raise AssertionError("First failure was not admitted")
+                    except TimeoutError:
+                        pass
+                    try:
+                        with circuit.remote_attempt("asr", "http://offline", "fixture", 1):
+                            raise AssertionError("Open circuit was admitted")
+                    except circuit.CircuitOpen:
+                        pass
+                    assert probe.call_count == 1
+
+            print("CONTENT_RELIABILITY_VERIFIED")
+        """)
         print(output(['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', project+'-app-1', 'python', '-c', smoke]).decode().strip(), flush=True)
         record.update(verified=True, configurationPreserved=True, dataMountsPreserved=True,
                       changedConfiguration=DEFAULTS,

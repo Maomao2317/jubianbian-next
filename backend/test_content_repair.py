@@ -223,6 +223,83 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(quality["contentRepair"]["remainingRanges"])
         self.assertFalse(quality_gate(quality)[0])
 
+    async def test_capacity_timeout_retries_range_on_second_pass(self):
+        original = script(action(40, 60, "保留结尾。"))
+        failure = ArkError(
+            "upload capacity timeout",
+            provider_code="video_upload_capacity_timeout",
+        )
+        model = AsyncMock(side_effect=[
+            failure,
+            (script(action(0, 40, "补全开头。")), {"total_tokens": 8}, 0, 40),
+        ])
+        with patch.object(processing, "_run_model_call", model):
+            repaired, quality, usage = await processing.repair_content_gaps(
+                Path("unused.mp4"), "第11集", 60, original, {},
+                {"band": "simple", "score": 0, "reasons": []},
+            )
+        self.assertEqual(content_gaps(repaired, 60), [])
+        self.assertEqual(usage["total_tokens"], 8)
+        self.assertEqual(
+            [call.kwargs["repair_attempt"] for call in model.await_args_list],
+            [0, 1],
+        )
+        metadata = quality["contentRepair"]
+        self.assertEqual(len(metadata["passes"]), 2)
+        self.assertEqual(len(metadata["completedRanges"]), 1)
+        self.assertEqual(metadata["remainingRanges"], [])
+
+    async def test_partial_model_output_recomputes_only_remaining_gap(self):
+        original = script(action(40, 60, "保留结尾。"))
+        model = AsyncMock(side_effect=[
+            (script(action(0, 10, "补一小段。")), {"total_tokens": 4}, 0, 40),
+            (script(action(0, 30, "补全剩余。")), {"total_tokens": 6}, 10, 30),
+        ])
+        with patch.object(processing, "_run_model_call", model):
+            repaired, quality, usage = await processing.repair_content_gaps(
+                Path("unused.mp4"), "第11集", 60, original, {},
+                {"band": "simple", "score": 0, "reasons": []},
+            )
+        self.assertEqual(content_gaps(repaired, 60), [])
+        self.assertEqual(usage["total_tokens"], 10)
+        requested = [call.args[6] for call in model.await_args_list]
+        self.assertEqual(requested, [
+            {"startSec": 0.0, "endSec": 40.0},
+            {"startSec": 10.0, "endSec": 40.0},
+        ])
+        metadata = quality["contentRepair"]
+        self.assertEqual(len(metadata["completedRanges"]), 1)
+        self.assertFalse(metadata["attemptedRanges"][0]["resolved"])
+        self.assertTrue(metadata["attemptedRanges"][1]["resolved"])
+
+    async def test_unresolved_repair_is_retried_instead_of_delivered(self):
+        original = script(action(50, 60, "只识别到结尾。"))
+        route = {"model": "lite", "mode": "complexity", "band": "simple",
+                 "score": 0, "reasons": []}
+        quality = processing._evaluate_quality(
+            original, "ark", {"durationSec": 60}, route, recover_evidence=False
+        )[0]
+        quality["contentRepair"] = {
+            "attemptedRanges": [
+                {"startSec": 0, "endSec": 50, "pass": 1, "generation": 0}
+            ],
+            "completedRanges": [],
+            "errors": [],
+            "remainingRanges": [{"startSec": 0, "endSec": 50}],
+        }
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "ark_recognize", return_value=(original, {})),
+              patch.object(processing, "repair_content_gaps",
+                           AsyncMock(return_value=(original, quality, {})))):
+            with self.assertRaises(ArkError) as caught:
+                await processing._run_recognizer_with_media(
+                    {"id": "task", "title": "第11集", "attempts": 0},
+                    Path("unused"), 60, {"durationSec": 60}, route, {}, None,
+                )
+        self.assertEqual(caught.exception.provider_code, "content_repair_incomplete")
+
     async def test_repaired_gaps_still_review_unknown_speaker_and_preserve_usage_and_metadata(self):
         original = script(action(110, 120))
         repaired = normalize_script(script(action(0, 120), {
@@ -264,11 +341,14 @@ class CheckpointTests(unittest.TestCase):
     def test_cached_segment_does_not_upload_or_charge_again(self):
         class Cache:
             def load(self, kind):
-                return {"protocol": 1, "model": "turbo", "script": script(action(0, 20))}
+                self.kind = kind
+                return {"protocol": 2, "model": "turbo", "script": script(action(0, 20))}
+        cache = Cache()
         with patch.object(providers, "ark_prepare_video") as prepare:
             _script, usage, offset, duration = providers.ark_recognize_range(
-                Path("unused"), "第11集", 120, {}, "turbo", {"startSec": 0, "endSec": 20}, cache=Cache())
+                Path("unused"), "第11集", 120, {}, "turbo", {"startSec": 0, "endSec": 20}, cache=cache)
         prepare.assert_not_called()
+        self.assertEqual(cache.kind, "segment_0_22000_model_v2_0")
         self.assertEqual((usage, offset, duration), ({}, 0, 22))
 
 

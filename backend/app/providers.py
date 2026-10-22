@@ -803,12 +803,26 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
         try:
             _report_media_progress(progress_callback, "video_upload", None)
             started = time.perf_counter()
-            uri = upload_recognition_proxy(upload_path, cache.identity, progress_callback=progress_callback)
+            uri = upload_recognition_proxy(
+                upload_path,
+                cache.identity,
+                progress_callback=progress_callback,
+                queue_timeout=ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
+            )
             cache.save("delivery", {"uri": uri, "size": upload_path.stat().st_size})
             video_url = presigned_get(uri)
             logger.info("provider_step provider=ark operation=object_proxy_upload file=%s proxy_bytes=%s duration_ms=%.1f",
                         path.name, upload_path.stat().st_size, (time.perf_counter() - started) * 1000)
             return {"api_key": api_key, "video_url": video_url, "_video_uri": uri, **context}
+        except TimeoutError as exc:
+            # Object delivery and Files fallback share host upload admission.
+            # Requeue instead of waiting twice on the same congested lane.
+            logger.warning("provider_step provider=ark operation=object_proxy_capacity_timeout file=%s", path.name)
+            _report_media_progress(progress_callback, "video_upload_capacity_timeout", None)
+            raise ArkError(
+                "识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
+                provider_code="video_upload_capacity_timeout",
+            ) from exc
         except Exception as exc:
             # Never log storage errors which may echo credentials/signed URLs.
             logger.warning("provider_step provider=ark operation=object_proxy_unavailable file=%s error_type=%s", path.name, type(exc).__name__)
@@ -1592,14 +1606,18 @@ def ark_recognize(
 
 def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: dict[str, Any],
                         model: str, window: dict[str, float], *,
-                        cache: RecognitionCache | None = None) -> tuple[dict[str, Any], dict[str, Any], float, float]:
+                        cache: RecognitionCache | None = None,
+                        repair_attempt: int = 0) -> tuple[dict[str, Any], dict[str, Any], float, float]:
     """Physically isolate a missing interval so full-video attention cannot skip it."""
     start = max(0.0, window["startSec"] - 2)
     end = min(duration_sec, window["endSec"] + 2)
     kind = f"segment_{round(start * 1000)}_{round(end * 1000)}"
-    # Include the model and repair protocol in the checkpoint contract.
-    checkpoint = cache.load(kind) if cache else None
-    if checkpoint and checkpoint.get("protocol") == 1 and checkpoint.get("model") == model:
+    generation = max(0, int(repair_attempt))
+    checkpoint_kind = f"{kind}_model_v2_{generation}"
+    # Reuse the encoded clip, but regenerate unresolved model output on each
+    # repair pass and task retry instead of replaying one incomplete result.
+    checkpoint = cache.load(checkpoint_kind) if cache else None
+    if checkpoint and checkpoint.get("protocol") == 2 and checkpoint.get("model") == model:
         return checkpoint["script"], {}, start, end - start
     clip_cache = cache.scoped(f"{kind}:clip-v1") if cache else None
     clipped = slice_evidence(evidence, start, end)
@@ -1643,10 +1661,11 @@ def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: d
                 # transient preparation/poll failure, without re-encoding.
                 time.sleep(1)
         if cache:
-            prepared.update(_audit_cache=cache, _audit_kind=kind)
+            prepared.update(_audit_cache=cache, _audit_kind=checkpoint_kind)
         script, usage = ark_recognize(target, title, end - start, clipped, model, prepared_video=prepared)
     if cache:
-        cache.save(kind, {"protocol": 1, "model": model, "script": script, "usage": usage})
+        cache.save(checkpoint_kind, {"protocol": 2, "model": model, "generation": generation,
+                                     "script": script, "usage": usage})
     return script, usage, start, end - start
 
 

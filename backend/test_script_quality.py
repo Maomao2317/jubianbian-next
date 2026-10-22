@@ -810,6 +810,18 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         )
         self.assertEqual(short_with_subtitles["band"], "simple")
         self.assertIn("ocr>=3items", short_with_subtitles["reasons"])
+        medium_with_rich_evidence = select_ark_route(
+            158,
+            {
+                "sources": [
+                    {"kind": "audio", "status": "available", "items": [{"text": "完整对白"}]},
+                    {"kind": "ocr", "status": "available", "items": []},
+                    {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+                ]
+            },
+        )
+        self.assertEqual(medium_with_rich_evidence["band"], "complex")
+        self.assertIn("duration>=120s", medium_with_rich_evidence["reasons"])
         self.assertEqual(complex_route["band"], "complex")
         self.assertIn("duration>=180s", complex_route["reasons"])
 

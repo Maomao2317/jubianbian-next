@@ -78,6 +78,11 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
     if duration >= 90:
         score += 1
         reasons.append("duration>=90s")
+    if duration >= 120:
+        # Around two minutes, a Lite draft plus multiple physical Turbo repair
+        # clips is slower and less reliable than starting on Turbo directly.
+        score += 1
+        reasons.append("duration>=120s")
     if duration >= 180:
         score += 1
         reasons.append("duration>=180s")
@@ -194,59 +199,146 @@ def _merge_usage(*records: dict[str, Any]) -> dict[str, Any]:
 async def repair_content_gaps(
     path: Path, title: str, duration: float, script: dict[str, Any],
     evidence: dict[str, Any], route: dict[str, Any], *, cache: RecognitionCache | None = None,
-    stop_event: asyncio.Event | None = None,
+    stop_event: asyncio.Event | None = None, task_attempt: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """One bounded pass over missing ranges; keep source evidence and old words.
+    """Run two bounded passes over the actual remaining content gaps.
 
-    Completed clips are checkpointed. A failed clip leaves the accumulated
-    candidate available for review, and a balance error stops further calls.
+    Encoded clips are reused, while each pass and task retry receives a fresh
+    model checkpoint. A range is complete only when it no longer overlaps a
+    measured gap; returning some blocks alone is insufficient.
     """
     from copy import deepcopy
     from .content_coverage import normalize_additive_repair
 
     script = deepcopy(script)
     evidence = {**evidence, "durationSec": duration}
-    windows = repair_windows(content_gaps(script, duration))
+    initial_windows = repair_windows(content_gaps(script, duration))
     model = ARK_TURBO_MODEL.strip() or ARK_MODEL
-    metadata: dict[str, Any] = {"requestedRanges": windows, "completedRanges": [], "errors": []}
+    metadata: dict[str, Any] = {
+        "requestedRanges": initial_windows,
+        "attemptedRanges": [],
+        "completedRanges": [],
+        "errors": [],
+        "passes": [],
+    }
     usage: dict[str, Any] = {}
-    for window in windows:
-        if stop_event is not None and stop_event.is_set():
-            metadata["errors"].append({**window, "error": "本批修补已停止，未发起新调用", "balanceError": False})
+    abort = False
+    for repair_pass in range(2):
+        windows = repair_windows(content_gaps(script, duration))
+        if not windows or abort:
             break
-        cast = deepcopy(evidence.get("batchCharacterContext") or {})
-        profiles = cast.setdefault("characterProfiles", [])
-        names = {profile.get("name") for profile in profiles}
-        profiles.extend(deepcopy(profile) for profile in script.get("characterProfiles") or []
-                        if profile.get("name") not in names)
-        try:
-            clip, clip_usage, offset, clip_duration = await _run_model_call(
-                ark_recognize_range, path, title, duration,
-                {**evidence, "batchCharacterContext": cast}, model, window, cache=cache,
-            )
-            usage = _merge_usage(usage, clip_usage)
-            candidate, added = merge_gap_repair(script, clip, window, offset, clip_duration)
-            if not added:
-                raise ArkError("该缺段没有返回可定位的正文，保留原稿等待复核")
-            script = normalize_additive_repair(script, candidate, title)
-            metadata["completedRanges"].append({**window, "addedBlocks": added})
-            if cache:
-                cache.save("content_repair_candidate", {"script": script, "metadata": metadata})
-        except Exception as exc:
-            metadata["errors"].append({**window, "error": safe_error_text(exc),
-                                       "balanceError": is_account_balance_error(exc)})
-            logger.warning("content_repair_failed title=%s start=%.1f end=%.1f error=%s",
-                           title, window["startSec"], window["endSec"], safe_error_text(exc))
-            if is_account_balance_error(exc):
-                if stop_event is not None:
-                    stop_event.set()
+        pass_record: dict[str, Any] = {
+            "pass": repair_pass + 1,
+            "requestedRanges": windows,
+            "attempts": [],
+        }
+        metadata["passes"].append(pass_record)
+        for window in windows:
+            if stop_event is not None and stop_event.is_set():
+                stopped = {
+                    **window,
+                    "pass": repair_pass + 1,
+                    "error": "本批修订已停止，未发起新调用",
+                    "balanceError": False,
+                }
+                metadata["errors"].append(stopped)
+                pass_record["attempts"].append(stopped)
+                abort = True
                 break
-    quality, _approved, _blocking = _evaluate_quality(script, "ark", evidence, route, recover_evidence=False)
+            cast = deepcopy(evidence.get("batchCharacterContext") or {})
+            profiles = cast.setdefault("characterProfiles", [])
+            names = {profile.get("name") for profile in profiles}
+            profiles.extend(
+                deepcopy(profile)
+                for profile in script.get("characterProfiles") or []
+                if profile.get("name") not in names
+            )
+            generation = max(0, int(task_attempt)) * 2 + repair_pass
+            attempt_record: dict[str, Any] = {
+                **window,
+                "pass": repair_pass + 1,
+                "generation": generation,
+            }
+            metadata["attemptedRanges"].append(attempt_record)
+            pass_record["attempts"].append(attempt_record)
+            try:
+                clip, clip_usage, offset, clip_duration = await _run_model_call(
+                    ark_recognize_range,
+                    path,
+                    title,
+                    duration,
+                    {**evidence, "batchCharacterContext": cast},
+                    model,
+                    window,
+                    cache=cache,
+                    repair_attempt=generation,
+                )
+                usage = _merge_usage(usage, clip_usage)
+                candidate, added = merge_gap_repair(script, clip, window, offset, clip_duration)
+                if not added:
+                    raise ArkError("该缺段没有返回可定位的正文，保留原稿等待自动重试")
+                script = normalize_additive_repair(script, candidate, title)
+                remaining = content_gaps(script, duration)
+                overlaps = [
+                    gap
+                    for gap in remaining
+                    if gap["startSec"] < window["endSec"]
+                    and gap["endSec"] > window["startSec"]
+                ]
+                attempt_record.update(
+                    addedBlocks=added,
+                    resolved=not overlaps,
+                    remainingRanges=overlaps,
+                )
+                if not overlaps:
+                    metadata["completedRanges"].append(
+                        {**window, "pass": repair_pass + 1, "addedBlocks": added}
+                    )
+                if cache:
+                    cache.save(
+                        "content_repair_candidate",
+                        {"script": script, "metadata": metadata},
+                    )
+            except Exception as exc:
+                failure = {
+                    **window,
+                    "pass": repair_pass + 1,
+                    "generation": generation,
+                    "error": safe_error_text(exc),
+                    "balanceError": is_account_balance_error(exc),
+                    "providerCode": str(getattr(exc, "provider_code", "") or ""),
+                    "statusCode": getattr(exc, "status_code", None),
+                }
+                attempt_record.update(failure)
+                metadata["errors"].append(failure)
+                logger.warning(
+                    "content_repair_failed title=%s pass=%s start=%.1f end=%.1f error=%s",
+                    title,
+                    repair_pass + 1,
+                    window["startSec"],
+                    window["endSec"],
+                    safe_error_text(exc),
+                )
+                if is_account_balance_error(exc):
+                    if stop_event is not None:
+                        stop_event.set()
+                    abort = True
+                    break
+    quality, _approved, _blocking = _evaluate_quality(
+        script,
+        "ark",
+        evidence,
+        route,
+        recover_evidence=False,
+    )
     metadata["remainingRanges"] = content_gaps(script, duration)
     metadata["model"] = model
     quality["contentRepair"] = metadata
     if cache:
-        cache.save("content_repair_candidate", {"script": script, "quality": quality, "usage": usage})
+        cache.save(
+            "content_repair_candidate",
+            {"script": script, "quality": quality, "usage": usage},
+        )
     return script, quality, usage
 
 
@@ -744,16 +836,40 @@ async def _run_recognizer_with_media(
             if has_content_gaps and turbo_model and route.get("mode") not in {"lite", "lite_only"}:
                 mark_task_stage(row["id"], status="running", stage="repairing", progress_percent=72,
                                 message="正在核对并补全缺失片段")
+                row_keys = row.keys() if hasattr(row, "keys") else ()
+                task_attempt = int(row["attempts"] or 0) if "attempts" in row_keys else 0
                 script, quality, repair_usage = await repair_content_gaps(
                     path, row["title"], duration, script, evidence, route,
-                    cache=prepared_video.get("_cache"),
+                    cache=prepared_video.get("_cache"), task_attempt=task_attempt,
                 )
                 final_usage = _merge_usage(final_usage, repair_usage)
                 final_model = turbo_model
+                repair_metadata = quality["contentRepair"]
+                attempted_ranges = repair_metadata.get("attemptedRanges")
+                if attempted_ranges is None:
+                    # Keep compatibility with persisted candidates and test
+                    # doubles created before attemptedRanges was introduced.
+                    attempted_ranges = [
+                        *repair_metadata.get("completedRanges", []),
+                        *repair_metadata.get("errors", []),
+                    ]
                 review_metadata.update({"reviewModel": turbo_model,
-                                        "attemptCount": 1 + len(quality["contentRepair"]["completedRanges"]) + len(quality["contentRepair"]["errors"]),
+                                        "attemptCount": 1 + len(attempted_ranges),
                                         "reviewScope": "missing_video_segments",
                                         "unresolvedIssues": quality.get("blockingIssues", [])})
+                if repair_metadata["remainingRanges"]:
+                    balance_failure = next((error for error in repair_metadata["errors"]
+                                            if error.get("balanceError")), None)
+                    if balance_failure:
+                        raise ArkError(
+                            balance_failure["error"],
+                            status_code=balance_failure.get("statusCode"),
+                            provider_code=balance_failure.get("providerCode") or "InsufficientBalance",
+                        )
+                    raise ArkError(
+                        "视频中仍有未识别片段，系统将自动重新处理，避免交付残缺剧本。",
+                        provider_code="content_repair_incomplete",
+                    )
             may_auto_review = (
                 not quality.get("contentGapRanges") and _needs_automated_content_review(quality)
                 and (not has_content_gaps or not quality_gate(quality)[0])

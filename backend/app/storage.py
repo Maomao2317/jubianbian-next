@@ -144,7 +144,8 @@ def _progress(callback: MediaProgress | None, stage: str, percent: int | None) -
             logger.exception("media_progress_failed stage=%s", stage)
 
 
-def upload_recognition_proxy(path: Path, identity: str, *, progress_callback: MediaProgress | None = None) -> str:
+def upload_recognition_proxy(path: Path, identity: str, *, progress_callback: MediaProgress | None = None,
+                             queue_timeout: float | None = None) -> str:
     """Store a private, immutable delivery copy under a separate object prefix."""
     from .config import ARK_VIDEO_SAFE_BYTES
     size = path.stat().st_size
@@ -154,8 +155,10 @@ def upload_recognition_proxy(path: Path, identity: str, *, progress_callback: Me
     # Kill and reap the transport before allowing Files fallback. A timed-out
     # thread would otherwise keep uploading while the fallback runs alongside it.
     _progress(progress_callback, "video_upload_wait", None)
-    with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT,
-                  timeout=MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS):
+    wait_timeout = MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS if queue_timeout is None else min(
+        MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS, max(0.0, float(queue_timeout))
+    )
+    with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT, timeout=wait_timeout):
         _bounded_transfer("upload", OBJECT_STORAGE_BUCKET, key, path,
                           MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS, progress_callback=progress_callback)
     return f"s3://{OBJECT_STORAGE_BUCKET}/{quote(key, safe='/')}"

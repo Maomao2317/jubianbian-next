@@ -122,7 +122,10 @@ class RecognitionCheckpointTests(unittest.TestCase):
             providers.ark_recognize_range(*args, cache=self.cache)
         encode.assert_not_called()
         files.assert_not_called()
-        upload.assert_called_once_with(clip.proxy(), clip.identity, progress_callback=None)
+        upload.assert_called_once_with(
+            clip.proxy(), clip.identity, progress_callback=None,
+            queue_timeout=providers.ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
+        )
         self.assertEqual(recognize.call_args.kwargs["prepared_video"]["_video_uri"], uri)
         self.assertIsNone(self.cache.load("delivery"))
 
@@ -142,7 +145,7 @@ class RecognitionCheckpointTests(unittest.TestCase):
             self.assertEqual(prepare.call_args_list[0].args[0], prepare.call_args_list[1].args[0])
             prepare.reset_mock(side_effect=True)
             prepare.side_effect = exhausted
-            self.cache.save("segment_0_22000", {"protocol": 0})
+            self.cache.save("segment_0_22000_model_v2_0", {"protocol": 0})
             with self.assertRaises(ArkError):
                 providers.ark_recognize_range(*args, cache=self.cache)
             prepare.assert_called_once()
@@ -183,7 +186,7 @@ class RecognitionCheckpointTests(unittest.TestCase):
             self.assertNotIn("private-key", content)
             self.assertNotIn("https://signed/", content)
 
-    def test_object_upload_failure_reuses_proxy_even_if_checkpoint_fails(self):
+    def test_object_upload_timeout_requeues_without_files_fallback(self):
         cache = Mock(identity="task-fingerprint")
         cache.load.return_value = None
         cache.proxy.return_value = None
@@ -197,10 +200,37 @@ class RecognitionCheckpointTests(unittest.TestCase):
             patch.object(providers, "_ark_upload_prepared_video", return_value=("file", "key")) as files,
             patch.object(providers, "ark_wait_for_file"),
         ):
-            result = providers.ark_prepare_video(self.original, 180, cache=cache)
-        self.assertEqual(result["file_id"], "file")
-        self.assertEqual(files.call_args.args[0], self.original)
+            with self.assertRaises(ArkError) as caught:
+                providers.ark_prepare_video(self.original, 180, cache=cache)
+        self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
+        files.assert_not_called()
         self.assertEqual(encode.call_count, 1)
+
+    def test_repair_generation_refreshes_model_but_reuses_encoded_clip(self):
+        clip = self.cache.scoped("segment_0_22000:clip-v1")
+        clip.save_proxy(self.original)
+        first_script = {"scenes": [{"blocks": [{"text": "first"}]}]}
+        second_script = {"scenes": [{"blocks": [{"text": "second"}]}]}
+        with (patch.object(providers, "ark_prepare_video",
+                           return_value={"api_key": "key", "file_id": "file"}) as prepare,
+              patch.object(providers, "ark_recognize", side_effect=[
+                  (first_script, {"total_tokens": 1}),
+                  (second_script, {"total_tokens": 2}),
+              ]) as recognize,
+              patch.object(providers.subprocess, "run") as encode):
+            args = (self.original, "test", 120, {}, "turbo",
+                    {"startSec": 0, "endSec": 20})
+            first = providers.ark_recognize_range(*args, cache=self.cache, repair_attempt=0)
+            second = providers.ark_recognize_range(*args, cache=self.cache, repair_attempt=1)
+            cached = providers.ark_recognize_range(*args, cache=self.cache, repair_attempt=1)
+        encode.assert_not_called()
+        self.assertEqual(prepare.call_count, 2)
+        self.assertEqual(recognize.call_count, 2)
+        self.assertEqual(first[0], first_script)
+        self.assertEqual(second[0], second_script)
+        self.assertEqual(cached[0], second_script)
+        self.assertIsNotNone(self.cache.load("segment_0_22000_model_v2_0"))
+        self.assertIsNotNone(self.cache.load("segment_0_22000_model_v2_1"))
 
     def test_success_releases_local_proxy_and_retention_only_deletes_proxy_key(self):
         self.cache.save_proxy(self.original)
@@ -249,6 +279,21 @@ class RecognitionCheckpointTests(unittest.TestCase):
         self.assertNotEqual(key, "videos/task.mp4")
         self.assertIn(key, uri)
         self.assertEqual(deadline, storage.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)
+
+    def test_recognition_proxy_queue_timeout_is_explicit_and_capped(self):
+        for requested, configured, expected in ((30, 600, 30), (60, 20, 20)):
+            with self.subTest(requested=requested, configured=configured):
+                with (patch.object(storage, "OBJECT_STORAGE_BUCKET", "bucket"),
+                      patch.object(storage, "OBJECT_STORAGE_PREFIX", "videos"),
+                      patch.object(storage, "MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", configured),
+                      patch.object(storage, "capacity") as capacity,
+                      patch.object(storage, "_bounded_transfer")):
+                    storage.upload_recognition_proxy(
+                        self.original, "fingerprint", queue_timeout=requested
+                    )
+                capacity.assert_called_once_with(
+                    "media-upload", storage.ARK_UPLOAD_MAX_IN_FLIGHT, timeout=expected
+                )
 
 
 class EvidenceReuseTests(unittest.TestCase):
