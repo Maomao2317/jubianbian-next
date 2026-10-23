@@ -19,6 +19,10 @@ from pathlib import Path
 from .config import RESOURCE_DIR
 
 
+class CapacityTimeout(TimeoutError):
+    """Admission expired before any work entered the shared lane."""
+
+
 def _try_lock(handle):
     handle.seek(0)
     if os.name == "nt":
@@ -68,7 +72,7 @@ def capacity(name: str, limit: int, *, directory: Path | None = None, timeout: f
                             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                     return
             if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError(f"Resource capacity wait exceeded: {name}")
+                raise CapacityTimeout(f"Resource capacity wait exceeded: {name}")
             time.sleep(min(.1, max(0, deadline - time.monotonic())) if deadline is not None else .1)
     finally:
         for handle in handles:

@@ -14,15 +14,15 @@ import textwrap
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = '4f1a11864ad520448d696a6fbcea5774d70e8137'
-BUILD = 'content-reliability-20261022-r1'
+BASELINE = '859f821c4a98d1226ae2c6d3b764cff2ef8aebb3'
+BUILD = 'video-reliability-20261023-r1'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
 # Preserve the verified upload deadline and every other runtime setting,
 # including upload concurrency and the Files fallback.
-DEFAULTS = {'JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS': '900'}
-APP_CHANGES = {'backend/app/storage.py', 'backend/app/providers.py', 'backend/app/processing.py'}
+DEFAULTS = {}
+APP_CHANGES = {'backend/app/resource_limits.py', 'backend/app/providers.py', 'backend/app/script.py'}
 FRONTEND_TEST_CHANGES = set()
 
 
@@ -52,7 +52,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-content-reliability-20261022-'+args.commit[:12])
+    release = Path('/opt/jbb-video-reliability-20261023-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     files = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--', 'backend', 'web-staging').decode().split('\0') if p]
@@ -187,7 +187,7 @@ def main():
         assert current['HostConfig']['PortBindings'] == previous['HostConfig']['PortBindings']
         assert {k:v for k,v in routing.environment(current).items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'} == {k:v for k,v in old_env.items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'}
         assert all(routing.environment(current).get(k) == v for k, v in DEFAULTS.items())
-        timeout_check = "from app import config; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; print('UPLOAD_DEADLINE_VERIFIED', config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)"
+        timeout_check = "from app import config; from app.resource_limits import CapacityTimeout; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; assert config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS == 600; assert issubclass(CapacityTimeout, TimeoutError); print('UPLOAD_BUDGETS_VERIFIED', config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS, config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)"
         print(output(['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', project+'-app-1', 'python', '-c', timeout_check]).decode().strip(), flush=True)
         print(args.step, verify_files(project, manifest), flush=True)
         for relative, digest in manifest.items():
@@ -195,6 +195,17 @@ def main():
                 with urlopen('http://127.0.0.1:'+str(port)+'/'+quote(relative.removeprefix('web-staging/'), safe='/'), timeout=5) as response:
                     assert hashlib.sha256(response.read()).hexdigest() == digest
         smoke = textwrap.dedent("""
+            from app.script import add_character_visual_descriptions
+            blocks = [{"type": "action", "text": "穿蓝色外套的周青扶着林海。"}]
+            profiles = [{"name": name, "appearance": "蓝色外套", "clothing": "穿蓝色外套"}
+                        for name in ["周青", "林海"]]
+            add_character_visual_descriptions(blocks, profiles)
+            assert blocks[0]["text"].count("蓝色外套") == 2
+            first = blocks[0]["text"]
+            add_character_visual_descriptions(blocks, profiles)
+            assert blocks[0]["text"] == first
+            print("VISUAL_DESCRIPTION_VERIFIED")
+        """) + textwrap.dedent("""
             import asyncio
             import tempfile
             from pathlib import Path

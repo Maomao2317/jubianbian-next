@@ -124,7 +124,6 @@ class RecognitionCheckpointTests(unittest.TestCase):
         files.assert_not_called()
         upload.assert_called_once_with(
             clip.proxy(), clip.identity, progress_callback=None,
-            queue_timeout=providers.ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
         )
         self.assertEqual(recognize.call_args.kwargs["prepared_video"]["_video_uri"], uri)
         self.assertIsNone(self.cache.load("delivery"))
@@ -186,7 +185,8 @@ class RecognitionCheckpointTests(unittest.TestCase):
             self.assertNotIn("private-key", content)
             self.assertNotIn("https://signed/", content)
 
-    def test_object_upload_timeout_requeues_without_files_fallback(self):
+    def test_object_admission_timeout_requeues_without_files_fallback(self):
+        from app.resource_limits import CapacityTimeout
         cache = Mock(identity="task-fingerprint")
         cache.load.return_value = None
         cache.proxy.return_value = None
@@ -196,7 +196,7 @@ class RecognitionCheckpointTests(unittest.TestCase):
             patch.object(providers, "object_storage_enabled", return_value=True),
             patch.object(providers, "ark_account_key", return_value="key"),
             patch.object(providers, "_ark_upload_proxy", return_value=(self.original, self.root / "temporary")) as encode,
-            patch.object(providers, "upload_recognition_proxy", side_effect=TimeoutError("视频传输超时")),
+            patch.object(providers, "upload_recognition_proxy", side_effect=CapacityTimeout("lane busy")),
             patch.object(providers, "_ark_upload_prepared_video", return_value=("file", "key")) as files,
             patch.object(providers, "ark_wait_for_file"),
         ):
@@ -205,6 +205,40 @@ class RecognitionCheckpointTests(unittest.TestCase):
         self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
         files.assert_not_called()
         self.assertEqual(encode.call_count, 1)
+
+    def test_object_transport_timeout_falls_back_and_retry_remembers_files(self):
+        self.cache.save_proxy(self.original)
+        for error in (TimeoutError("transport deadline"), OSError("transport failed")):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(providers, "ARK_VIDEO_SOURCE_MODE", "auto"),
+                patch.object(providers, "object_storage_enabled", return_value=True),
+                patch.object(providers, "ark_account_key", return_value="key"),
+                patch.object(providers, "upload_recognition_proxy", side_effect=error) as upload,
+                patch.object(providers, "_ark_upload_prepared_video", return_value=("file", "key")) as files,
+                patch.object(providers, "ark_upload_video", return_value=("retry-file", "key")) as retry,
+                patch.object(providers, "ark_wait_for_file"),
+            ):
+                self.cache.save("delivery_route", {})
+                first = providers.ark_prepare_video(self.original, 180, cache=self.cache)
+                second = providers.ark_prepare_video(self.original, 180, cache=self.cache)
+            self.assertEqual(first["file_id"], "file")
+            self.assertEqual(second["file_id"], "retry-file")
+            upload.assert_called_once()
+            files.assert_called_once()
+            self.assertEqual(files.call_args.args[0], self.cache.proxy())
+            retry.assert_called_once()
+            self.assertEqual(self.cache.load("delivery_route"), {"mode": "files"})
+
+    def test_work_timeouts_are_not_reported_as_admission_timeouts(self):
+        from contextlib import ExitStack
+        import time
+        for lane in (lambda: providers._ark_http_capacity(True, time.monotonic() + 2),
+                     lambda: providers._ark_upload_body_capacity(self.original, None, time.monotonic() + 2)):
+            with self.subTest(lane=lane), patch.object(providers, "capacity", return_value=ExitStack()):
+                with self.assertRaisesRegex(TimeoutError, "work timeout"):
+                    with lane():
+                        raise TimeoutError("work timeout")
 
     def test_repair_generation_refreshes_model_but_reuses_encoded_clip(self):
         clip = self.cache.scoped("segment_0_22000:clip-v1")
@@ -372,6 +406,62 @@ class UploadBudgetTests(unittest.TestCase):
         self.assertEqual(caught.exception.provider_code, "video_upload_capacity_timeout")
         self.assertFalse(processing._is_non_retryable_provider_error(caught.exception))
         request.assert_not_called()
+
+    def test_files_admission_leaves_full_transport_budget_and_releases_lanes(self):
+        from contextlib import contextmanager
+        clock = [0.0]
+        events = []
+
+        @contextmanager
+        def body(path, callback, deadline):
+            self.assertEqual(deadline, 600)
+            clock[0] += 120
+            events.append("body")
+            try:
+                yield
+            finally:
+                events.append("body_released")
+
+        @contextmanager
+        def network(upload, deadline):
+            self.assertTrue(upload)
+            self.assertEqual(deadline, 600)
+            clock[0] += 180
+            events.append("network")
+            try:
+                yield
+            finally:
+                events.append("network_released")
+
+        for error in (None, ArkError("failed", provider_code="transient_network")):
+            clock[0] = 0
+            events.clear()
+            with (self.subTest(error=bool(error)),
+                  patch.object(providers.time, "monotonic", side_effect=lambda: clock[0]),
+                  patch.object(providers, "MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", 600),
+                  patch.object(providers, "ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS", 240),
+                  patch.object(providers, "_ark_upload_body_capacity", body),
+                  patch.object(providers, "_ark_http_capacity", network),
+                  patch.object(providers, "_ark_upload_prepared_video", side_effect=error,
+                               return_value=("file", "key")) as request):
+                if error:
+                    with self.assertRaises(ArkError):
+                        providers._ark_upload_files(Path("proxy.mp4"), "key", 1, None)
+                else:
+                    self.assertEqual(providers._ark_upload_files(Path("proxy.mp4"), "key", 1, None), ("file", "key"))
+                self.assertEqual(request.call_args.kwargs["deadline"] - clock[0], 240)
+                self.assertTrue(request.call_args.kwargs["capacity_held"])
+            self.assertEqual(events, ["body", "network", "network_released", "body_released"])
+
+    def test_files_with_held_capacity_do_not_reacquire_shared_slot(self):
+        with (patch.object(providers, "_ark_http_capacity") as lane,
+              patch.object(providers, "provider_budget"),
+              patch.object(providers, "urlopen") as http):
+            http.return_value.__enter__.return_value.read.return_value = b'{"id":"file"}'
+            result = providers.ark_http("POST", "/files", b"video", api_key="key", upload=True,
+                                        upload_capacity_held=True)
+        self.assertEqual(result, {"id": "file"})
+        lane.assert_not_called()
 
     def test_total_budget_overrides_old_three_attempt_240_second_configuration(self):
         clock = [0.0]

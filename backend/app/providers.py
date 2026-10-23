@@ -74,7 +74,7 @@ from .media import multipart_body, probe_duration
 from .script import character_label, has_screenplay_body, normalize_script
 from .storage import is_object_uri, media_info, object_storage_enabled, presigned_get, upload_recognition_proxy
 from .recognition_cache import RecognitionCache
-from .resource_limits import capacity, provider_budget
+from .resource_limits import CapacityTimeout, capacity, provider_budget
 
 # Ark is the preferred video-understanding provider.  OpenAI remains an
 # optional transcription/text fallback when the primary provider is unavailable.
@@ -179,7 +179,7 @@ def _ark_http_capacity(upload: bool, deadline: float | None):
             try:
                 with capacity("media-upload", ARK_UPLOAD_MAX_IN_FLIGHT, timeout=max(0, deadline - time.monotonic())):
                     yield
-            except TimeoutError as exc:
+            except CapacityTimeout as exc:
                 raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
                                provider_code="video_upload_capacity_timeout") from exc
         else:
@@ -199,6 +199,7 @@ def ark_http(
     upload: bool = False,
     upload_deadline: float | None = None,
     progress_callback: MediaProgress | None = None,
+    upload_capacity_held: bool = False,
 ) -> Any:
     api_key = api_key or ARK_API_KEY
     if not api_key:
@@ -226,7 +227,7 @@ def ark_http(
         # Slow multipart transfers must not consume model-generation slots.
         if upload:
             _report_media_progress(progress_callback, "video_upload_wait", None)
-        with _ark_http_capacity(upload, upload_deadline):
+        with (ExitStack() if upload and upload_capacity_held else _ark_http_capacity(upload, upload_deadline)):
             if upload:
                 _report_media_progress(progress_callback, "video_upload", None)
             request_timeout = timeout or ARK_RESPONSE_TIMEOUT_SECONDS
@@ -629,18 +630,30 @@ def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
     upload_path, proxy_dir = _delivery_video(path, duration_sec, progress_callback, cache)
     try:
-        deadline = time.monotonic() + ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS
-        with _ark_upload_body_capacity(upload_path, progress_callback, deadline):
-            return _ark_upload_prepared_video(upload_path, api_key, duration_sec,
-                                              progress_callback=progress_callback, deadline=deadline)
+        return _ark_upload_files(upload_path, api_key, duration_sec, progress_callback)
     finally:
         if proxy_dir is not None:
             shutil.rmtree(proxy_dir, ignore_errors=True)
 
 
+def _ark_upload_files(upload_path: Path, api_key: str | None, duration_sec: float,
+                      progress_callback: MediaProgress | None) -> tuple[str, str]:
+    # Admission has its own finite budget. Allocate the multipart body only
+    # after both lanes are held, then give transport/retries their full budget.
+    queue_deadline = time.monotonic() + MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS
+    with _ark_upload_body_capacity(upload_path, progress_callback, queue_deadline):
+        with _ark_http_capacity(True, queue_deadline):
+            return _ark_upload_prepared_video(
+                upload_path, api_key, duration_sec, progress_callback=progress_callback,
+                deadline=time.monotonic() + ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
+                capacity_held=True,
+            )
+
+
 def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_sec: float, *,
                                progress_callback: MediaProgress | None = None,
-                               deadline: float | None = None) -> tuple[str, str]:
+                               deadline: float | None = None,
+                               capacity_held: bool = False) -> tuple[str, str]:
     """Build/retry one bounded request; caller owns the proxy and memory lane."""
     try:
         # Defence in depth: never allocate a huge multipart request or send an
@@ -675,6 +688,7 @@ def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_
                 "POST", "/files", body, f"multipart/form-data; boundary={boundary}",
                 api_key=selected_key, timeout=min(ARK_UPLOAD_TIMEOUT_SECONDS, remaining), upload=True,
                 upload_deadline=deadline, progress_callback=progress_callback,
+                **({"upload_capacity_held": True} if capacity_held else {}),
             )
             file_id = None
             if isinstance(payload, dict):
@@ -705,7 +719,7 @@ def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_
 
 @contextmanager
 def _ark_upload_body_capacity(upload_path: Path, progress_callback: MediaProgress | None, deadline: float):
-    """Bound memory-lane admission by the same deadline as the network upload."""
+    """Bound memory-lane admission before allocating a multipart request."""
     started = time.monotonic()
     _report_media_progress(progress_callback, "video_upload_wait", None)
     remaining = max(0.0, deadline - time.monotonic())
@@ -720,7 +734,7 @@ def _ark_upload_body_capacity(upload_path: Path, progress_callback: MediaProgres
                 logger.info("provider_step provider=ark operation=upload_body_admitted file=%s wait_ms=%.1f",
                             upload_path.name, (time.monotonic() - started) * 1000)
                 yield
-        except TimeoutError as exc:
+        except CapacityTimeout as exc:
             _report_media_progress(progress_callback, "video_upload_capacity_timeout", None)
             raise ArkError("识别视频上传通道繁忙，已在等待上限内停止；原视频和已完成的采集结果已保留。",
                            provider_code="video_upload_capacity_timeout") from exc
@@ -807,14 +821,13 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
                 upload_path,
                 cache.identity,
                 progress_callback=progress_callback,
-                queue_timeout=ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
             )
             cache.save("delivery", {"uri": uri, "size": upload_path.stat().st_size})
             video_url = presigned_get(uri)
             logger.info("provider_step provider=ark operation=object_proxy_upload file=%s proxy_bytes=%s duration_ms=%.1f",
                         path.name, upload_path.stat().st_size, (time.perf_counter() - started) * 1000)
             return {"api_key": api_key, "video_url": video_url, "_video_uri": uri, **context}
-        except TimeoutError as exc:
+        except CapacityTimeout as exc:
             # Object delivery and Files fallback share host upload admission.
             # Requeue instead of waiting twice on the same congested lane.
             logger.warning("provider_step provider=ark operation=object_proxy_capacity_timeout file=%s", path.name)
@@ -826,13 +839,13 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
         except Exception as exc:
             # Never log storage errors which may echo credentials/signed URLs.
             logger.warning("provider_step provider=ark operation=object_proxy_unavailable file=%s error_type=%s", path.name, type(exc).__name__)
+            # The bounded object transport has already been killed/reaped.
+            # Remember the fallback so task retries do not repeat a broken
+            # object route before trying Files again. Keep credentials out.
+            cache.save("delivery_route", {"mode": "files"})
             _report_media_progress(progress_callback, "video_upload_retry", None)
             # Reuse the exact validated proxy, including when disk checkpointing failed.
-            deadline = time.monotonic() + ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS
-            with _ark_upload_body_capacity(upload_path, progress_callback, deadline):
-                file_id, api_key = _ark_upload_prepared_video(
-                    upload_path, api_key, duration_sec, progress_callback=progress_callback, deadline=deadline,
-                )
+            file_id, api_key = _ark_upload_files(upload_path, api_key, duration_sec, progress_callback)
         finally:
             if proxy_dir is not None:
                 shutil.rmtree(proxy_dir, ignore_errors=True)

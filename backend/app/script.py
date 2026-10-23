@@ -1413,7 +1413,12 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
             clean_detail(profile.get("appearance")),
             clean_detail(profile.get("clothing")),
         ]
-        details = list(dict.fromkeys(item for item in details if item and item != name))
+        # Compare individual visible facts, not an entire comma-joined field.
+        # Appearance and clothing often repeat the same garment in a different
+        # order or with a different leading verb.
+        details = [part.strip() for item in details for part in re.split(r"[、，；]", item)
+                   if part.strip() and part.strip() != name]
+        details = list(dict.fromkeys(details))
         if not details:
             # Some legacy provider responses put the whole introduction in
             # firstAppearance. Use only the descriptive lead before the name,
@@ -1423,13 +1428,79 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
                 first = first.split(name, 1)[0].rstrip("，、；：: ")
                 first = re.sub(r"的$", "", first).strip()
             if first and first != name and len(first) <= 48:
-                details = [first]
+                details = [part.strip() for part in re.split(r"[、，；]", first) if part.strip()]
         return name, details
 
     character_details = [details_for(profile) for profile in profiles if isinstance(profile, dict)]
     character_details = [(name, details) for name, details in character_details if name]
     if not character_details:
         return
+
+    visual_verb = r"(?:身穿|身着|穿着|穿|戴着|戴|梳着|梳|留着|留|扎着|扎|披着|披)"
+
+    def detail_key(detail: str) -> str:
+        key = re.sub(r"\s+", "", detail).strip("的、， ")
+        key = re.sub(r"^" + visual_verb, "", key)
+        return key.replace("全套制服", "制服")
+
+    name_pattern = re.compile("|".join(re.escape(name) for name, _ in
+                                      sorted(character_details, key=lambda item: -len(item[0]))))
+
+    def prefix_tokens(details: list[str]):
+        keys = {detail_key(detail) for detail in details if len(detail_key(detail)) >= 2}
+        alternatives = [re.escape(key).replace("制服", "(?:全套)?制服")
+                        for key in sorted(keys, key=len, reverse=True)]
+        if not alternatives:
+            return None
+        fact = visual_verb + "?(?:" + "|".join(alternatives) + ")"
+        return re.compile("(" + fact + r")(?:的)?(?:[、，]\s*)?")
+
+    def context(text: str, name: str) -> tuple[int, int, str]:
+        mentions = list(name_pattern.finditer(text))
+        target = next((m for m in mentions if m.group() == name), None)
+        if target is None:
+            return 0, 0, ""
+        previous = max((m.end() for m in mentions if m.end() <= target.start()), default=0)
+        boundary = max((m.end() for m in re.finditer(r"[。！？；]", text[:target.start()])), default=0)
+        start = max(previous, boundary)
+        # Only an immediate post-name appearance predicate belongs to this
+        # character. Later descriptions may introduce the next person or refer
+        # to a garment being handed over rather than worn.
+        suffix = text[target.end():]
+        next_name = name_pattern.search(suffix)
+        if next_name:
+            suffix = suffix[:next_name.start()]
+        suffix = re.split(r"[，。！？；]", suffix, maxsplit=1)[0]
+        if not re.match(r"[（(]?" + visual_verb, suffix):
+            suffix = ""
+        prefix = text[start:target.start()]
+        # Do not reuse a previous character's post-name wardrobe statement.
+        if previous > 0 and previous == start and re.match(visual_verb, prefix):
+            split = re.search(r"[，。！？；]", prefix)
+            prefix = prefix[split.end():] if split else ""
+        return start, target.start(), prefix + name + suffix
+
+    def dedupe_prefix(prefix: str, details: list[str]) -> str:
+        # Only a contiguous run of known profile facts immediately before this
+        # character qualifies. Never deduplicate arbitrary actions or dialogue.
+        token = prefix_tokens(details)
+        if token is None:
+            return prefix
+        run = re.search("(?:" + token.pattern + ")+$", prefix)
+        if run is None:
+            return prefix
+        parts = list(token.finditer(run.group()))
+        seen: set[str] = set()
+        kept = []
+        for part in parts:
+            key = detail_key(part.group(1))
+            if key not in seen:
+                kept.append(part.group(1))
+                seen.add(key)
+        if len(kept) == len(parts):
+            return prefix
+        suffix = "的" if run.group().endswith("的") else (run.group()[-1] if run.group().endswith(("、", "，")) else "")
+        return prefix[:run.start()] + "、".join(kept) + suffix
 
     introduced: set[str] = set()
     for block in blocks:
@@ -1444,7 +1515,31 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
             if not details:
                 introduced.add(name)
                 continue
-            missing = [detail for detail in details if detail not in text]
+            start, position, local = context(text, name)
+            if not local:
+                continue
+            prefix = text[start:position]
+            cleaned = dedupe_prefix(prefix, details)
+            if cleaned != prefix:
+                text = text[:start] + cleaned + text[position:]
+                block["text"] = normalize_text(text, sentence=True)
+                start, position, local = context(text, name)
+            local_key = detail_key(local)
+            missing = []
+            seen_details: set[str] = set()
+            for detail in details:
+                key = detail_key(detail)
+                if not key or key in seen_details:
+                    continue
+                seen_details.add(key)
+                if key in local_key:
+                    continue
+                # A scene may show a wardrobe change. Do not insert the global
+                # profile's old colour/garment over an existing visible one.
+                garment = re.search(r"制服|外套|毛衣|衬衫|长裤|短裤|安全帽|帽子|裙子|工装", key)
+                if garment and garment.group() in local:
+                    continue
+                missing.append(detail)
             if missing:
                 descriptor = compact_character_detail("、".join(missing), max_chars=72)
                 styled_with_suffix = False
