@@ -13,6 +13,11 @@ from app.script import (normalize_script, script_quality, restore_spoken_subtitl
 
 def action_core(text, profiles):
     """Ignore only profile facts while proving actions survived enrichment."""
+    ignored = r'[\s的、，。！？；：:（）()]'
+    # Canonicalize both sides before removing facts: an older nested insertion
+    # can leave punctuation inside the outer copy after its inner copy is gone.
+    # These characters were already ignored by the final core comparison.
+    text = re.sub(ignored, '', text)
     verb = r"(?:身穿|身着|穿着|穿|戴着|戴|梳着|梳|留着|留|扎着|扎|披着|披)?"
     facts = set()
     for profile in profiles:
@@ -40,13 +45,14 @@ def action_core(text, profiles):
     # repeat a fact that an older normalizer already inserted. Remove only
     # exact normalized profile phrases in addition to the verb-prefixed forms.
     exact_facts = {
-        re.sub(r'\s+', '', fact.strip('。！？；; '))
+        re.sub(ignored, '', fact.strip('。！？；; '))
         for fact in facts
         if len(fact.strip('。！？；; ')) >= 2
     }
     patterns = [re.compile(re.escape(fact)) for fact in sorted(exact_facts, key=len, reverse=True)]
     for fact in sorted(facts, key=len, reverse=True):
         key = re.sub('^' + verb, '', fact.strip()).strip('的 ')
+        key = re.sub(ignored, '', key)
         if key:
             pattern = re.escape(key).replace('全套制服', '制服').replace('制服', '(?:全套)?制服')
             patterns.append(re.compile(verb + pattern + r'(?:的)?'))
@@ -59,7 +65,7 @@ def action_core(text, profiles):
             text = pattern.sub('', text)
         if text == previous:
             break
-    return re.sub(r'[\s的、，。！？；：:（）()]', '', text)
+    return text
 
 
 def compare_scripts(old, new, counts):

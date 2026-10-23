@@ -53,6 +53,25 @@ class ContentReplayTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             replay.compare_scripts(nested, original, Counter())
 
+    def test_punctuation_inside_nested_facts_does_not_hide_the_outer_fact(self):
+        original = self.fixture()
+        original['characterProfiles'] = [{
+            'name': '门卫', 'appearance': '男性，佩戴绿色制式门卫帽',
+            'clothing': '绿色门卫制服，制服胸口印有白色标识',
+        }]
+        original['scenes'][0]['blocks'][0]['text'] = (
+            '两名穿绿色制服的男性，佩戴绿色制式门卫帽、绿色门卫制服、'
+            '制服胸口印有白色标识的门卫上前推门。')
+        nested = deepcopy(original)
+        nested['scenes'][0]['blocks'][0]['text'] = (
+            '两名穿绿色制服的男性，佩戴绿色制式男性，佩戴绿色制式门卫帽、'
+            '绿色门卫制服、制服胸口印有白色标识的门卫帽、绿色门卫制服，'
+            '制服胸口印有白色标识的门卫上前推门。')
+        replay.compare_scripts(nested, original, Counter())
+        nested['scenes'][0]['blocks'][0]['text'] = nested['scenes'][0]['blocks'][0]['text'].replace('推门', '关门')
+        with self.assertRaises(AssertionError):
+            replay.compare_scripts(nested, original, Counter())
+
 
 if __name__ == '__main__':
     unittest.main()
