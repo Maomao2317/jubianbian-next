@@ -36,7 +36,15 @@ def action_core(text, profiles):
                 suffix = fact.rsplit(marker, 1)[-1]
                 if len(suffix) >= 2:
                     facts.add(suffix)
-    patterns = []
+    # Profile enrichment may append a fact without its descriptive verb, or
+    # repeat a fact that an older normalizer already inserted. Remove only
+    # exact normalized profile phrases in addition to the verb-prefixed forms.
+    exact_facts = {
+        re.sub(r'\s+', '', fact.strip('。！？；; '))
+        for fact in facts
+        if len(fact.strip('。！？；; ')) >= 2
+    }
+    patterns = [re.compile(re.escape(fact)) for fact in sorted(exact_facts, key=len, reverse=True)]
     for fact in sorted(facts, key=len, reverse=True):
         key = re.sub('^' + verb, '', fact.strip()).strip('的 ')
         if key:
