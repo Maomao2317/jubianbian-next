@@ -66,6 +66,12 @@ class VisualDescriptionTests(unittest.TestCase):
         text = self.enrich("周青抬起右手，年轻男性、深蓝色巡警制服、头戴黑色警帽的巡警后退。", profiles)
         self.assertEqual(text, "周青抬起右手，年轻男性、深蓝色巡警制服、头戴黑色警帽的巡警后退。")
 
+    def test_role_name_inside_appearance_fact_does_not_split_the_introduction(self):
+        profiles = [{"name": "小男孩", "appearance": "短发小男孩、手腕上有一处浅色痕迹",
+                     "clothing": "白色短袖衬衫、灰色短裤、黑白条纹长袜、黑皮鞋、灰色领带"}]
+        original = "穿校服短裤的短发小男孩、手腕上有一处浅色痕迹、白色短袖衬衫、灰色短裤、黑白条纹长袜、黑皮鞋、灰色领带的小风哼了一声转身跑走。"
+        self.assertEqual(self.enrich(original, profiles), original)
+
     def test_normalization_and_dialogue_are_stable_across_read_export_cycles(self):
         raw = {"characters": ["周青"], "characterProfiles": [{"name": "周青", "appearance": "黑色短发、蓝色外套",
                                                            "clothing": "穿蓝色外套、戴白色帽子"}],

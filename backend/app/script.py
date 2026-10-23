@@ -1528,14 +1528,15 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         key = re.sub(r"^" + visual_verb, "", key)
         return key.replace("全套制服", "制服")
 
-    def character_pattern(name: str, details: list[str]) -> str:
-        # Role names also occur inside clothing nouns (e.g. 巡警制服).
-        # Such a substring is not the character's position in the action.
-        tails = [tail for tail in ("全套制服", "制服", "服装", "衣服", "外套", "帽子", "服", "装")
-                 if any(name + tail in detail_key(detail) for detail in details)]
-        return re.escape(name) + ("(?!(?:" + "|".join(map(re.escape, tails)) + "))" if tails else "")
-
-    name_pattern = re.compile("|".join(character_pattern(name, details) for name, details in
+    # A role label can be embedded in one of its own appearance facts, such
+    # as 巡警 in 深蓝色巡警制服 or 小男孩 in 短发小男孩. It is not a
+    # separate mention to enrich or a boundary between two characters.
+    embedded_facts = {
+        name: [re.compile(re.escape(key).replace("制服", "(?:全套)?制服"))
+               for detail in details if name in (key := detail_key(detail)) and key != name]
+        for name, details in character_details
+    }
+    name_pattern = re.compile("|".join(re.escape(name) for name, _ in
                                       sorted(character_details, key=lambda item: -len(item[0]))))
 
     def prefix_tokens(details: list[str]):
@@ -1548,7 +1549,10 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         return re.compile("(" + fact + r")(?:的)?(?:[、，]\s*)?")
 
     def context(text: str, name: str) -> tuple[int, int, str]:
-        mentions = list(name_pattern.finditer(text))
+        mentions = [m for m in name_pattern.finditer(text)
+                    if not any(fact.start() <= m.start() and fact.end() >= m.end()
+                               for pattern in embedded_facts.get(m.group(), [])
+                               for fact in pattern.finditer(text))]
         target = next((m for m in mentions if m.group() == name), None)
         if target is None:
             return 0, 0, ""
@@ -1558,10 +1562,8 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         # Only an immediate post-name appearance predicate belongs to this
         # character. Later descriptions may introduce the next person or refer
         # to a garment being handed over rather than worn.
-        suffix = text[target.end():]
-        next_name = name_pattern.search(suffix)
-        if next_name:
-            suffix = suffix[:next_name.start()]
+        next_name = next((m for m in mentions if m.start() >= target.end()), None)
+        suffix = text[target.end():next_name.start() if next_name else len(text)]
         suffix = re.split(r"[，。！？；]", suffix, maxsplit=1)[0]
         if not re.match(r"[（(]?" + visual_verb, suffix):
             suffix = ""
