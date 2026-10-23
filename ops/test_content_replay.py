@@ -42,6 +42,17 @@ class ContentReplayTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             replay.verify_description_stability(incomplete)
 
+    def test_nested_exact_profile_facts_do_not_change_the_action_core(self):
+        original = self.fixture()
+        original['characterProfiles'][0]['clothing'] = '蓝色带条纹的外套'
+        original['scenes'][0]['blocks'][0]['text'] = '蓝色带条纹的外套的周青推门。'
+        nested = deepcopy(original)
+        nested['scenes'][0]['blocks'][0]['text'] = '蓝色带条纹的蓝色带条纹的外套的外套的周青推门。'
+        replay.compare_scripts(nested, original, Counter())
+        nested['scenes'][0]['blocks'][0]['text'] = nested['scenes'][0]['blocks'][0]['text'].replace('推门', '关门')
+        with self.assertRaises(AssertionError):
+            replay.compare_scripts(nested, original, Counter())
+
 
 if __name__ == '__main__':
     unittest.main()

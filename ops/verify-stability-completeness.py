@@ -24,11 +24,21 @@ def action_core(text, profiles):
             name = str(profile.get('name') or '')
             if name and name in value:
                 facts.add(value.split(name, 1)[0].rstrip('的，、；：: '))
+    patterns = []
     for fact in sorted(facts, key=len, reverse=True):
         key = re.sub('^' + verb, '', fact.strip()).strip('的 ')
         if key:
             pattern = re.escape(key).replace('全套制服', '制服').replace('制服', '(?:全套)?制服')
-            text = re.sub(verb + pattern, '', text)
+            patterns.append(re.compile(verb + pattern + r'(?:的)?'))
+    # The deployed enricher could insert a fact into the middle of the same
+    # fact. Removing the inner copy exposes the complete outer copy, so strip
+    # exact known facts to a fixed point before comparing the action itself.
+    while True:
+        previous = text
+        for pattern in patterns:
+            text = pattern.sub('', text)
+        if text == previous:
+            break
     return re.sub(r'[\s的、，。！？；：:（）()]', '', text)
 
 
