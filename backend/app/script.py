@@ -1559,7 +1559,13 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         if target is None:
             return 0, 0, ""
         previous = max((m.end() for m in mentions if m.end() <= target.start()), default=0)
-        boundary = max((m.end() for m in re.finditer(r"[。！？；]", text[:target.start()])), default=0)
+        # A logo/initialism can contain normalized sentence punctuation (A.B.
+        # becomes A。B。). It remains one exact profile fact, so its internal
+        # punctuation must not hide earlier details in the same introduction.
+        tokens = prefix_tokens(next(facts for character, facts in character_details if character == name))
+        fact_spans = [(m.start(1), m.end(1)) for m in tokens.finditer(text)] if tokens else []
+        boundary = max((m.end() for m in re.finditer(r"[。！？；]", text[:target.start()])
+                        if not any(start <= m.start() < end for start, end in fact_spans)), default=0)
         start = max(previous, boundary)
         # Only an immediate post-name appearance predicate belongs to this
         # character. Later descriptions may introduce the next person or refer

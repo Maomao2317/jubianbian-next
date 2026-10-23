@@ -49,6 +49,18 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertIn("白色帽子", text)
         self.assertIn("把门打开", text)
 
+    def test_punctuation_inside_profile_fact_does_not_split_the_introduction(self):
+        profiles = [{"name": "巡逻员", "appearance": "黑色短发、面容清瘦",
+                     "clothing": "印A.B.标识的蓝色背心、银色项链"}]
+        for original in ("巡逻员打开门。", "路人停下。巡逻员打开门。",
+                         "黑色短发、面容清瘦、印A。B。标识的蓝色背心、银色项链的黑色短发的巡逻员打开门。"):
+            with self.subTest(original=original):
+                text = self.enrich(original, profiles)
+                for fact in ("黑色短发", "面容清瘦", "蓝色背心", "银色项链"):
+                    self.assertEqual(text.count(fact), 1)
+                self.assertTrue(text.endswith("巡逻员打开门。"))
+                self.assertEqual(text.count("路人停下。"), original.count("路人停下。"))
+
     def test_next_characters_leading_clothes_do_not_cover_the_first(self):
         profiles = [{"name": name, "clothing": "穿蓝色外套"} for name in ("周青", "林海")]
         text = self.enrich("周青扶着穿蓝色外套的林海走出房门。", profiles)
