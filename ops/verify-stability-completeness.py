@@ -7,7 +7,7 @@ import re
 import sqlite3
 import time
 
-from app.script import normalize_script, script_quality
+from app.script import normalize_script, script_quality, restore_spoken_subtitles, evidence_comparison_text
 
 
 def action_core(text, profiles):
@@ -60,10 +60,23 @@ def main():
         raw = json.loads(row['result_json'])
         evidence = json.loads(row['evidence_json']) if row['evidence_json'] else None
         old_script = baseline.normalize_script(deepcopy(raw), row['title'])
-        new_script = normalize_script(deepcopy(raw), row['title'])
+        repaired_raw = deepcopy(raw)
+        recovered = restore_spoken_subtitles(repaired_raw, evidence)
+        counts['recoveredSpokenSubtitles'] += recovered
+        if recovered:
+            for before, after in zip(raw['scenes'], repaired_raw['scenes']):
+                for left, right in zip(before.get('blocks', []), after.get('blocks', [])):
+                    if left == right:
+                        continue
+                    assert left.get('type') in {'screen_text', 'subtitle', 'caption'}
+                    assert left.get('screenType', 'subtitle') == 'subtitle'
+                    assert right.get('type') in {'dialogue', 'vo'}
+                    assert evidence_comparison_text(left['text']) == evidence_comparison_text(right['text'])
+                    assert (left.get('startSec'), left.get('endSec')) == (right.get('startSec'), right.get('endSec'))
+        new_script = normalize_script(deepcopy(raw), row['title'], evidence)
         counts['changedTasks'] += old_script != new_script
-        compare_scripts(old_script, new_script, counts)
-        repeated = normalize_script(deepcopy(new_script), row['title'])
+        compare_scripts(baseline.normalize_script(repaired_raw, row['title']), new_script, counts)
+        repeated = normalize_script(deepcopy(new_script), row['title'], evidence)
         assert [[b.get('text') for b in s['blocks']] for s in repeated['scenes']] == [[b.get('text') for b in s['blocks']] for s in new_script['scenes']], 'Repeated normalization grew descriptions'
         old_quality = baseline.script_quality(deepcopy(old_script), 'audit', deepcopy(evidence))
         tick = time.monotonic()

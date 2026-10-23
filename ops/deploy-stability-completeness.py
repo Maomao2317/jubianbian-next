@@ -22,7 +22,8 @@ SUPPORT = 'ops/restore-gpu-routing.py'
 # Preserve the verified upload deadline and every other runtime setting,
 # including upload concurrency and the Files fallback.
 DEFAULTS = {}
-APP_CHANGES = {'backend/app/resource_limits.py', 'backend/app/providers.py', 'backend/app/script.py'}
+APP_CHANGES = {'backend/app/resource_limits.py', 'backend/app/providers.py', 'backend/app/script.py',
+               'backend/app/processing.py', 'backend/app/task_store.py'}
 FRONTEND_TEST_CHANGES = set()
 
 

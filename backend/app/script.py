@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from difflib import SequenceMatcher
 import math
 import re
@@ -457,6 +458,90 @@ def subtitle_aligned_evidence(
         return evidence, 0
     aligned_audio = {**audio, "items": [replacements.get(i, item) for i, item in enumerate(audio["items"])]}
     return {**evidence, "sources": [aligned_audio if s is audio else s for s in sources]}, len(replacements)
+
+
+def restore_spoken_subtitles(script: dict[str, Any], evidence: dict[str, Any] | None = None) -> int:
+    """Recover misclassified speech only from voice metadata or timed ASR.
+
+    OCR, a character name and nearby action alone cannot establish speech.
+    Keep visual messages/titles and captions already represented by speech.
+    Unknown voices stay unattributed rather than borrowing the visible actor.
+    """
+    def span(block):
+        start, end = block.get("startSec"), block.get("endSec")
+        if type(start) in {int, float} and type(end) in {int, float} and 0 <= start <= end < math.inf:
+            return start, end
+        return None
+
+    audio = [item for source in (evidence or {}).get("sources") or []
+             if isinstance(source, dict) and source.get("kind") == "audio" and source.get("status") == "available"
+             for item in source.get("items") or [] if isinstance(item, dict)
+             and item.get("type") == "transcript_segment" and span(item)
+             and str(item.get("confidence") or "").lower() != "low" and not item.get("uncertain")]
+    scenes = [scene for scene in script.get("scenes", []) if isinstance(scene, dict)]
+    def episode(scene):
+        match = re.match(r"^\s*(\d+)-\d+", str(scene.get("heading") or ""))
+        return match.group(1) if match else str(script.get("episodeNumber") or "1")
+    spoken = [(episode(scene), block) for scene in scenes for block in scene.get("blocks", [])
+              if isinstance(block, dict) and block.get("type") in {"dialogue", "vo", "os"}]
+    # A stitched legacy script can reset clocks at episode boundaries. ASR
+    # without episode labels cannot safely distinguish those occurrences.
+    clocks = {}
+    for scene in scenes:
+        for block in scene.get("blocks", []):
+            if isinstance(block, dict) and (window := span(block)):
+                prior = clocks.get(episode(scene), window)
+                clocks[episode(scene)] = (min(prior[0], window[0]), max(prior[1], window[1]))
+    ranges = list(clocks.values())
+    reset_clocks = any(a[0] < b[1] and b[0] < a[1] for i, a in enumerate(ranges) for b in ranges[i + 1:])
+    if reset_clocks:
+        audio = []
+    changed = 0
+    for scene in scenes:
+        for block in scene.get("blocks", []):
+            if not isinstance(block, dict) or block.get("type") not in {"screen_text", "subtitle", "caption"}:
+                continue
+            if str(block.get("screenType") or "subtitle").lower() != "subtitle":
+                continue
+            text = evidence_comparison_text(block.get("text"))
+            window = span(block)
+            if not text or any(ep == episode(scene) and span(line) and window
+                               and span(line)[0] <= window[1] + .35 and span(line)[1] >= window[0] - .35
+                               and text in evidence_comparison_text(line.get("text")) for ep, line in spoken):
+                continue
+            if window and window[1] > window[0] and any(
+                ep == episode(scene) and span(line)
+                and min(window[1], span(line)[1]) - max(window[0], span(line)[0]) >= .65 * (window[1] - window[0])
+                for ep, line in spoken
+            ):
+                continue
+            source = str(block.get("voiceSource") or "").lower()
+            kind = _VO_KIND_ALIASES.get(str(block.get("voKind") or "").lower()) or _VO_KIND_ALIASES.get(source)
+            mouth_value = block.get("mouthMoving", block.get("lipSync"))
+            mouth = mouth_value is True or str(mouth_value).lower() in {"true", "1", "yes"}
+            explicit = mouth is True or source in {"audio", "speech", "onscreen", "on_screen"} or kind not in {None, "unknown"} or block.get("textSource") == "audio"
+            matches = [item for item in audio if window and span(item)[0] < window[1] + .15
+                       and span(item)[1] > window[0] - .15
+                       and (text == evidence_comparison_text(item.get("text")) or
+                            (len(text) >= 4 and text in evidence_comparison_text(item.get("text"))
+                             and min(window[1], span(item)[1]) - max(window[0], span(item)[0]) >= .5 * (window[1] - window[0])))]
+            if not explicit and not matches:
+                continue
+            block["type"] = "dialogue" if not kind and (mouth is True or source in {"onscreen", "on_screen"}) else "vo"
+            block["speaker"] = block.get("speaker") or (block.get("visibleSpeaker") if mouth is True else None) or "未知说话人"
+            if block["type"] == "vo":
+                block["voKind"] = kind or "unknown"
+            block.pop("screenType", None)
+            block.pop("suppressInOutput", None)
+            block["text"] = normalize_dialogue_text(block.get("text"))
+            block["sourceText"] = block["text"]
+            block["subtitleRecovered"] = True
+            # Do not mistake unknown speaker identity for unclear words.
+            if not explicit:
+                block["textSource"] = "audio"
+            spoken.append((episode(scene), block))
+            changed += 1
+    return changed
 
 
 def suppress_redundant_subtitles(script: dict[str, Any]) -> None:
@@ -1606,9 +1691,12 @@ def derive_scene_summary(blocks: list[dict[str, Any]]) -> str:
     return f"本场从“{excerpt(start)}”展开，经过对白与行动推进，最终以“{excerpt(end)}”收束。"
 
 
-def normalize_script(script: Any, title: str) -> dict[str, Any]:
+def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
         raise ArkError("方舟返回的剧本缺少 scenes 数组")
+
+    script = deepcopy(script)
+    restore_spoken_subtitles(script, evidence)
 
     alias_map: dict[str, str] = {}
 
@@ -2789,6 +2877,10 @@ def screenplay_output_scenes(script: dict[str, Any]) -> list[dict[str, Any]]:
 
 def script_to_markdown(task: dict[str, Any]) -> str:
     script = task.get("result") or {}
+    if isinstance(script, dict) and script.get("scenes"):
+        repaired = deepcopy(script)
+        if restore_spoken_subtitles(repaired, task.get("evidence")):
+            script = normalize_script(repaired, script.get("title") or task["title"])
     lines = [f"# {script.get('title') or task['title']}", ""]
 
     def quote_dialogue(text: Any) -> str:

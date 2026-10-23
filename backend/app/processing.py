@@ -43,6 +43,7 @@ from .script import (
     restore_evidence_boundary_segments,
     restore_transcript_gap_segments,
     restore_short_transcript_segments,
+    restore_spoken_subtitles,
     script_quality,
     subtitle_aligned_evidence,
     suppress_redundant_subtitles,
@@ -151,6 +152,8 @@ def _evaluate_quality(
     route: dict[str, Any],
     *, recover_evidence: bool = True,
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    if recover_evidence and restore_spoken_subtitles(script, evidence):
+        script.update(normalize_script(script, script.get("title") or "未命名视频"))
     evidence, subtitle_overrides = subtitle_aligned_evidence(script, evidence, update_script=recover_evidence)
     empty = {"segments": 0, "blocks": 0}
     boundary_recovered = restore_evidence_boundary_segments(script, evidence) if recover_evidence else empty

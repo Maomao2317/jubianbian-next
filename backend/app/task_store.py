@@ -24,6 +24,8 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
     raw_result = json.loads(raw_result_json) if include_result and raw_result_json else None
     quality_json = task.pop("quality_json", None)
     task["quality"] = json.loads(quality_json) if include_result and quality_json else None
+    raw_evidence = task.pop("evidence_json", None)
+    task["evidence"] = json.loads(raw_evidence) if include_result and raw_evidence else None
     # Normalize on read as well as on generation so older tasks immediately
     # benefit from the same punctuation, VO, scene-granularity and micro-detail
     # rules without rewriting their stored source response.
@@ -31,13 +33,11 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
         try:
             if (task["quality"] or {}).get("contentRepair"):
                 raw_result = restore_cached_scene_groups(task["id"], raw_result)
-            task["result"] = normalize_script(raw_result, display_title)
+            task["result"] = normalize_script(raw_result, display_title, task["evidence"])
         except (ArkError, TypeError, ValueError, KeyError):
             task["result"] = raw_result
     else:
         task["result"] = None
-    raw_evidence = task.pop("evidence_json", None)
-    task["evidence"] = json.loads(raw_evidence) if include_result and raw_evidence else None
     task["fileName"] = file_name
     task["episodeNumber"] = episode_from_filename(file_name)
     task["fileSize"] = task.pop("file_size", 0)
