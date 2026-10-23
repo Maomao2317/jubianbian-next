@@ -31,6 +31,16 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(text.count("蓝色外套"), 2)
         self.assertEqual(text.count("白色帽子"), 2)
 
+    def test_existing_fact_overlapping_a_longer_name_is_not_split(self):
+        profiles = [{"name": "母狮妈妈", "appearance": "成年母狮、金色毛发、褐色眼眸"}]
+        for original in ("成年母狮妈妈转身。", "幼崽靠近成年母狮妈妈，母狮妈妈转身。"):
+            with self.subTest(original=original):
+                text = self.enrich(original, profiles)
+                self.assertIn("金色毛发、褐色眼眸的成年母狮妈妈", text)
+                self.assertEqual(text.count("成年母狮"), 1)
+                self.assertEqual(text.count("母狮妈妈"), original.count("母狮妈妈"))
+                self.assertTrue(text.endswith("转身。"))
+
     def test_missing_fact_added_without_repeating_present_fact(self):
         text = self.enrich("穿蓝色外套的周青把门打开。", [{"name": "周青", "appearance": "黑色短发",
                                                           "clothing": "蓝色外套、白色帽子"}])

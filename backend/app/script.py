@@ -1647,12 +1647,23 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
                     descriptor = f"{action_lead}、{missing[1]}的{noun}"
                     styled_with_suffix = True
                 name_position = position
+                # A fact may overlap the beginning of a longer character
+                # label, e.g. 成年母狮 in 成年母狮妈妈. Inserting directly
+                # before 母狮妈妈 would split that fact and make it appear
+                # missing on the next read/export. Keep the exact phrase intact.
+                tokens = prefix_tokens(details)
+                if tokens is not None:
+                    name_position = min(
+                        (match.start(1) for match in tokens.finditer(text)
+                         if match.start(1) < position < match.end(1)),
+                        default=position,
+                    )
                 # Keep the wording natural for appearance verbs such as
                 # “梳/扎/穿/戴/编”; noun-like details read better directly
                 # before the name (for example “小女孩希希”).
                 needs_de = bool(re.search(r"(?:梳|扎|穿|戴|编|披|留|身着|穿着|戴着)", descriptor) or "、" in descriptor)
-                styled_name = f"{descriptor}{'' if styled_with_suffix else ('的' if needs_de else '')}{name}"
-                text = text[:name_position] + styled_name + text[name_position + len(name) :]
+                styled_prefix = f"{descriptor}{'' if styled_with_suffix else ('的' if needs_de else '')}"
+                text = text[:name_position] + styled_prefix + text[name_position:]
                 block["text"] = normalize_text(text, sentence=True)
             introduced.add(name)
 
