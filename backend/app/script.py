@@ -1528,13 +1528,15 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         key = re.sub(r"^" + visual_verb, "", key)
         return key.replace("全套制服", "制服")
 
-    # A role label can be embedded in one of its own appearance facts, such
-    # as 巡警 in 深蓝色巡警制服 or 小男孩 in 短发小男孩. It is not a
-    # separate mention to enrich or a boundary between two characters.
+    # Names inside any complete profile fact are descriptive references,
+    # rather than separate people to enrich or boundaries between people.
+    # This includes role labels in clothing and names in another person's
+    # description (for example 同情周青的遭遇).
     embedded_facts = {
         name: [re.compile(re.escape(key).replace("制服", "(?:全套)?制服"))
-               for detail in details if name in (key := detail_key(detail)) and key != name]
-        for name, details in character_details
+               for _, facts in character_details for detail in facts
+               if name in (key := detail_key(detail)) and key != name]
+        for name, _ in character_details
     }
     name_pattern = re.compile("|".join(re.escape(name) for name, _ in
                                       sorted(character_details, key=lambda item: -len(item[0]))))

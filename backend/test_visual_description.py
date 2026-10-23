@@ -72,6 +72,17 @@ class VisualDescriptionTests(unittest.TestCase):
         original = "穿校服短裤的短发小男孩、手腕上有一处浅色痕迹、白色短袖衬衫、灰色短裤、黑白条纹长袜、黑皮鞋、灰色领带的小风哼了一声转身跑走。"
         self.assertEqual(self.enrich(original, profiles), original)
 
+    def test_name_referenced_in_another_profile_is_not_an_insertion_boundary(self):
+        profiles = [{"name": "周青", "clothing": "穿灰色外套"},
+                    {"name": "骑手", "appearance": "年长男性、同情周青的遭遇",
+                     "clothing": "蓝色背心、蓝色头盔"}]
+        original = "年长男性、同情周青的遭遇、蓝色背心、蓝色头盔的年长男性、同情周青的遭遇的骑手伸手拍了拍周青的后背。"
+        text = self.enrich(original, profiles)
+        self.assertEqual(text.count("年长男性"), 1)
+        self.assertEqual(text.count("同情周青的遭遇"), 1)
+        self.assertEqual(text.count("灰色外套"), 1)
+        self.assertIn("骑手伸手拍了拍穿灰色外套的周青的后背", text)
+
     def test_normalization_and_dialogue_are_stable_across_read_export_cycles(self):
         raw = {"characters": ["周青"], "characterProfiles": [{"name": "周青", "appearance": "黑色短发、蓝色外套",
                                                            "clothing": "穿蓝色外套、戴白色帽子"}],
