@@ -14,16 +14,15 @@ import textwrap
 from urllib.request import urlopen
 from urllib.parse import quote
 
-BASELINE = '859f821c4a98d1226ae2c6d3b764cff2ef8aebb3'
-BUILD = 'video-reliability-20261023-r1'
+BASELINE = '1169ad1570ba8dc3a8c84c06b3302abb4bccd170'
+BUILD = 'video-reliability-20261023-r2'
 SELF = 'ops/deploy-stability-completeness.py'
 VERIFY = 'ops/verify-stability-completeness.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
-# Preserve the verified upload deadline and every other runtime setting,
-# including upload concurrency and the Files fallback.
-DEFAULTS = {}
-APP_CHANGES = {'backend/app/resource_limits.py', 'backend/app/providers.py', 'backend/app/script.py',
-               'backend/app/processing.py', 'backend/app/task_store.py'}
+# Align the Files fallback with the existing object-upload transport budget.
+# Every other effective setting, including upload concurrency, is preserved.
+DEFAULTS = {'ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS': '900'}
+APP_CHANGES = {'backend/app/config.py'}
 FRONTEND_TEST_CHANGES = set()
 
 
@@ -188,7 +187,7 @@ def main():
         assert current['HostConfig']['PortBindings'] == previous['HostConfig']['PortBindings']
         assert {k:v for k,v in routing.environment(current).items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'} == {k:v for k,v in old_env.items() if k not in DEFAULTS and k != 'JBB_BUILD_VERSION'}
         assert all(routing.environment(current).get(k) == v for k, v in DEFAULTS.items())
-        timeout_check = "from app import config; from app.resource_limits import CapacityTimeout; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; assert config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS == 600; assert issubclass(CapacityTimeout, TimeoutError); print('UPLOAD_BUDGETS_VERIFIED', config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS, config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS)"
+        timeout_check = "from app import config; from app.resource_limits import CapacityTimeout; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; assert config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS == 600; assert config.ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS == 900; assert config.ARK_UPLOAD_TIMEOUT_SECONDS == 120; assert issubclass(CapacityTimeout, TimeoutError); print('UPLOAD_BUDGETS_VERIFIED', config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS, config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS, config.ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS, config.ARK_UPLOAD_TIMEOUT_SECONDS)"
         print(output(['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', project+'-app-1', 'python', '-c', timeout_check]).decode().strip(), flush=True)
         print(args.step, verify_files(project, manifest), flush=True)
         for relative, digest in manifest.items():

@@ -372,6 +372,45 @@ class EvidenceReuseTests(unittest.TestCase):
 
 
 class UploadBudgetTests(unittest.TestCase):
+    def test_slow_progressing_files_upload_fits_extended_budget_without_changing_bytes(self):
+        # Reproduce a progressing 549-second transfer without sleeping. Each
+        # bounded write takes less than the unchanged 120-second stall limit.
+        payload = b"v" * (16 * 64 * 1024)
+        for budget in (240, 900):
+            clock = [0.0]
+            sent = bytearray()
+
+            def transport(request, timeout):
+                self.assertEqual(timeout, 120)
+                self.assertEqual(request.get_header("Content-length"), str(len(payload)))
+                for chunk in request.data:
+                    self.assertLessEqual(len(chunk), 64 * 1024)
+                    sent.extend(chunk)
+                    clock[0] += 549 / 16
+                response = Mock()
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                response.read.return_value = b'{"id":"uploaded"}'
+                return response
+
+            with (self.subTest(budget=budget),
+                  patch.object(providers.time, "monotonic", side_effect=lambda: clock[0]),
+                  patch.object(providers, "provider_budget"),
+                  patch.object(providers, "urlopen", side_effect=transport) as request):
+                if budget == 240:
+                    with self.assertRaises(ArkError) as caught:
+                        providers.ark_http("POST", "/files", payload, api_key="key", upload=True,
+                                           timeout=120, upload_deadline=budget, upload_capacity_held=True)
+                    self.assertEqual(caught.exception.provider_code, "video_upload_retry_exhausted")
+                    self.assertLess(len(sent), len(payload))
+                else:
+                    result = providers.ark_http("POST", "/files", payload, api_key="key", upload=True,
+                                                timeout=120, upload_deadline=budget, upload_capacity_held=True)
+                    self.assertEqual(result, {"id": "uploaded"})
+                    self.assertEqual(bytes(sent), payload)
+                    self.assertEqual(clock[0], 549)
+                self.assertEqual(request.call_count, 1)
+
     def test_capacity_wait_is_retryable_but_ambiguous_upload_failures_are_not(self):
         waiting = ArkError("upload slot busy", provider_code="video_upload_capacity_timeout")
         ambiguous = ArkError("connection ended after send", provider_code="video_upload_retry_exhausted")

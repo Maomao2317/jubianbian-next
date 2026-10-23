@@ -70,3 +70,32 @@ the former needed a rerun outside the local sandbox to create temporary files.
 
 These checks do not guarantee that third-party networks or model services will
 never fail, and they are not a throughput or load benchmark.
+
+## Follow-up: Files transport budget
+
+Guarded production recovery completed one previously failed original. A second
+original failed again after object transport returned an I/O error and the
+Files fallback exhausted its 240-second transport budget. The retained route
+checkpoint selected Files on subsequent recovery. A successful object upload
+of 36,815,955 bytes in the same window took 549.6 seconds. This is evidence
+that a progressing upload can need longer than the old Files budget; it is
+not evidence of a model-generation slot shortage.
+
+The r2 follow-up aligns the Files total transfer/retry budget with the existing
+900-second object-upload budget. The per-socket timeout remains 120 seconds,
+admission remains 600 seconds, and concurrency, media bytes, compression,
+model routing, content normalization, billing, and data mounts are preserved.
+The additional runtime source change is limited to `backend/app/config.py`.
+Compose defaults and the example environment match the new default; deployment
+explicitly pins this one setting so an older effective override cannot retain
+240 seconds.
+
+Code review covered bounded retries, slow writes versus stalled writes,
+configuration pinning, source-scope guards, and idle-only promotion. A simulated
+549-second transfer reproduces failure under 240 seconds and succeeds with
+900 seconds while preserving every byte and fixed-length framing. The local
+359-test run had 8 skips and one Windows child-start timing failure; the failing
+test plus all nine upload-budget tests passed on a focused rerun. Deployment
+must still pass the full backend suite in the built Linux image before staging.
+No claim of complete account recovery is made until remaining guarded retries
+have been observed to completion.

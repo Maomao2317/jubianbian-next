@@ -130,7 +130,10 @@ ARK_UPLOAD_PROXY_THREADS = max(1, min(8, int(os.getenv("ARK_UPLOAD_PROXY_THREADS
 # still have a bounded wait before the task can fail over.
 ARK_UPLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TIMEOUT_SECONDS", "120")))
 ARK_UPLOAD_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_UPLOAD_ATTEMPTS", "2"))))
-ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS", "240")))
+# The Files fallback must also tolerate the observed slow delivery route:
+# a progressing 35 MiB upload took 549 seconds. Keep the per-socket stall
+# timeout separate and bound the entire Files transfer/retry sequence.
+ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS", "900")))
 ARK_UPLOAD_MAX_IN_FLIGHT = max(
     1,
     min(ARK_MAX_IN_FLIGHT, int(os.getenv("JBB_ARK_UPLOAD_MAX_IN_FLIGHT", "2"))),
