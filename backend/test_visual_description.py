@@ -119,6 +119,32 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(normalized_again["scenes"][0]["blocks"][0], blocks[0])
         self.assertEqual(normalized_again["scenes"][0]["blocks"][1]["text"], blocks[1]["text"])
 
+    def test_scene_only_names_delimit_mentions_in_other_scenes_too(self):
+        raw = {"characters": ["周青"], "characterProfiles": [
+            {"name": "周青", "appearance": "留着黑色长发"}], "scenes": [
+                {"heading": "1-1 日 内 门厅", "location": "门厅", "blocks": [
+                    {"type": "action", "text": "周青爸爸递给周青一只玩偶。"}]},
+                {"heading": "1-2 日 内 厨房", "location": "厨房", "characters": ["周青爸爸"],
+                 "blocks": [{"type": "action", "text": "周青爸爸推开门。"}]}]}
+        for source in ("cast", "cast_dict", "speaker", "visibleSpeaker"):
+            with self.subTest(source=source):
+                candidate = deepcopy(raw)
+                later = candidate["scenes"][1]
+                if source == "cast_dict":
+                    later["characters"] = [{"name": "周青爸爸"}]
+                elif source != "cast":
+                    later.pop("characters")
+                    later["blocks"].append({"type": "dialogue", "speaker": "周青爸爸",
+                                            "text": "来了。"} if source == "speaker" else {
+                                                "type": "vo", "speaker": "旁白",
+                                                "visibleSpeaker": "周青爸爸", "text": "他回来了。"})
+                first = normalize_script(candidate, "第1集")
+                self.assertEqual(first["scenes"][0]["blocks"][0]["text"], "周青爸爸递给留着黑色长发的周青一只玩偶。")
+                self.assertEqual(first["scenes"][1]["blocks"][0]["text"], "周青爸爸推开门。")
+                again = normalize_script(deepcopy(first), "第1集")
+                self.assertEqual([[(b["type"], b["text"]) for b in s["blocks"]] for s in again["scenes"]],
+                                 [[(b["type"], b["text"]) for b in s["blocks"]] for s in first["scenes"]])
+
 
 if __name__ == "__main__":
     unittest.main()

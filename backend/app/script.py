@@ -2015,6 +2015,26 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
         text = str(value or "不明").strip()
         return text if text in {"内", "外", "内外", "内转外", "外转内", "不明"} else "不明"
 
+    # Scene-only cast and speaker labels still delimit people when the
+    # provider omitted their profiles. Reserve names across the whole script:
+    # a short name such as 周青 must not match inside 周青爸爸 in an earlier
+    # scene. The result synthesizes empty profiles later, so use those same
+    # boundaries now without inventing any appearance details or scene cast.
+    enrichment_names = names(script.get("characters"))
+    for raw_scene in script["scenes"]:
+        if not isinstance(raw_scene, dict):
+            continue
+        enrichment_names.extend(names(raw_scene.get("characters")))
+        raw_blocks = raw_scene.get("blocks")
+        if isinstance(raw_blocks, list):
+            for raw_block in raw_blocks:
+                if isinstance(raw_block, dict) and str(raw_block.get("type") or "").strip().lower() in {"dialogue", "vo"}:
+                    enrichment_names.extend(names([raw_block.get("speaker"), raw_block.get("visibleSpeaker")]))
+    enrichment_profile_names = {profile["name"] for profile in character_profiles}
+    enrichment_profiles = character_profiles + [
+        {"name": name} for name in dict.fromkeys(enrichment_names)
+        if name not in enrichment_profile_names
+    ]
     scenes: list[dict[str, Any]] = []
     for index, raw_scene in enumerate(script["scenes"], start=1):
         if not isinstance(raw_scene, dict):
@@ -2294,15 +2314,6 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
             if str(profile.get("name") or "").strip()
         ]
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
-        # Scene-only cast labels still delimit people, even when the provider
-        # omitted their profiles. Otherwise a short name such as 周青 matches
-        # inside 周青爸爸 and receives the daughter's appearance. The returned
-        # script synthesizes these empty profiles later; use the same name
-        # boundaries for the first enrichment pass without inventing details.
-        enrichment_profiles = character_profiles + [
-            {"name": name} for name in dict.fromkeys(fallback_characters)
-            if name and name not in all_profile_names
-        ]
         add_character_visual_descriptions(blocks, enrichment_profiles)
         known_for_scene = [name for name in dict.fromkeys(fallback_characters) if name]
         if known_for_scene:

@@ -8,7 +8,8 @@ import sqlite3
 import time
 
 from app.script import (normalize_script, script_quality, restore_spoken_subtitles,
-                        evidence_comparison_text, add_character_visual_descriptions)
+                        evidence_comparison_text, add_character_visual_descriptions,
+                        _script_character_names)
 
 
 def action_core(text, profiles):
@@ -49,13 +50,17 @@ def action_core(text, profiles):
         for fact in facts
         if len(fact.strip('。！？；; ')) >= 2
     }
-    patterns = [re.compile(re.escape(fact)) for fact in sorted(exact_facts, key=len, reverse=True)]
+    patterns = []
     for fact in sorted(facts, key=len, reverse=True):
         key = re.sub('^' + verb, '', fact.strip()).strip('的 ')
         key = re.sub(ignored, '', key)
         if key:
             pattern = re.escape(key).replace('全套制服', '制服').replace('制服', '(?:全套)?制服')
             patterns.append(re.compile(verb + pattern + r'(?:的)?'))
+    # Consume an optional appearance verb together with its exact fact before
+    # stripping bare facts; otherwise removing 蓝色外套 first leaves 穿 behind.
+    patterns.extend(re.compile(re.escape(fact))
+                    for fact in sorted(exact_facts, key=len, reverse=True))
     # The deployed enricher could insert a fact into the middle of the same
     # fact. Removing the inner copy exposes the complete outer copy, so strip
     # exact known facts to a fixed point before comparing the action itself.
@@ -84,9 +89,15 @@ def compare_scripts(old, new, counts):
 
 
 def verify_description_stability(script):
+    profiles = script.get('characterProfiles', [])
+    profiled = {p['name'] for p in profiles}
+    # Check the same structured-name boundaries as normalization, including a
+    # visible speaker whose profile may legitimately be absent.
+    profiles = profiles + [{'name': name} for name in _script_character_names(script, include_generic=True)
+                           if name not in profiled]
     for scene in script['scenes']:
         blocks = deepcopy(scene['blocks'])
-        add_character_visual_descriptions(blocks, script.get('characterProfiles', []))
+        add_character_visual_descriptions(blocks, profiles)
         assert blocks == scene['blocks'], 'Repeated enrichment changed descriptions'
 
 
