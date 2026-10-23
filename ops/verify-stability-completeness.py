@@ -7,7 +7,8 @@ import re
 import sqlite3
 import time
 
-from app.script import normalize_script, script_quality, restore_spoken_subtitles, evidence_comparison_text
+from app.script import (normalize_script, script_quality, restore_spoken_subtitles,
+                        evidence_comparison_text, add_character_visual_descriptions)
 
 
 def action_core(text, profiles):
@@ -46,6 +47,13 @@ def compare_scripts(old, new, counts):
     assert old == new, 'Dialogue, metadata, timing or structure changed'
 
 
+def verify_description_stability(script):
+    for scene in script['scenes']:
+        blocks = deepcopy(scene['blocks'])
+        add_character_visual_descriptions(blocks, script.get('characterProfiles', []))
+        assert blocks == scene['blocks'], 'Repeated enrichment changed descriptions'
+
+
 def main():
     spec = importlib.util.spec_from_file_location('app.stability_baseline', '/baseline_script.py')
     baseline = importlib.util.module_from_spec(spec)
@@ -76,8 +84,15 @@ def main():
         new_script = normalize_script(deepcopy(raw), row['title'], evidence)
         counts['changedTasks'] += old_script != new_script
         compare_scripts(baseline.normalize_script(repaired_raw, row['title']), new_script, counts)
+        verify_description_stability(new_script)
         repeated = normalize_script(deepcopy(new_script), row['title'], evidence)
-        assert [[b.get('text') for b in s['blocks']] for s in repeated['scenes']] == [[b.get('text') for b in s['blocks']] for s in new_script['scenes']], 'Repeated normalization grew descriptions'
+        # Existing scene merging can expose repeated action subjects to the
+        # second normalization pass. Compare that pass with the deployed
+        # baseline too, while checking appearance enrichment itself exactly.
+        compare_scripts(baseline.normalize_script(deepcopy(new_script), row['title']), repeated, Counter())
+        counts['secondPassTextChanges'] += any(
+            a.get('text') != b.get('text') for x, y in zip(new_script['scenes'], repeated['scenes'])
+            for a, b in zip(x['blocks'], y['blocks']))
         old_quality = baseline.script_quality(deepcopy(old_script), 'audit', deepcopy(evidence))
         tick = time.monotonic()
         new_quality = script_quality(deepcopy(new_script), 'audit', deepcopy(evidence))
