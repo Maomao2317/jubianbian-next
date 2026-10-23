@@ -50,13 +50,24 @@ def action_core(text, profiles):
         for fact in facts
         if len(fact.strip('。！？；; ')) >= 2
     }
+    # A verb at the end of one fact belongs to that fact. For example, when
+    # removing an adjacent coat phrase, do not consume 梳 from 黑发向后梳.
+    # Otherwise a later removal of 黑发 would strand 向后 as a false action.
+    guarded_verbs = []
+    for visual in ('身穿', '身着', '穿着', '穿', '戴着', '戴', '梳着', '梳',
+                   '留着', '留', '扎着', '扎', '披着', '披'):
+        guards = ''.join('(?<!' + re.escape(fact[:-len(visual)]) + ')'
+                         for fact in sorted(exact_facts)
+                         if fact.endswith(visual) and len(fact) > len(visual))
+        guarded_verbs.append(guards + re.escape(visual))
+    guarded_verb = '(?:' + '|'.join(guarded_verbs) + ')?'
     patterns = []
     for fact in sorted(facts, key=len, reverse=True):
         key = re.sub('^' + verb, '', fact.strip()).strip('的 ')
         key = re.sub(ignored, '', key)
         if key:
             pattern = re.escape(key).replace('全套制服', '制服').replace('制服', '(?:全套)?制服')
-            patterns.append(re.compile(verb + pattern + r'(?:的)?'))
+            patterns.append(re.compile(guarded_verb + pattern + r'(?:的)?'))
     # Consume an optional appearance verb together with its exact fact before
     # stripping bare facts; otherwise removing 蓝色外套 first leaves 穿 behind.
     patterns.extend(re.compile(re.escape(fact))
@@ -68,6 +79,10 @@ def action_core(text, profiles):
         previous = text
         for pattern in patterns:
             text = pattern.sub('', text)
+            if text != previous:
+                # Removing an inner copy can expose a complete longer fact.
+                # Restart before a shorter overlap erases part of that fact.
+                break
         if text == previous:
             break
     return text

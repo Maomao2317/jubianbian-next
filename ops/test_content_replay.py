@@ -61,6 +61,27 @@ class ContentReplayTests(unittest.TestCase):
             'type': 'vo', 'speaker': '旁白', 'visibleSpeaker': '周青爸爸', 'text': '他回来了。'})
         replay.verify_description_stability(stable)
 
+    def test_exposed_long_fact_is_removed_before_its_short_overlap(self):
+        original = self.fixture()
+        original['characterProfiles'] = [
+            {'name': '周青', 'appearance': '黑发向后梳'},
+            {'name': '林海', 'appearance': '黑发', 'clothing': '蓝色长款连帽外套'},
+        ]
+        original['scenes'][0]['blocks'][0]['text'] = '黑发向后梳的周青向后退一步推门。'
+        nested = deepcopy(original)
+        nested['scenes'][0]['blocks'][0]['text'] = '黑发黑发向后梳向后梳的周青向后退一步推门。'
+        replay.compare_scripts(nested, original, Counter())
+        adjacent = deepcopy(original)
+        adjacent['scenes'][0]['blocks'][0]['text'] = '黑发向后梳黑发向后梳的周青向后退一步推门。'
+        replay.compare_scripts(adjacent, original, Counter())
+        adjacent['scenes'][0]['blocks'][0]['text'] = '黑发向后梳蓝色长款连帽外套的周青向后退一步推门。'
+        replay.compare_scripts(adjacent, original, Counter())
+        for before, after in [('向后退', '向前走'), ('推门', '关门')]:
+            changed = deepcopy(nested)
+            changed['scenes'][0]['blocks'][0]['text'] = changed['scenes'][0]['blocks'][0]['text'].replace(before, after)
+            with self.assertRaises(AssertionError):
+                replay.compare_scripts(original, changed, Counter())
+
     def test_nested_exact_profile_facts_do_not_change_the_action_core(self):
         original = self.fixture()
         original['characterProfiles'][0]['clothing'] = '蓝色带条纹的外套'
