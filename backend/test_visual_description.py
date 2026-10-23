@@ -60,6 +60,12 @@ class VisualDescriptionTests(unittest.TestCase):
         text = self.enrich(original, [{"name": "周青", "clothing": "穿蓝色外套"}])
         self.assertEqual(text, original)
 
+    def test_role_name_inside_uniform_is_not_a_character_mention(self):
+        profiles = [{"name": "巡警", "appearance": "年轻男性、深蓝色巡警制服、头戴黑色警帽",
+                     "clothing": "深蓝色巡警制服、头戴黑色警帽"}]
+        text = self.enrich("周青抬起右手，年轻男性、深蓝色巡警制服、头戴黑色警帽的巡警后退。", profiles)
+        self.assertEqual(text, "周青抬起右手，年轻男性、深蓝色巡警制服、头戴黑色警帽的巡警后退。")
+
     def test_normalization_and_dialogue_are_stable_across_read_export_cycles(self):
         raw = {"characters": ["周青"], "characterProfiles": [{"name": "周青", "appearance": "黑色短发、蓝色外套",
                                                            "clothing": "穿蓝色外套、戴白色帽子"}],

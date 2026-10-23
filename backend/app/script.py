@@ -1528,7 +1528,14 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         key = re.sub(r"^" + visual_verb, "", key)
         return key.replace("全套制服", "制服")
 
-    name_pattern = re.compile("|".join(re.escape(name) for name, _ in
+    def character_pattern(name: str, details: list[str]) -> str:
+        # Role names also occur inside clothing nouns (e.g. 巡警制服).
+        # Such a substring is not the character's position in the action.
+        tails = [tail for tail in ("全套制服", "制服", "服装", "衣服", "外套", "帽子", "服", "装")
+                 if any(name + tail in detail_key(detail) for detail in details)]
+        return re.escape(name) + ("(?!(?:" + "|".join(map(re.escape, tails)) + "))" if tails else "")
+
+    name_pattern = re.compile("|".join(character_pattern(name, details) for name, details in
                                       sorted(character_details, key=lambda item: -len(item[0]))))
 
     def prefix_tokens(details: list[str]):
@@ -1635,7 +1642,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
                     action_lead, noun = missing[0].rsplit("的", 1)
                     descriptor = f"{action_lead}、{missing[1]}的{noun}"
                     styled_with_suffix = True
-                name_position = text.find(name)
+                name_position = position
                 # Keep the wording natural for appearance verbs such as
                 # “梳/扎/穿/戴/编”; noun-like details read better directly
                 # before the name (for example “小女孩希希”).
