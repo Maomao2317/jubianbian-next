@@ -24,6 +24,18 @@ def action_core(text, profiles):
             name = str(profile.get('name') or '')
             if name and name in value:
                 facts.add(value.split(name, 1)[0].rstrip('的，、；：: '))
+    # A legacy pass could leave the descriptive prefix of a longer clothing
+    # fact behind after inserting the full fact. Treat that exact prefix as
+    # profile text too, without ignoring arbitrary action wording.
+    for fact in tuple(facts):
+        for marker in ('的',):
+            if marker in fact:
+                prefix = fact.rsplit(marker, 1)[0] + marker
+                if len(prefix) >= 4:
+                    facts.add(prefix)
+                suffix = fact.rsplit(marker, 1)[-1]
+                if len(suffix) >= 2:
+                    facts.add(suffix)
     patterns = []
     for fact in sorted(facts, key=len, reverse=True):
         key = re.sub('^' + verb, '', fact.strip()).strip('的 ')
