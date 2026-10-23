@@ -98,6 +98,27 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(action.count("蓝色外套"), 1)
         self.assertEqual(first["scenes"][0]["blocks"][1]["text"], "走，走，快走！")
 
+    def test_family_name_without_profile_is_a_separate_character_boundary(self):
+        raw = {"characters": ["周青"], "characterProfiles": [
+            {"name": "周青", "appearance": "黑色长发的少女、面容清秀", "clothing": "蓝色校服"}],
+            "scenes": [{"heading": "1-1 日 内 门厅", "location": "门厅",
+                        "characters": ["周青爸爸", "周青", "小熊玩偶"], "blocks": [
+                {"type": "action", "text": "周青爸爸捧着小熊玩偶，递给梳着双丸子头的小女孩周青。",
+                 "startSec": 1, "endSec": 3},
+                {"type": "dialogue", "speaker": "周青", "text": "谢谢爸爸！"}]}]}
+        first = normalize_script(deepcopy(raw), "第1集")
+        blocks = first["scenes"][0]["blocks"]
+        self.assertTrue(blocks[0]["text"].startswith("周青爸爸捧着小熊玩偶，递给"))
+        self.assertEqual(blocks[0]["text"].count("面容清秀"), 1)
+        self.assertEqual((blocks[0]["startSec"], blocks[0]["endSec"]), (1, 3))
+        self.assertEqual(blocks[1]["text"], "谢谢爸爸！")
+        again = deepcopy(blocks)
+        add_character_visual_descriptions(again, first["characterProfiles"])
+        self.assertEqual(again, blocks)
+        normalized_again = normalize_script(deepcopy(first), "第1集")
+        self.assertEqual(normalized_again["scenes"][0]["blocks"][0], blocks[0])
+        self.assertEqual(normalized_again["scenes"][0]["blocks"][1]["text"], blocks[1]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2294,7 +2294,16 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
             if str(profile.get("name") or "").strip()
         ]
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
-        add_character_visual_descriptions(blocks, character_profiles)
+        # Scene-only cast labels still delimit people, even when the provider
+        # omitted their profiles. Otherwise a short name such as 周青 matches
+        # inside 周青爸爸 and receives the daughter's appearance. The returned
+        # script synthesizes these empty profiles later; use the same name
+        # boundaries for the first enrichment pass without inventing details.
+        enrichment_profiles = character_profiles + [
+            {"name": name} for name in dict.fromkeys(fallback_characters)
+            if name and name not in all_profile_names
+        ]
+        add_character_visual_descriptions(blocks, enrichment_profiles)
         known_for_scene = [name for name in dict.fromkeys(fallback_characters) if name]
         if known_for_scene:
             for block in blocks:
