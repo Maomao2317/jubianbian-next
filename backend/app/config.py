@@ -97,7 +97,10 @@ ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
 ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-0-lite-260428").strip()
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
 ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() or "complexity"
-ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "1.0"))))
+# Keep the initial pass dense enough for source fidelity. Cost control comes
+# from bounded issue review and avoiding repeated full-video calls; deployments
+# may override this explicitly after a measured quality comparison.
+ARK_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_VIDEO_FPS", "2.0"))))
 ARK_REVIEW_VIDEO_FPS = max(0.2, min(5.0, float(os.getenv("ARK_REVIEW_VIDEO_FPS", "2.0"))))
 ARK_VIDEO_SOURCE_MODE = os.getenv("ARK_VIDEO_SOURCE_MODE", "auto").strip().lower()
 ARK_VIDEO_URL_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_VIDEO_URL_ATTEMPTS", "2"))))

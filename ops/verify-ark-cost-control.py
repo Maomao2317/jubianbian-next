@@ -28,6 +28,7 @@ def main():
     old_tags = {'台词归属错', '漏台词', 'OS漏标', 'OS/VO混淆', '音频对白不一致', '音频对白需核对',
                 '疑似漏台词片段', '正文混入校对备注', '事实臆造', '疑似漏画面文字片段', '字幕对白遗漏'}
     sample = None
+    local_sample = None
     for row in rows:
         quality = json.loads(row['quality_json'] or '{}')
         script = json.loads(row['result_json'])
@@ -42,11 +43,16 @@ def main():
         if not processing.quality_gate(quality)[0]:
             assert new_trigger, 'P0 trigger lost'
         context = processing._automated_review_context(script, processing._automated_review_issues(quality), quality=quality)
-        history['localReviewCandidates'] += bool(new_trigger and providers._review_clip_bounds(context, row['duration_sec'] or 0))
+        has_local_candidate = bool(new_trigger and providers._review_clip_bounds(context, row['duration_sec'] or 0))
+        history['localReviewCandidates'] += has_local_candidate
         evidence = json.loads(row['evidence_json'])
         sources = {x.get('kind') for x in evidence.get('sources', []) if x.get('status') == 'available'}
+        if (local_sample is None and has_local_candidate and 35 <= (row['duration_sec'] or 0) <= 75
+                and {'audio', 'ocr'} <= sources):
+            local_sample = row
         if sample is None and 35 <= (row['duration_sec'] or 0) <= 75 and {'audio', 'ocr'} <= sources:
             sample = row
+    sample = local_sample or sample
     assert sample is not None, 'No short sample with retained audio/OCR evidence'
     connection.close()
     print('HISTORICAL', json.dumps(history), flush=True)

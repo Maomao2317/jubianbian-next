@@ -18,7 +18,7 @@ def main():
     driver = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(driver)
     driver.BASELINE = 'b2db6e211ac127ca694817f865f7834fe141828c'
-    driver.BUILD = 'ark-cost-control-20261024-r1'
+    driver.BUILD = 'ark-cost-control-20261024-r2'
     driver.VERIFY = 'ops/verify-ark-cost-history.py'
     # The shared driver verifies its own bytes; this wrapper is also checked
     # against the pushed revision before loading it on the host.
@@ -26,7 +26,7 @@ def main():
                                        'show', commit+':ops/deploy-ark-cost-control.py'])
     assert Path(__file__).read_bytes() == wrapper
     driver.APP_CHANGES = {'backend/app/config.py', 'backend/app/providers.py', 'backend/app/processing.py'}
-    driver.DEFAULTS = {'ARK_VIDEO_FPS': '0.5', 'ARK_REVIEW_VIDEO_FPS': '2.0'}
+    driver.DEFAULTS = {'ARK_VIDEO_FPS': '2.0', 'ARK_REVIEW_VIDEO_FPS': '2.0'}
     if sys.argv[1] == 'production':
         report = json.loads(Path('/opt/jbb-video-reliability-20261023-'+commit[:12],
                                  'live-verification.json').read_text())
