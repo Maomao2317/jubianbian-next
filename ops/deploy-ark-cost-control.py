@@ -19,6 +19,7 @@ def main():
     spec.loader.exec_module(driver)
     driver.BASELINE = 'b2db6e211ac127ca694817f865f7834fe141828c'
     driver.BUILD = 'ark-cost-control-20261024-r1'
+    driver.VERIFY = 'ops/verify-ark-cost-history.py'
     # The shared driver verifies its own bytes; this wrapper is also checked
     # against the pushed revision before loading it on the host.
     wrapper = subprocess.check_output(['git', '-c', 'safe.directory='+repo, '-C', repo,
