@@ -57,6 +57,7 @@ from .config import (
     ARK_QUOTA_TPM,
     ARK_INPUT_TOKEN_RESERVE,
     ARK_VIDEO_FPS,
+    ARK_REVIEW_VIDEO_FPS,
     ARK_VIDEO_SOURCE_MODE,
     ARK_VIDEO_URL_ATTEMPTS,
     ARK_VIDEO_SAFE_BYTES,
@@ -320,8 +321,11 @@ def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
     detail = payload.get("error") or payload.get("incomplete_details") or payload.get("status") or "incomplete"
     reason = detail.get("reason") if isinstance(detail, dict) else detail
     if str(reason).strip().lower() in {"max_output_tokens", "max_tokens", "length"}:
-        return ArkError("方舟识别输出达到长度上限", provider_code="output_limit")
-    return ArkError(f"方舟识别未完成：{detail}")
+        error = ArkError("方舟识别输出达到长度上限", provider_code="output_limit")
+    else:
+        error = ArkError(f"方舟识别未完成：{detail}")
+    error.usage_payload = {"usage": payload.get("usage", {})}
+    return error
 
 
 def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
@@ -597,12 +601,7 @@ def _ark_upload_proxy(path: Path, duration_sec: float = 0, *, progress_callback:
 
 
 def ark_sampling_fps(duration_sec: float) -> float:
-    """Keep rapid actions/subtitles visible without exploding long-video cost."""
-    duration = max(0.0, float(duration_sec or 0))
-    if duration and duration <= 90:
-        return max(ARK_VIDEO_FPS, 2.0)
-    if duration and duration <= 180:
-        return max(ARK_VIDEO_FPS, 1.0)
+    """Respect the configured first-pass budget, including short episodes."""
     return ARK_VIDEO_FPS
 
 
@@ -625,19 +624,20 @@ def _delivery_video(path: Path, duration_sec: float, progress_callback: MediaPro
 
 
 def ark_upload_video(path: Path, api_key: str | None = None, duration_sec: float = 0, *, progress_callback: MediaProgress | None = None,
-                     cache: RecognitionCache | None = None) -> tuple[str, str]:
+                     cache: RecognitionCache | None = None, sampling_fps: float | None = None) -> tuple[str, str]:
     # The Files API accepts a local video and lets the model reuse it by file_id.
     # The upload is intentionally done in the worker thread so FastAPI stays responsive.
     upload_path, proxy_dir = _delivery_video(path, duration_sec, progress_callback, cache)
     try:
-        return _ark_upload_files(upload_path, api_key, duration_sec, progress_callback)
+        return _ark_upload_files(upload_path, api_key, duration_sec, progress_callback,
+                                 **({"sampling_fps": sampling_fps} if sampling_fps is not None else {}))
     finally:
         if proxy_dir is not None:
             shutil.rmtree(proxy_dir, ignore_errors=True)
 
 
 def _ark_upload_files(upload_path: Path, api_key: str | None, duration_sec: float,
-                      progress_callback: MediaProgress | None) -> tuple[str, str]:
+                      progress_callback: MediaProgress | None, *, sampling_fps: float | None = None) -> tuple[str, str]:
     # Admission has its own finite budget. Allocate the multipart body only
     # after both lanes are held, then give transport/retries their full budget.
     queue_deadline = time.monotonic() + MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS
@@ -647,13 +647,15 @@ def _ark_upload_files(upload_path: Path, api_key: str | None, duration_sec: floa
                 upload_path, api_key, duration_sec, progress_callback=progress_callback,
                 deadline=time.monotonic() + ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS,
                 capacity_held=True,
+                **({"sampling_fps": sampling_fps} if sampling_fps is not None else {}),
             )
 
 
 def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_sec: float, *,
                                progress_callback: MediaProgress | None = None,
                                deadline: float | None = None,
-                               capacity_held: bool = False) -> tuple[str, str]:
+                               capacity_held: bool = False,
+                               sampling_fps: float | None = None) -> tuple[str, str]:
     """Build/retry one bounded request; caller owns the proxy and memory lane."""
     try:
         # Defence in depth: never allocate a huge multipart request or send an
@@ -670,7 +672,8 @@ def _ark_upload_prepared_video(upload_path: Path, api_key: str | None, duration_
                        provider_code="video_upload_too_large")
     fields = {
         "purpose": "user_data",
-        "preprocess_configs": json.dumps({"video": {"fps": ark_sampling_fps(duration_sec)}}, separators=(",", ":")),
+        "preprocess_configs": json.dumps({"video": {"fps": sampling_fps if sampling_fps is not None
+                                                   else ark_sampling_fps(duration_sec)}}, separators=(",", ":")),
     }
     body, boundary = multipart_body(fields, "file", upload_path.name, video_bytes, "video/mp4")
     del video_bytes
@@ -760,7 +763,7 @@ def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
 
 def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | None = None,
                       progress_callback: MediaProgress | None = None, cache: RecognitionCache | None = None,
-                      force_files: bool = False) -> dict[str, Any]:
+                      force_files: bool = False, sampling_fps: float | None = None) -> dict[str, Any]:
     """Prefer private URLs for validated delivery copies, with bounded Files fallback.
 
     URL inputs above 50 MiB have been rejected in production. The 45 MiB budget
@@ -845,7 +848,8 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
             cache.save("delivery_route", {"mode": "files"})
             _report_media_progress(progress_callback, "video_upload_retry", None)
             # Reuse the exact validated proxy, including when disk checkpointing failed.
-            file_id, api_key = _ark_upload_files(upload_path, api_key, duration_sec, progress_callback)
+            file_id, api_key = _ark_upload_files(upload_path, api_key, duration_sec, progress_callback,
+                                               **({"sampling_fps": sampling_fps} if sampling_fps is not None else {}))
         finally:
             if proxy_dir is not None:
                 shutil.rmtree(proxy_dir, ignore_errors=True)
@@ -856,6 +860,8 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
             options["progress_callback"] = progress_callback
         if cache is not None:
             options["cache"] = cache
+        if sampling_fps is not None:
+            options["sampling_fps"] = sampling_fps
         file_id, api_key = ark_upload_video(path, api_key, duration_sec, **options)
         logger.info("provider_step provider=ark operation=upload file=%s duration_ms=%.1f", path.name,
                     (time.perf_counter() - upload_started) * 1000)
@@ -938,6 +944,10 @@ def ark_prompt(
     )
     if isinstance(review_context, dict) and review_context.get("scope") == "issue_patches":
         return (
+            ("当前视频是独立切片，所有时间均为切片内秒数，从0开始；输出block也必须使用切片内时间。"
+             "sceneIndex和blockIndex仍是原稿编号，必须直接复制，不得按局部数组位置重新计数。"
+             if review_context.get("clipTimeline") else "")
+            +
             "你是专业视频复核员。逐一回看issues和ranges的时间范围，只修明确有视频声音/字幕证据的漏词、"
             "说话人或OS错误；遇到画面表演缺失问题，还要回看对应时段的可见动作和可听语气，"
             "补有画面依据的action，或为原对白补简短、可执行的performance。视频没有可确认的动作或语气就保持原样，"
@@ -1086,7 +1096,7 @@ def ark_response_text(payload: Any) -> str:
     walk(payload)
     return "\n".join(parts).strip()
 
-def ark_usage(payload: Any) -> dict[str, int | float | None]:
+def ark_usage(payload: Any, model: str = "") -> dict[str, Any]:
     usage = payload.get("usage") if isinstance(payload, dict) else {}
     usage = usage if isinstance(usage, dict) else {}
 
@@ -1105,6 +1115,7 @@ def ark_usage(payload: Any) -> dict[str, int | float | None]:
     # Some Ark endpoints expose a billed amount alongside usage. Accept the
     # common shapes without coupling the app to one response version.
     cost: float | None = None
+    cost_source = "provider"
     for source in (usage, payload if isinstance(payload, dict) else {}):
         for key in ("api_cost_rmb", "cost_rmb", "total_cost", "cost"):
             value = source.get(key)
@@ -1113,12 +1124,26 @@ def ark_usage(payload: Any) -> dict[str, int | float | None]:
                 break
         if cost is not None:
             break
+    if cost is None:
+        cost_source = "unpriced"
     if cost is None and (input_tokens is not None or output_tokens is not None):
+        input_price, output_price = ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION, ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION
+        cost_source = "configured_estimate" if input_price or output_price else "unpriced"
+        # Standard online public prices, checked 2026-10-24. These remain
+        # estimates (discounts/cache/audio pricing can differ from the bill).
+        if not (input_price or output_price):
+            if re.fullmatch(r"doubao-seed-2-1-turbo(?:-\d+)?", model):
+                input_price, output_price = 3.0, 15.0
+                cost_source = "public_price_estimate"
+            elif re.fullmatch(r"doubao-seed-2-0-lite(?:-\d+)?", model) and (input_tokens or 0) <= 128000:
+                input_price, output_price = (0.6, 3.6) if (input_tokens or 0) <= 32000 else (0.9, 5.4)
+                cost_source = "public_price_estimate"
         cost = (
-            (input_tokens or 0) * ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION
-            + (output_tokens or 0) * ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION
+            (input_tokens or 0) * input_price
+            + (output_tokens or 0) * output_price
         ) / 1_000_000
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens, "api_cost_rmb": round(cost or 0, 6)}
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens,
+            "api_cost_rmb": round(cost or 0, 6), "cost_source": cost_source}
 
 
 def _is_video_url_error(error: ArkError) -> bool:
@@ -1378,6 +1403,22 @@ def _apply_ark_review(payload: Any, context: dict[str, Any], duration_sec: float
         corrections = response["corrections"]
         if not isinstance(corrections, list):
             raise ValueError("corrections must be an array")
+        if "_originalContext" in context:
+            # Only returned patch times move back. Original indices, validation
+            # windows and untouched source blocks always stay on the source clock.
+            offset = context["_videoOffsetSec"]
+            for correction in corrections:
+                block = correction["block"]
+                if not isinstance(block, dict):
+                    raise ValueError("invalid clip block")
+                for key in ("startSec", "endSec"):
+                    if type(block.get(key)) not in {int, float} or not math.isfinite(block[key]):
+                        raise ValueError("invalid clip time")
+                    if not 0 <= block[key] <= duration_sec:
+                        raise ValueError("invalid clip time")
+                    block[key] = round(block[key] + offset, 6)
+            duration_sec = context["_sourceDurationSec"]
+            context = context["_originalContext"]
         script = deepcopy(context.get("_sourceScript") or context["draft"])
         windows = ark_review_windows(context["ranges"])
         edits: dict[tuple[int, int], dict[str, list[dict[str, Any]]]] = {}
@@ -1466,6 +1507,85 @@ def _parse_ark_script(payload: Any) -> dict[str, Any]:
     return script
 
 
+def _review_clip_bounds(context: dict[str, Any], duration: float) -> tuple[float, float] | None:
+    if context.get("scope") != "issue_patches" or "_originalContext" in context:
+        return None
+    ranges = context.get("ranges") or []
+    if not ranges or duration <= 0:
+        return None
+    starts, ends = [], []
+    for window in ranges:
+        starts.append(window.get("contextStartSec", max(0, window["startSec"] - 2)))
+        ends.append(window.get("contextEndSec", window["endSec"] + 2))
+        for target in window.get("replacementTargets", []):
+            starts.append(max(0, target["startSec"] - 2))
+            ends.append(target["endSec"] + 2)
+    start, end = max(0.0, min(starts)), min(duration, max(ends))
+    # One envelope means one upload/review even for several separate issues.
+    return (start, end) if 0 < end - start < duration * 0.7 else None
+
+
+def _local_review_context(context: dict[str, Any], start: float, end: float,
+                          duration: float) -> dict[str, Any]:
+    public = deepcopy({key: value for key, value in context.items() if not key.startswith("_")})
+    for scene in public["draft"].get("scenes", []):
+        scene["blocks"] = [block for block in scene.get("blocks", [])
+                           if type(block.get("startSec")) not in {int, float}
+                           or type(block.get("endSec")) not in {int, float}
+                           or (block["startSec"] <= end and block["endSec"] >= start)]
+    public["draft"]["scenes"] = [scene for scene in public["draft"].get("scenes", []) if scene["blocks"]]
+
+    def shift(value):
+        if isinstance(value, list):
+            return [shift(item) for item in value]
+        if isinstance(value, dict):
+            return {key: round(item - start, 6) if key in {
+                "startSec", "endSec", "contextStartSec", "contextEndSec",
+            } and type(item) in {int, float} else shift(item) for key, item in value.items()}
+        return value
+
+    return {**shift(public), "clipTimeline": True, "_originalContext": context,
+            "_videoOffsetSec": start, "_sourceDurationSec": duration}
+
+
+def _recognize_review_clip(path: Path, title: str, duration: float, evidence: dict[str, Any],
+                           model: str, context: dict[str, Any], prepared: dict[str, Any],
+                           bounds: tuple[float, float]):
+    start, end = bounds
+    cache = prepared.get("_cache")
+    kind = f"review_{round(start * 1000)}_{round(end * 1000)}:clip-v1"
+    clip_cache = cache.scoped(kind) if cache else None
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="content-review-", dir=DATA_DIR) as directory:
+        target = clip_cache.proxy() if clip_cache else None
+        if target is None:
+            target = Path(directory) / "review.mp4"
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise ArkError("局部复核需要 ffmpeg", provider_code="review_clip_unavailable")
+            try:
+                with _ark_proxy_semaphore, capacity("video-proxy", ARK_UPLOAD_PROXY_MAX_IN_FLIGHT):
+                    subprocess.run([
+                        ffmpeg, "-nostdin", "-v", "error", "-ss", str(start), "-i", str(path),
+                        "-t", str(end - start), "-map", "0:v:0", "-map", "0:a:0?",
+                        "-vf", "scale=-2:min(960\\,ih)", "-c:v", "libx264", "-preset", "veryfast",
+                        "-crf", "22", "-threads", str(ARK_UPLOAD_PROXY_THREADS), "-c:a", "aac",
+                        "-b:a", "96k", "-movflags", "+faststart", str(target),
+                    ], check=True, capture_output=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ArkError("局部复核切片失败", provider_code="review_clip_unavailable") from exc
+            if clip_cache:
+                target = clip_cache.adopt_proxy(target)
+        clip_prepared = ark_prepare_video(target, end - start, cache=clip_cache,
+                                          sampling_fps=ARK_REVIEW_VIDEO_FPS)
+        clip_prepared.update(_audit_cache=cache, _audit_kind="review")
+        local = _local_review_context(context, start, end, duration)
+        logger.info("provider_step provider=ark operation=review_clip start_sec=%.2f duration_sec=%.2f source_duration_sec=%.2f",
+                    start, end - start, duration)
+        return ark_recognize(target, title, end - start, slice_evidence(evidence, start, end),
+                             model, review_context=local, prepared_video=clip_prepared)
+
+
 def ark_recognize(
     path: Path,
     title: str,
@@ -1477,6 +1597,17 @@ def ark_recognize(
     prepared_video: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
     selected_model = (model or ARK_MODEL).strip() or ARK_MODEL
+    bounds = _review_clip_bounds(review_context, duration_sec) if review_context else None
+    if bounds and path.is_file():
+        try:
+            return _recognize_review_clip(path, title, duration_sec, evidence or {}, selected_model,
+                                          review_context, prepared_video or {}, bounds)
+        except ArkError as exc:
+            # Only a local encoding failure falls back. A sent model request
+            # must never silently start a second full-video review budget.
+            if exc.provider_code != "review_clip_unavailable":
+                raise
+            logger.warning("provider_step provider=ark operation=review_clip_fallback file=%s", path.name)
     started = time.perf_counter()
     logger.info("provider_start provider=ark operation=video_recognize file=%s model=%s duration_sec=%.1f", path.name, selected_model, duration_sec)
     prepared = prepared_video or ark_prepare_video(path, duration_sec)
@@ -1494,8 +1625,9 @@ def ark_recognize(
     video_url = str(prepared.get("video_url") or "")
     if not api_key or not (file_id or video_url):
         raise ArkError("方舟视频准备结果不完整")
+    fps = ARK_REVIEW_VIDEO_FPS if (review_context or {}).get("clipTimeline") else ark_sampling_fps(duration_sec)
     video_input: dict[str, Any] = (
-        {"type": "input_video", "video_url": video_url, "fps": ark_sampling_fps(duration_sec)}
+        {"type": "input_video", "video_url": video_url, "fps": fps}
         if video_url else {"type": "input_video", "file_id": file_id}
     )
     response_started = time.perf_counter()
@@ -1535,6 +1667,8 @@ def ark_recognize(
                     path.name, exc.status_code, exc.provider_code, safe_error_text(exc),
                 )
                 options = {"force_files": True}
+                if (review_context or {}).get("clipTimeline"):
+                    options["sampling_fps"] = fps
                 if prepared.get("_cache") is not None:
                     options["cache"] = prepared["_cache"]
                     prepared["_cache"].save("delivery_route", {"mode": "files", "reason": "url_ingestion_failed"})
@@ -1543,14 +1677,16 @@ def ark_recognize(
                 fallback = ark_prepare_video(path, duration_sec, **options)
                 # Share the uploaded file with the subsequent quality review.
                 # No second URL failure/upload is needed for the same episode.
+                audit = {key: prepared[key] for key in ("_audit_cache", "_audit_kind") if key in prepared}
                 prepared.clear()
                 prepared.update(fallback)
+                prepared.update(audit)
                 api_key = str(fallback["api_key"])
                 video_url = ""
                 response_payload["input"][0]["content"][0] = {"type": "input_video", "file_id": fallback["file_id"]}
                 _report_media_progress(prepared.get("_progress_callback"), "vision", None)
                 payload = ark_stream_response(response_payload, api_key)
-            response_usages.append(ark_usage(payload))
+            response_usages.append(ark_usage(payload, selected_model))
             raw_script = (
                 _apply_ark_review(payload, review_context, duration_sec)
                 if patch_review else _parse_ark_script(payload)
@@ -1562,6 +1698,9 @@ def ark_recognize(
                 raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
             break
         except ArkError as exc:
+            if getattr(exc, "usage_payload", None):
+                response_usages.append(ark_usage(exc.usage_payload, selected_model))
+            exc.usage = _ark_call_usage(response_usages, selected_model, audit_kind, duration_sec, fps)
             if (patch_review and exc.provider_code == "output_limit"
                     and response_payload["max_output_tokens"] < ARK_MAX_OUTPUT_TOKENS
                     and attempt < ARK_RESPONSE_CREATE_ATTEMPTS):
@@ -1612,12 +1751,18 @@ def ark_recognize(
         (time.perf_counter() - started) * 1000,
         len(script.get("scenes") or []),
     )
-    usage = dict(response_usages[-1])
-    if len(response_usages) > 1:
-        for key in ("input_tokens", "output_tokens", "total_tokens", "api_cost_rmb"):
-            values = [record[key] for record in response_usages if isinstance(record.get(key), (int, float))]
-            usage[key] = round(sum(values), 6) if values else None
-    return script, usage
+    return script, _ark_call_usage(response_usages, selected_model, audit_kind, duration_sec, fps)
+
+
+def _ark_call_usage(records, model, stage, duration, fps):
+    result = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens", "api_cost_rmb"):
+        values = [record[key] for record in records if isinstance(record.get(key), (int, float))]
+        result[key] = round(sum(values), 6) if values else None
+    stage = "repair" if stage.startswith("segment_") else stage
+    result["calls"] = [{**record, "model": model, "stage": stage,
+                        "video_duration_sec": duration, "video_fps": fps} for record in records]
+    return result
 
 
 def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: dict[str, Any],

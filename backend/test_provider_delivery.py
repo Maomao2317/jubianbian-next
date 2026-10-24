@@ -105,7 +105,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertIn("scenes", response_format["schema"]["required"])
         self.assertTrue(response_format["schema"]["additionalProperties"])
         self.assertEqual(request["input"][0]["content"][0], {
-            "type": "input_video", "video_url": "https://cos.test/video", "fps": 2,
+            "type": "input_video", "video_url": "https://cos.test/video", "fps": 1,
         })
         block = script["scenes"][0]["blocks"][0]
         self.assertEqual(block["text"], "今天，我决定，我要留下。")
@@ -163,7 +163,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual([r["input"][0]["content"][0]["video_url"] for r in requests],
                          ["https://cos.test/first", "https://cos.test/retry", "https://cos.test/review"])
         self.assertEqual(requests[0]["input"][0]["content"][1], requests[1]["input"][0]["content"][1])
-        self.assertEqual(requests[1]["input"][0]["content"][0]["fps"], 2)
+        self.assertEqual(requests[1]["input"][0]["content"][0]["fps"], providers.ARK_VIDEO_FPS)
         self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "今天，我决定，我要留下。")
         callback.assert_any_call("video_read_retry", None)
         callback.assert_any_call("vision", None)
@@ -353,7 +353,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         advisory = {"severity": "P1", "tag": "疑似漏台词片段", "startSec": 112, "endSec": 114}
         heuristic = {"severity": "P1", "tag": "画面文字需核对"}
         self.assertEqual(processing._automated_review_issues({"issues": [advisory, missing, heuristic]}), [missing])
-        self.assertEqual(processing._automated_review_issues({"issues": [advisory, heuristic]}), [advisory])
+        self.assertEqual(processing._automated_review_issues({"issues": [advisory, heuristic]}), [])
 
     def test_missing_episode_tail_uses_full_review_and_keeps_final_evidence(self):
         script = {"characters": ["甲"], "scenes": [{"heading": "1-1 日 内 客厅", "blocks": [{

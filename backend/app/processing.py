@@ -196,6 +196,7 @@ def _merge_usage(*records: dict[str, Any]) -> dict[str, Any]:
         sum(float(record.get("api_cost_rmb") or 0) for record in records),
         6,
     )
+    result["calls"] = [call for record in records for call in record.get("calls", [])]
     return result
 
 
@@ -303,6 +304,7 @@ async def repair_content_gaps(
                         {"script": script, "metadata": metadata},
                     )
             except Exception as exc:
+                usage = _merge_usage(usage, getattr(exc, "usage", {}))
                 failure = {
                     **window,
                     "pass": repair_pass + 1,
@@ -508,31 +510,12 @@ def _automated_review_context(
 
 def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
     """Review source-fidelity risks, not every advisory screenplay heuristic."""
-    critical_tags = {
-        "台词归属错",
-        "漏台词",
-        "OS漏标",
-        "OS/VO混淆",
-        "音频对白不一致",
-        "音频对白需核对",
-        "疑似漏台词片段",
-        "正文混入校对备注",
-        "事实臆造",
-        "疑似漏画面文字片段", "字幕对白遗漏",
-    }
     tail_gap = quality.get("tailGapSec")
     if isinstance(tail_gap, (int, float)) and tail_gap >= 8:
         return True
     if not quality_gate(quality)[0]:
         return True
-    return any(
-        isinstance(issue, dict)
-        and (
-            str(issue.get("severity") or "").upper() == "P0"
-            or str(issue.get("tag") or "") in critical_tags
-        )
-        for issue in (quality.get("issues") or [])
-    )
+    return bool(_automated_review_issues(quality))
 
 
 def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
@@ -559,6 +542,9 @@ def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
         issue
         for issue in issues
         if str(issue.get("tag") or "") in critical_tags
+        and (str(issue.get("severity") or "").upper() == "P0"
+             or issue.get("tag") not in {"疑似漏台词片段", "疑似漏画面文字片段", "音频对白需核对"}
+             or issue.get("ocrConfirmed") is True or issue.get("audioSupported") is True)
     ]
 
 
@@ -942,6 +928,7 @@ async def _run_recognizer_with_media(
                         quality = reviewed_quality
                         final_model = turbo_model
                 except ArkError as review_exc:
+                    final_usage = _merge_usage(final_usage, getattr(review_exc, "usage", {}))
                     review_metadata["reviewError"] = safe_error_text(review_exc)
                     quality["warning"] = (
                         "Turbo 自动复核失败，已保留 Lite 草稿并等待用户复核。"
@@ -955,6 +942,7 @@ async def _run_recognizer_with_media(
                     )
 
             quality["automatedReview"] = review_metadata
+            quality["providerUsage"] = final_usage
             return script, quality, {**final_usage, "provider": "ark", "model": final_model}, evidence
     elif ARK_API_KEYS and prepare_error is not None:
         logger.warning(

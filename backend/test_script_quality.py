@@ -30,11 +30,10 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertLess(int(bitrate.removesuffix("k")), 180)
         self.assertEqual(height, 360)
 
-    def test_ark_sampling_is_denser_for_short_fast_video(self):
+    def test_ark_sampling_respects_configured_budget_for_every_duration(self):
         with patch.object(providers, "ARK_VIDEO_FPS", 0.5):
-            self.assertEqual(providers.ark_sampling_fps(60), 2.0)
-            self.assertEqual(providers.ark_sampling_fps(150), 1.0)
-            self.assertEqual(providers.ark_sampling_fps(240), 0.5)
+            for duration in (0, 60, 90, 150, 240):
+                self.assertEqual(providers.ark_sampling_fps(duration), 0.5)
 
     def test_ark_upload_retries_transient_network_without_reencoding(self):
         source = Path(__file__)
