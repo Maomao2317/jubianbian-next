@@ -40,6 +40,7 @@
     adminRechargeKeyword: "",
     adminRechargeFrom: "",
     adminRechargeTo: "",
+    adminRechargeType: "all",
     taskPage: 0,
     expandedBatches: {},
     queue: { waitMinutes: 0, blocked: false, workerConcurrency: 8 },
@@ -197,6 +198,33 @@
     };
   }
 
+  const ledgerTypes = {
+    recharge: { label: "充值", symbol: "+" },
+    refund: { label: "退费", symbol: "↩" },
+    consume: { label: "扣款", symbol: "−" },
+    grant: { label: "赠送", symbol: "★" },
+    adjustment: { label: "人工调整", symbol: "⇄" },
+    other: { label: "其他变动", symbol: "·" },
+  };
+
+  function ledgerBadge(type) {
+    const key = Object.hasOwn(ledgerTypes, type) ? type : "other";
+    const item = ledgerTypes[key];
+    return `<span class="ledger-badge ledger-${key}"><span aria-hidden="true">${item.symbol}</span>${item.label}</span>`;
+  }
+
+  function adminLedgerRow(item) {
+    const amount = Number(item.points_amount) || 0;
+    const sign = amount > 0 ? "+" : amount < 0 ? "−" : "";
+    const tone = amount > 0 ? "income" : amount < 0 ? "expense" : "neutral";
+    const rmb = item.rmb_amount == null
+      ? (item.entry_type === "recharge" ? "未记录" : "—")
+      : `¥ ${Number(item.rmb_amount).toFixed(2)}`;
+    const reason = item.reason === "task recognition failed" ? "视频识别失败，积分已退回"
+      : item.reason === "failed task retry" ? "失败任务重试扣款" : item.reason || "—";
+    return `<tr><td><strong>${escapeHtml(item.name || item.email || item.user_id)}</strong><small>${escapeHtml(item.email || "")}</small></td><td>${ledgerBadge(item.entry_type)}</td><td class="ledger-money">${rmb}</td><td class="ledger-amount ledger-${tone}">${sign}${Math.abs(amount).toFixed(1)} <span>积分</span></td><td class="ledger-balance">${Number(item.balance_after).toFixed(1)} 积分</td><td class="ledger-reason">${escapeHtml(reason)}</td><td>${formatDate(item.created_at)}</td></tr>`;
+  }
+
   async function renderAdmin() {
     if (!state.profile || state.profile.role !== "admin") { go("tasks"); return; }
     const requestId = ++state.adminRequestId;
@@ -221,7 +249,7 @@
         panelPromises.push(api.getAdminUsers({ limit: userPageSize, offset: state.adminUserPage * userPageSize, keyword: state.adminUserKeyword, status: state.adminUserStatus }).then((value) => { users = value; }));
         if (tab === "credits") {
           const rechargePageSize = 10;
-          panelPromises.push(api.getAdminRecharges({ limit: rechargePageSize, offset: state.adminRechargePage * rechargePageSize, keyword: state.adminRechargeKeyword, date_from: state.adminRechargeFrom, date_to: state.adminRechargeTo }).then((value) => { rechargePage = value; }));
+          panelPromises.push(api.getAdminRecharges({ limit: rechargePageSize, offset: state.adminRechargePage * rechargePageSize, keyword: state.adminRechargeKeyword, date_from: state.adminRechargeFrom, date_to: state.adminRechargeTo, entry_type: state.adminRechargeType }).then((value) => { rechargePage = value; }));
         }
       } else if (tab === "tasks" || tab === "usage") {
         const pageSize = 20;
@@ -248,7 +276,7 @@
           const rechargePageSize = 10;
           const rechargePageCount = Math.max(1, Math.ceil(rechargePage.total / rechargePageSize));
           state.adminRechargePage = Math.min(state.adminRechargePage, rechargePageCount - 1);
-          body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>人民币充值流水</h2><p>当前充值按 1 元 = 12.8 积分记录</p></div><span>${rechargePage.total} 笔充值</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户账号或备注" /><input id="adminRechargeFrom" type="date" value="${state.adminRechargeFrom}" /><input id="adminRechargeTo" type="date" value="${state.adminRechargeTo}" /><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户账号</th><th>人民币</th><th>增加积分</th><th>充值后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(item => `<tr><td><strong>${escapeHtml(item.name || item.email || item.user_id)}</strong><small>${escapeHtml(item.email || "")}</small></td><td>¥ ${Number(item.rmb_amount).toFixed(2)}</td><td class="points-positive">+${Number(item.points_amount).toFixed(1)} 积分</td><td>${Number(item.balance_after).toFixed(1)} 积分</td><td>${escapeHtml(item.reason || "-")}</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="6">暂无匹配的充值流水</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-recharge-page" data-page="${Math.max(0, state.adminRechargePage - 1)}" ${state.adminRechargePage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminRechargePage + 1} / ${rechargePageCount} 页</span><button class="admin-action" data-action="admin-recharge-page" data-page="${Math.min(rechargePageCount - 1, state.adminRechargePage + 1)}" ${state.adminRechargePage >= rechargePageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
+          body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>充值与积分流水</h2><p>充值按 1 元 = 12.8 积分入账；退费为积分退回，扣款为积分消费。</p></div><span>${rechargePage.total} 笔流水</span></div><div class="ledger-legend" aria-label="流水类型说明">${["recharge", "refund", "consume", "grant", "adjustment"].map(ledgerBadge).join("")}<span class="ledger-legend-note">＋ 积分增加 / − 积分减少</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" aria-label="搜索用户账号或备注" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户账号或备注" /><select id="adminRechargeType" aria-label="流水类型"><option value="all">全部类型</option>${Object.entries(ledgerTypes).map(([key, value]) => `<option value="${key}" ${state.adminRechargeType === key ? "selected" : ""}>${value.symbol} ${value.label}</option>`).join("")}</select><input id="adminRechargeFrom" aria-label="开始日期" type="date" value="${state.adminRechargeFrom}" /><input id="adminRechargeTo" aria-label="结束日期" type="date" value="${state.adminRechargeTo}" /><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户账号</th><th>流水类型</th><th>充值金额（元）</th><th>积分变动</th><th>变动后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(adminLedgerRow).join("") || `<tr><td colspan="7">暂无匹配的流水</td></tr>`}</tbody></table></div><div class="admin-pagination"><button class="admin-action" data-action="admin-recharge-page" data-page="${Math.max(0, state.adminRechargePage - 1)}" ${state.adminRechargePage === 0 ? "disabled" : ""}>上一页</button><span>第 ${state.adminRechargePage + 1} / ${rechargePageCount} 页</span><button class="admin-action" data-action="admin-recharge-page" data-page="${Math.min(rechargePageCount - 1, state.adminRechargePage + 1)}" ${state.adminRechargePage >= rechargePageCount - 1 ? "disabled" : ""}>下一页</button></div></div>`;
         }
       } else if (tab === "tasks" || tab === "usage") {
         const pageSize = 20;
@@ -1251,8 +1279,8 @@
     if (action === "admin-page") { state.adminTaskPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
     if (action === "admin-user-search") { state.adminUserKeyword = $("#adminUserKeyword")?.value.trim() || ""; state.adminUserStatus = $("#adminUserStatus")?.value || "all"; state.adminUserPage = 0; await renderAdmin(); return; }
     if (action === "admin-user-page") { state.adminUserPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
-    if (action === "admin-recharge-search") { state.adminRechargeKeyword = $("#adminRechargeKeyword")?.value.trim() || ""; state.adminRechargeFrom = $("#adminRechargeFrom")?.value || ""; state.adminRechargeTo = $("#adminRechargeTo")?.value || ""; state.adminRechargePage = 0; await renderAdmin(); return; }
-    if (action === "admin-recharge-reset") { state.adminRechargeKeyword = ""; state.adminRechargeFrom = ""; state.adminRechargeTo = ""; state.adminRechargePage = 0; await renderAdmin(); return; }
+    if (action === "admin-recharge-search") { state.adminRechargeType = $("#adminRechargeType")?.value || "all"; state.adminRechargeKeyword = $("#adminRechargeKeyword")?.value.trim() || ""; state.adminRechargeFrom = $("#adminRechargeFrom")?.value || ""; state.adminRechargeTo = $("#adminRechargeTo")?.value || ""; state.adminRechargePage = 0; await renderAdmin(); return; }
+    if (action === "admin-recharge-reset") { state.adminRechargeType = "all"; state.adminRechargeKeyword = ""; state.adminRechargeFrom = ""; state.adminRechargeTo = ""; state.adminRechargePage = 0; await renderAdmin(); return; }
     if (action === "admin-recharge-page") { state.adminRechargePage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
     if (action === "admin-credit") {
       const rmbText = window.prompt("输入充值人民币金额（按 1 元 = 12.8 积分自动换算）", "100");

@@ -551,10 +551,15 @@ async def admin_user_credits(request: Request, user_id: str) -> dict[str, Any]:
     return {"userId": user_id, "rmbAmount": rmb_amount, "pointsAmount": points_amount, "balance": balance, "reason": reason}
 
 
-def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = "", date_to: str = "", limit: int = Query(20, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = "", date_to: str = "", limit: int = Query(20, ge=1, le=200), offset: int = Query(0, ge=0), entry_type: str = "all") -> dict[str, Any]:
     _require_admin(request)
     clauses: list[str] = []
     params: list[Any] = []
+    if entry_type not in {"all", "recharge", "refund", "consume", "grant", "adjustment", "other"}:
+        raise HTTPException(status_code=400, detail="不支持的流水类型")
+    if entry_type != "all":
+        clauses.append("entry_type = ?")
+        params.append(entry_type)
     if keyword.strip():
         value = f"%{keyword.strip()}%"
         clauses.append("(email LIKE ? OR name LIKE ? OR reason LIKE ?)")
@@ -566,6 +571,9 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
         clauses.append("created_at <= ?")
         params.append(f"{date_to}T23:59:59")
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    # Recharge writes both ledgers in one transaction. Show its RMB record once,
+    # retaining legacy credit-only recharges when no matching RMB record exists.
+    # The two now_iso() calls can differ slightly, including across midnight.
     ledger_cte = """
         WITH ledger AS (
             SELECT r.id, r.user_id, r.rmb_amount, r.points_amount, r.balance_after,
@@ -573,10 +581,19 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
             FROM admin_recharge_ledger r
             LEFT JOIN users u ON u.id = r.user_id
             UNION ALL
-            SELECT c.id, c.user_id, 0 AS rmb_amount, c.amount AS points_amount,
-                   c.balance_after, c.reason, c.created_at, u.email, u.name, c.entry_type
+            SELECT c.id, c.user_id, NULL AS rmb_amount, c.amount AS points_amount,
+                   c.balance_after, c.reason, c.created_at, u.email, u.name,
+                   CASE WHEN c.entry_type IN ('recharge', 'refund', 'consume', 'grant', 'adjustment')
+                        THEN c.entry_type ELSE 'other' END AS entry_type
             FROM credit_ledger c
             LEFT JOIN users u ON u.id = c.user_id
+            WHERE NOT (c.entry_type = 'recharge' AND EXISTS (
+                SELECT 1 FROM admin_recharge_ledger r
+                WHERE r.user_id = c.user_id AND r.admin_user_id IS c.admin_user_id
+                  AND r.points_amount = c.amount AND r.balance_after = c.balance_after
+                  AND r.reason = c.reason
+                  AND ABS((julianday(r.created_at) - julianday(c.created_at)) * 86400) <= 1.001
+            ))
         )
     """
     with db() as connection:

@@ -275,6 +275,21 @@ a { color: inherit; text-decoration: none; }
 .recharge-toolbar { flex-wrap: wrap; }
 .recharge-toolbar input[type="date"] { width: 150px; }
 .points-positive { color: var(--green); font-weight: 750; }
+.ledger-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.ledger-legend-note { margin-left: auto; color: var(--muted); font-size: 12px; }
+.ledger-badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.ledger-badge > span { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 15px; line-height: 1; }
+.ledger-recharge { color: var(--green); background: var(--green-soft); }
+.ledger-refund { color: var(--blue); background: var(--blue-soft); }
+.ledger-consume { color: var(--red); background: var(--red-soft); }
+.ledger-grant { color: #855e00; background: var(--gold-pale); }
+.ledger-adjustment, .ledger-other { color: #5f537c; background: #f0edf7; }
+.recharge-ledger-panel .ledger-amount { font-weight: 750; font-size: 14px; font-variant-numeric: tabular-nums; }
+.recharge-ledger-panel .ledger-income { color: var(--green); }
+.recharge-ledger-panel .ledger-expense { color: var(--red); }
+.ledger-amount span { font-size: 12px; font-weight: 400; }
+.ledger-money, .ledger-balance { font-variant-numeric: tabular-nums; }
+.recharge-ledger-panel .ledger-reason { min-width: 160px; max-width: 260px; white-space: normal; overflow-wrap: anywhere; line-height: 1.6; }
 .recharge-modal { width: min(430px, calc(100% - 32px)); }
 .recharge-content { padding: 8px 0 20px; text-align: center; }
 .recharge-content img { display: block; width: min(280px, 100%); margin: 0 auto 14px; border-radius: 8px; }
