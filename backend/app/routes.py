@@ -467,12 +467,15 @@ def admin_overview(request: Request) -> dict[str, Any]:
     statuses = {row["status"]: int(row["count"]) for row in task_status}
     # Provider billing is delayed and may be temporarily unavailable; retain
     # the locally recorded amount as a safe fallback in that case.
-    billing_cost = _admin_billing_cost(now_iso()[:7])
+    billing_month = now_iso()[:7]
+    billing_cost = _admin_billing_cost(billing_month)
     return {
-        "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": int(users["credits"] or 0)},
+        "users": {"total": int(users["total"] or 0), "active": int(users["active"] or 0), "credits": round(float(users["credits"] or 0), 1)},
         "tasks": {"total": sum(statuses.values()), "queued": statuses.get("queued", 0), "running": statuses.get("running", 0), "review": statuses.get("review", 0), "done": statuses.get("done", 0), "failed": statuses.get("failed", 0)},
         "creditsUsed": int(usage["used"] or 0),
         "apiCostRmb": billing_cost if billing_cost is not None else round(float(usage["api_cost"] or 0), 2),
+        "apiCostSource": "provider_billing" if billing_cost is not None else "local_records",
+        "apiCostMonth": billing_month,
         "recentTasks": [dict(row) for row in recent],
         "sections": {"analytics": False, "funnel": False, "retention": False, "codeManagement": False},
         "timestamp": now_iso(),
@@ -617,9 +620,9 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
     clauses: list[str] = []
     params: list[Any] = []
     if keyword.strip():
-        clauses.append("(t.title LIKE ? OR t.file_name LIKE ? OR u.email LIKE ?)")
+        clauses.append("(t.title LIKE ? OR t.file_name LIKE ? OR u.email LIKE ? OR u.name LIKE ?)")
         value = f"%{keyword.strip()}%"
-        params.extend([value, value, value])
+        params.extend([value, value, value, value])
     if status != "all":
         clauses.append("t.status = ?"); params.append(status)
     if user_id:
@@ -660,6 +663,8 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS done_count,
             SUM(CASE WHEN t.status = 'review' THEN 1 ELSE 0 END) AS review_count,
             SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            SUM(CASE WHEN t.status = 'running' THEN 1 ELSE 0 END) AS running_count,
+            SUM(CASE WHEN t.status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
             GROUP_CONCAT(CASE WHEN t.status = 'review' THEN t.id END) AS review_task_ids,
             GROUP_CONCAT(CASE WHEN t.status = 'done' THEN t.id END) AS done_task_ids,
             MAX(CASE WHEN t.status = 'failed' THEN t.id END) AS failed_task_id

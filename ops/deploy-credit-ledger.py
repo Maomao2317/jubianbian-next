@@ -1,4 +1,4 @@
-"""Deploy the pushed credit ledger UI, staging first, preserving runtime settings."""
+"""Deploy the pushed admin console and ledger, staging first, preserving settings."""
 import argparse
 import datetime
 import fcntl
@@ -14,12 +14,14 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 BASELINE = 'bae09ce3cf4f0ace5c2a79034ee90c8a6407ee65'
-BUILD = 'credit-ledger-20261027-r1'
+BUILD = 'admin-console-20261027-r1'
+STAGING_BASELINE = '5d31237a8e8b83b6668ddbfaa3cd0185984f5322'
 SELF = 'ops/deploy-credit-ledger.py'
 SUPPORT = 'ops/restore-gpu-routing.py'
 CHANGES = {'backend/app/routes.py', 'web-staging/js/app.js', 'web-staging/index.html',
-           'web-staging/css/app.css', 'web-staging/test-admin-ledger.cjs'}
-CHECKS = {'backend/test_admin_ledger.py'}
+           'web-staging/css/app.css', 'web-staging/test-admin-ledger.cjs',
+           'web-staging/test-user-review.cjs'}
+CHECKS = {'backend/test_admin_ledger.py', 'backend/test_admin_console.py'}
 
 
 def main():
@@ -45,7 +47,7 @@ def main():
         lock = Path('/run/lock/'+project+'-deploy.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
-    release = Path('/opt/jbb-credit-ledger-'+args.commit[:12])
+    release = Path('/opt/jbb-admin-console-'+args.commit[:12])
     release.mkdir(mode=0o700, exist_ok=True)
     release.chmod(0o700)
     paths = [p for p in git('ls-tree', '-rz', '--name-only', args.commit, '--',
@@ -60,10 +62,11 @@ def main():
     prepared_file = release/'prepared.json'
     if args.step == 'prepare':
         stage, prod = routing.inspect('jubianbian-staging'), routing.inspect('jubianbian')
-        assert stage['Image'] == prod['Image'], 'Different deployed baselines'
-        base_paths = [p for p in git('ls-tree', '-rz', '--name-only', BASELINE, '--', 'backend/app', 'web-staging').decode().split('\0') if p]
-        base_manifest = {p: hashlib.sha256(git('show', BASELINE+':'+p)).hexdigest() for p in base_paths}
-        for project in ('jubianbian-staging', 'jubianbian'):
+        # The ledger preview is already on staging; production still runs the
+        # previous release because its active video tasks blocked deployment.
+        for project, baseline in (('jubianbian-staging', STAGING_BASELINE), ('jubianbian', BASELINE)):
+            base_paths = [p for p in git('ls-tree', '-rz', '--name-only', baseline, '--', 'backend/app', 'web-staging').decode().split('\0') if p]
+            base_manifest = {p: hashlib.sha256(git('show', baseline+':'+p)).hexdigest() for p in base_paths}
             print(project, verify(project, base_manifest), flush=True)
         context = release/'context'
         context.mkdir(exist_ok=True)
@@ -71,11 +74,11 @@ def main():
             target = context/relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(git('show', args.commit+':'+relative))
-        base_tag = 'jubianbian-app:ledger-base-'+args.commit[:12]
+        base_tag = 'jubianbian-app:admin-base-'+args.commit[:12]
         subprocess.run(['docker', 'tag', prod['Image'], base_tag], check=True)
         (context/'Dockerfile').write_text('FROM '+base_tag+'\n'+''.join(
             'COPY '+p+' /app/'+p+'\n' for p in sorted(CHANGES)))
-        tag = 'jubianbian-app:ledger-'+args.commit[:12]
+        tag = 'jubianbian-app:admin-'+args.commit[:12]
         subprocess.run(['docker', 'build', '--pull=false', '--network=none', '-t', tag, context], check=True)
         image = json.loads(output(['docker', 'image', 'inspect', tag]))[0]['Id']
         subprocess.run(['docker', 'run', '--rm', '--network', 'none', '-i',
@@ -83,13 +86,14 @@ def main():
                        input=json.dumps(manifest).encode(), check=True)
         # Exercise the exact release image without business mounts, credentials
         # or network access. The arithmetic verifier creates a disposable DB.
-        for testfile in ('backend/test_admin_ledger.py', 'ops/verify_recharge.py'):
+        for testfile in ('backend/test_admin_ledger.py', 'backend/test_admin_console.py', 'ops/verify_recharge.py'):
             subprocess.run(['docker', 'run', '--rm', '--network', 'none', '-i',
                             '-e', 'PYTHONPATH=/app/backend', '-e', 'JBB_DATA_DIR=/tmp/jbb-ledger-check',
                             '--entrypoint', 'python', image, '-'],
                            input=git('show', args.commit+':'+testfile), check=True)
         prepared_file.write_text(json.dumps(dict(sourceCommit=args.commit, image=image,
-                                                baseImage=prod['Image'], files=manifest), indent=2))
+                                                baseImages={'staging': stage['Image'], 'production': prod['Image']},
+                                                files=manifest), indent=2))
         print('PREPARED', args.commit, image, flush=True)
         return
     prepared = json.loads(prepared_file.read_text())
@@ -103,7 +107,7 @@ def main():
     project = 'jubianbian-staging' if args.step == 'staging' else 'jubianbian'
     root, port = Path('/opt')/project, 18000 if args.step == 'staging' else 8000
     previous = routing.inspect(project)
-    assert previous['Image'] == prepared['baseImage'], 'Deployment baseline changed'
+    assert previous['Image'] == prepared['baseImages'][args.step], 'Deployment baseline changed'
     old_env = routing.environment(previous)
     old_build = old_env['JBB_BUILD_VERSION']
     assert old_env['JBB_ENVIRONMENT'] == args.step

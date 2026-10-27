@@ -109,7 +109,7 @@ const click = async (action, id) => {
   ui.state.profile = { role: "admin" };
   await ui.renderAdmin();
   assert.match(node("#main").innerHTML, /1330.0<\/strong> 积分/);
-  assert.match(node("#main").innerHTML, /73.0 \/ 266.0 分钟/);
+  assert.match(node("#main").innerHTML, /已用 73.0 分钟.*可用 266.0 分钟/s);
   assert.doesNotMatch(node("#main").innerHTML, /999 \/|调整分钟额度/);
   mobile = true;
   const beforeUpload = calls.length;
