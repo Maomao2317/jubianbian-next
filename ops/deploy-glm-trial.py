@@ -50,10 +50,10 @@ def idle():
         raise RuntimeError(f'{count} active staging tasks; deployment deferred')
 
 
-def compose(build, *args):
-    run('docker', 'compose', '--env-file', ROOT / 'fangzhou.env', '-p', PROJECT,
+def compose(build, *args, **kwargs):
+    return run('docker', 'compose', '--env-file', ROOT / 'fangzhou.env', '-p', PROJECT,
         '-f', ROOT / 'docker-compose.yml', '-f', ROOT / 'release-image.yml', *args,
-        env=dict(os.environ, JBB_BUILD_VERSION=build))
+        env=dict(os.environ, JBB_BUILD_VERSION=build), **kwargs)
 
 
 def health(build):
@@ -139,12 +139,23 @@ def main(commit):
                     'GLM_BASE_URL': 'https://open.bigmodel.cn/api/paas/v4',
                     'GLM_RESPONSE_TIMEOUT_SECONDS': '1200', 'GLM_STREAM_IDLE_TIMEOUT_SECONDS': '180',
                     'GLM_RESPONSE_ATTEMPTS': '2'}
-        # Retain all Ark/OpenAI and GPU settings; selection explicitly isolates GLM.
-        override = 'services:\n  app:\n    image: ' + image + '\n    env_file:\n      - ' + str(keyfile) + '\n    environment:\n'
-        override += ''.join('      ' + k + ': ' + json.dumps(v) + '\n' for k, v in settings.items())
-        (ROOT / 'release-image.yml').write_text(override)
+        # Earlier releases pin effective settings in this override rather than
+        # fangzhou.env. Retain them all, including literal Compose dollar signs.
+        pinned_env = {**old_env, **settings, 'JBB_BUILD_VERSION': build}
+        pinned_env.pop('GLM_API_KEY', None)
+        override = {'services': {'app': {'image': image, 'env_file': [str(keyfile)],
+            'environment': {k: v.replace('$', '$$') for k, v in pinned_env.items()}}}}
+        override_file = ROOT / 'release-image.yml'
+        override_file.touch(mode=0o600, exist_ok=True)
+        override_file.chmod(0o600)
+        override_file.write_text(json.dumps(override, ensure_ascii=True, indent=2) + '\n')
         (ROOT / '.staging-deploy-hold').write_text('Pinned ' + build + '; pushed commit ' + commit + '; backup ' + str(backup) + '\n')
-        compose(build, 'config', '--quiet')
+        planned = json.loads(compose(build, 'config', '--format', 'json', stdout=subprocess.PIPE).stdout)
+        planned_env = {k: str(v).replace('$$', '$') for k, v in planned['services']['app']['environment'].items()}
+        assert {k: v for k, v in planned_env.items() if k != 'GLM_API_KEY'} == pinned_env, 'Planned settings differ'
+        assert planned_env.get('GLM_API_KEY') and planned['services']['app']['image'] == image
+        idle()
+        assert inspect()['Id'] == previous['Id'], 'Staging changed externally'
         replaced = True
         compose(build, 'up', '-d', '--no-build', '--no-deps', 'app')
         record['health'] = health(build)
