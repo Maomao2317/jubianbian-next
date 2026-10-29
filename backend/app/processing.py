@@ -26,6 +26,9 @@ from .config import (
     OPENAI_API_KEY,
     OPENAI_TEXT_MODEL,
     WORKER_CONCURRENCY,
+    VIDEO_PROVIDER,
+    GLM_API_KEY,
+    GLM_MODEL,
 )
 from .auth_store import db, now_iso
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
@@ -34,6 +37,7 @@ from .errors import ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
 from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, ark_review_target_text, openai_script, openai_transcribe
+from .glm_provider import glm_prepare_video, glm_recognize, glm_recognize_range
 from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import (
@@ -217,7 +221,9 @@ async def repair_content_gaps(
     script = deepcopy(script)
     evidence = {**evidence, "durationSec": duration}
     initial_windows = repair_windows(content_gaps(script, duration))
-    model = ARK_TURBO_MODEL.strip() or ARK_MODEL
+    provider = route.get("provider", VIDEO_PROVIDER)
+    model = GLM_MODEL if provider == "glm" else (ARK_TURBO_MODEL.strip() or ARK_MODEL)
+    recognize_range = glm_recognize_range if provider == "glm" else ark_recognize_range
     metadata: dict[str, Any] = {
         "requestedRanges": initial_windows,
         "attemptedRanges": [],
@@ -267,7 +273,7 @@ async def repair_content_gaps(
             pass_record["attempts"].append(attempt_record)
             try:
                 clip, clip_usage, offset, clip_duration = await _run_model_call(
-                    ark_recognize_range,
+                    recognize_range,
                     path,
                     title,
                     duration,
@@ -331,7 +337,7 @@ async def repair_content_gaps(
                     break
     quality, _approved, _blocking = _evaluate_quality(
         script,
-        "ark",
+        provider,
         evidence,
         route,
         recover_evidence=False,
@@ -557,7 +563,7 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
-    if getattr(error, "provider_code", "") == "empty_screenplay":
+    if getattr(error, "provider_code", "") in {"empty_screenplay", "glm_configuration", "provider_configuration", "glm_api_error"}:
         return True
     if is_account_balance_error(error):
         return True
@@ -591,7 +597,9 @@ def _task_error_message(error: BaseException) -> str:
     if getattr(error, "provider_code", "") == "empty_screenplay":
         return str(error)
     if is_account_balance_error(error):
-        return "方舟账户欠费或余额不足，已停止无效重试；请管理员恢复账户后重新识别，原片和已采集结果已保留。"
+        return ("智谱" if VIDEO_PROVIDER == "glm" else "方舟") + "账户欠费或余额不足，已停止无效重试；请管理员恢复账户后重新识别，原片和已采集结果已保留。"
+    if str(getattr(error, "provider_code", "")).startswith("glm_"):
+        return safe_error_text(error)
     if str(getattr(error, "provider_code", "")).startswith(("video_proxy_", "video_source_", "video_upload_")):
         return safe_error_text(error)
     text = str(error).casefold()
@@ -603,7 +611,7 @@ def _task_error_message(error: BaseException) -> str:
     if _is_non_retryable_provider_error(error):
         return "当前 Lite 模型未启用，已停止重复重试；请启用该模型或改用 Turbo 后再识别。"
     if any(marker in text for marker in ("timed out", "timeout", "超时")):
-        return "方舟识别暂时超时，自动恢复与重试均未成功；请稍后重新识别。"
+        return ("智谱" if VIDEO_PROVIDER == "glm" else "方舟") + "识别暂时超时，自动恢复与重试均未成功；请稍后重新识别。"
     return safe_error_text(error)
 
 
@@ -671,7 +679,11 @@ def _collect_task_evidence(path: Path, title: str, duration: float, cache: Recog
 
 
 async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Collect evidence, then use Ark with an explicit OpenAI fallback."""
+    """Collect evidence and use the explicitly configured provider."""
+    if VIDEO_PROVIDER not in {"ark", "glm"}:
+        raise ArkError("视频模型供应商配置无效", provider_code="provider_configuration")
+    if VIDEO_PROVIDER == "glm" and not GLM_API_KEY:
+        raise ArkError("未配置智谱 API Key", provider_code="glm_configuration")
     progress = _media_progress_callback(row["id"])
     cache = await asyncio.to_thread(recognition_cache, row["id"], row["stored_path"])
     path, materialized_dir = await asyncio.to_thread(materialize_media, row["stored_path"], row["id"], progress_callback=progress)
@@ -695,7 +707,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
 
         async def prepare_media() -> dict[str, Any]:
             prepared = await asyncio.to_thread(
-                ark_prepare_video, path, duration,
+                glm_prepare_video if VIDEO_PROVIDER == "glm" else ark_prepare_video, path, duration,
                 progress_callback=progress, cache=cache,
                 **({"source_uri": row["stored_path"]} if is_object_uri(row["stored_path"]) else {}),
             )
@@ -705,7 +717,7 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
 
         prepare_task = (
             asyncio.create_task(prepare_media())
-            if ARK_API_KEYS
+            if VIDEO_PROVIDER == "glm" or ARK_API_KEYS
             else None
         )
         # Both workers own the materialized source until they finish, including
@@ -726,7 +738,9 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
                 prepared_video = results[1]
             except ArkError as exc:
                 prepare_error = exc
-        route = select_ark_route(duration, evidence)
+        route = ({"provider": "glm", "model": GLM_MODEL, "band": "glm_max", "score": 0,
+                  "reasons": ["explicit_glm_only", "reasoning_effort=max"], "mode": "glm"}
+                 if VIDEO_PROVIDER == "glm" else select_ark_route(duration, evidence))
         return await _run_recognizer_with_media(
             row,
             path,
@@ -749,14 +763,17 @@ async def _run_recognizer_with_media(
     prepared_video: dict[str, Any] | None,
     prepare_error: ArkError | None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    provider = route.get("provider", VIDEO_PROVIDER)
+    is_glm = provider == "glm"
+    recognize = glm_recognize if is_glm else ark_recognize
     ark_error: ArkError | None = prepare_error
-    if ARK_API_KEYS and prepared_video is not None:
+    if (is_glm or ARK_API_KEYS) and prepared_video is not None:
         mark_task_stage(row["id"], status="running", stage="vision", progress_percent=62, message="正在识别画面、人物与对白")
         ark_script: dict[str, Any] | None = None
         ark_usage_data: dict[str, Any] | None = None
         try:
             ark_script, ark_usage_data = await _run_model_call(
-                ark_recognize,
+                recognize,
                 path,
                 row["title"],
                 duration,
@@ -767,7 +784,7 @@ async def _run_recognizer_with_media(
         except ArkError as exc:
             ark_error = exc
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
-            if route["model"] == ARK_LITE_MODEL.strip() and turbo_model and turbo_model != route["model"] and _is_lite_model_unavailable(exc):
+            if not is_glm and route["model"] == ARK_LITE_MODEL.strip() and turbo_model and turbo_model != route["model"] and _is_lite_model_unavailable(exc):
                 logger.warning(
                     "provider_fallback provider=ark reason=lite_model_unavailable task_id=%s from_model=%s to_model=%s",
                     row["id"],
@@ -795,18 +812,19 @@ async def _run_recognizer_with_media(
                     ark_error = turbo_exc
             if ark_script is None:
                 logger.warning(
-                    "provider_failed provider=ark task_id=%s status_code=%s error=%s",
+                    "provider_failed provider=%s task_id=%s status_code=%s error=%s",
+                    provider,
                     row["id"],
                     ark_error.status_code if ark_error else None,
                     safe_error_text(ark_error) if ark_error else "unknown",
                 )
-                if getattr(ark_error, "provider_code", "") == "empty_screenplay" or not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
+                if is_glm or getattr(ark_error, "provider_code", "") == "empty_screenplay" or not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
                     raise ark_error or exc
         if ark_script is not None and ark_usage_data is not None:
             script = normalize_script(ark_script, row["title"])
             if not has_screenplay_body(script):
                 raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
-            quality, _approved, blocking = _evaluate_quality(script, "ark", evidence, route)
+            quality, _approved, blocking = _evaluate_quality(script, provider, evidence, route)
             initial_model = route["model"]
             final_model = initial_model
             final_usage = dict(ark_usage_data)
@@ -820,7 +838,7 @@ async def _run_recognizer_with_media(
                 "reviewScope": None,
             }
 
-            turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
+            turbo_model = GLM_MODEL if is_glm else (ARK_TURBO_MODEL.strip() or ARK_MODEL)
             has_content_gaps = bool(quality.get("contentGapRanges"))
             if has_content_gaps and turbo_model and route.get("mode") not in {"lite", "lite_only"}:
                 mark_task_stage(row["id"], status="running", stage="repairing", progress_percent=72,
@@ -878,7 +896,8 @@ async def _run_recognizer_with_media(
                     "triggeringIssues": review_issues,
                 })
                 logger.info(
-                    "provider_review provider=ark task_id=%s from_model=%s to_model=%s issues=%s",
+                    "provider_review provider=%s task_id=%s from_model=%s to_model=%s issues=%s",
+                    provider,
                     row["id"],
                     initial_model,
                     turbo_model,
@@ -886,7 +905,7 @@ async def _run_recognizer_with_media(
                 )
                 try:
                     reviewed_script, reviewed_usage = await _run_model_call(
-                        ark_recognize,
+                        recognize,
                         path,
                         row["title"],
                         duration,
@@ -898,13 +917,13 @@ async def _run_recognizer_with_media(
                     review_route = {
                         **route,
                         "model": turbo_model,
-                        "band": "turbo_review",
-                        "reasons": [*route["reasons"], "lite_quality_gate_failed_turbo_review"],
+                        "band": "glm_max_review" if is_glm else "turbo_review",
+                        "reasons": [*route["reasons"], "glm_quality_review" if is_glm else "lite_quality_gate_failed_turbo_review"],
                     }
                     reviewed_script = normalize_script(reviewed_script, row["title"])
                     reviewed_quality, _reviewed_approved, _reviewed_blocking = _evaluate_quality(
                         reviewed_script,
-                        "ark",
+                        provider,
                         evidence,
                         review_route,
                     )
@@ -930,20 +949,21 @@ async def _run_recognizer_with_media(
                 except ArkError as review_exc:
                     final_usage = _merge_usage(final_usage, getattr(review_exc, "usage", {}))
                     review_metadata["reviewError"] = safe_error_text(review_exc)
-                    quality["warning"] = (
-                        "Turbo 自动复核失败，已保留 Lite 草稿并等待用户复核。"
-                        if not quality_gate(quality)[0]
-                        else "Turbo 自动复核失败，已保留通过 P0 门禁的 Lite 结果并记录提示。"
-                    )
+                    quality["warning"] = ("智谱自动复核失败，已保留初稿并记录复核提示。" if is_glm else (
+                        "Turbo 自动复核失败，已保留 Lite 草稿并等待用户复核。" if not quality_gate(quality)[0]
+                        else "Turbo 自动复核失败，已保留通过 P0 门禁的 Lite 结果并记录提示。"))
                     logger.warning(
-                        "provider_review_failed provider=ark task_id=%s error=%s",
+                        "provider_review_failed provider=%s task_id=%s error=%s",
+                        provider,
                         row["id"],
                         safe_error_text(review_exc),
                     )
 
             quality["automatedReview"] = review_metadata
             quality["providerUsage"] = final_usage
-            return script, quality, {**final_usage, "provider": "ark", "model": final_model}, evidence
+            return script, quality, {**final_usage, "provider": provider, "model": final_model}, evidence
+    elif is_glm:
+        raise prepare_error or ArkError("智谱视频准备未完成", provider_code="glm_configuration")
     elif ARK_API_KEYS and prepare_error is not None:
         logger.warning(
             "provider_failed provider=ark operation=prepare task_id=%s error=%s",

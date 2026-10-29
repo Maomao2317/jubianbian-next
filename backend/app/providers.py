@@ -1550,7 +1550,9 @@ def _local_review_context(context: dict[str, Any], start: float, end: float,
 
 def _recognize_review_clip(path: Path, title: str, duration: float, evidence: dict[str, Any],
                            model: str, context: dict[str, Any], prepared: dict[str, Any],
-                           bounds: tuple[float, float]):
+                           bounds: tuple[float, float], *, prepare_video_fn=None, recognize_fn=None):
+    prepare_video_fn = prepare_video_fn or ark_prepare_video
+    recognize_fn = recognize_fn or ark_recognize
     start, end = bounds
     cache = prepared.get("_cache")
     kind = f"review_{round(start * 1000)}_{round(end * 1000)}:clip-v1"
@@ -1576,13 +1578,13 @@ def _recognize_review_clip(path: Path, title: str, duration: float, evidence: di
                 raise ArkError("局部复核切片失败", provider_code="review_clip_unavailable") from exc
             if clip_cache:
                 target = clip_cache.adopt_proxy(target)
-        clip_prepared = ark_prepare_video(target, end - start, cache=clip_cache,
+        clip_prepared = prepare_video_fn(target, end - start, cache=clip_cache,
                                           sampling_fps=ARK_REVIEW_VIDEO_FPS)
         clip_prepared.update(_audit_cache=cache, _audit_kind="review")
         local = _local_review_context(context, start, end, duration)
-        logger.info("provider_step provider=ark operation=review_clip start_sec=%.2f duration_sec=%.2f source_duration_sec=%.2f",
-                    start, end - start, duration)
-        return ark_recognize(target, title, end - start, slice_evidence(evidence, start, end),
+        logger.info("provider_step provider=%s operation=review_clip start_sec=%.2f duration_sec=%.2f source_duration_sec=%.2f",
+                    clip_prepared.get("provider", "ark"), start, end - start, duration)
+        return recognize_fn(target, title, end - start, slice_evidence(evidence, start, end),
                              model, review_context=local, prepared_video=clip_prepared)
 
 
@@ -1768,8 +1770,10 @@ def _ark_call_usage(records, model, stage, duration, fps):
 def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: dict[str, Any],
                         model: str, window: dict[str, float], *,
                         cache: RecognitionCache | None = None,
-                        repair_attempt: int = 0) -> tuple[dict[str, Any], dict[str, Any], float, float]:
+                        repair_attempt: int = 0, prepare_video_fn=None, recognize_fn=None) -> tuple[dict[str, Any], dict[str, Any], float, float]:
     """Physically isolate a missing interval so full-video attention cannot skip it."""
+    prepare_video_fn = prepare_video_fn or ark_prepare_video
+    recognize_fn = recognize_fn or ark_recognize
     start = max(0.0, window["startSec"] - 2)
     end = min(duration_sec, window["endSec"] + 2)
     kind = f"segment_{round(start * 1000)}_{round(end * 1000)}"
@@ -1811,7 +1815,7 @@ def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: d
         # cache may be passed here: a parent cache could send the wrong video.
         for attempt in range(2):
             try:
-                prepared = ark_prepare_video(target, end - start, cache=clip_cache)
+                prepared = prepare_video_fn(target, end - start, cache=clip_cache)
                 break
             except ArkError as exc:
                 if (attempt or exc.provider_code == "video_upload_retry_exhausted"
@@ -1823,7 +1827,7 @@ def ark_recognize_range(path: Path, title: str, duration_sec: float, evidence: d
                 time.sleep(1)
         if cache:
             prepared.update(_audit_cache=cache, _audit_kind=checkpoint_kind)
-        script, usage = ark_recognize(target, title, end - start, clipped, model, prepared_video=prepared)
+        script, usage = recognize_fn(target, title, end - start, clipped, model, prepared_video=prepared)
     if cache:
         cache.save(checkpoint_kind, {"protocol": 2, "model": model, "generation": generation,
                                      "script": script, "usage": usage})

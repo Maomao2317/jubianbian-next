@@ -14,6 +14,7 @@ from .config import (
     JBB_LOG_LEVEL,
     JBB_LOG_MAX_BYTES,
     OPENAI_API_KEY,
+    GLM_API_KEY,
     TENCENTCLOUD_SECRET_ID,
     TENCENTCLOUD_SECRET_KEY,
 )
@@ -48,6 +49,7 @@ def safe_error_text(error: BaseException, limit: int = 1000) -> str:
         ARK_API_KEY,
         ARK_API_KEY_2,
         OPENAI_API_KEY,
+        GLM_API_KEY,
         TENCENTCLOUD_SECRET_ID,
         TENCENTCLOUD_SECRET_KEY,
     ):

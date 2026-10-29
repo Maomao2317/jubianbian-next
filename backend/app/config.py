@@ -63,6 +63,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "whisper-1")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+# Explicit provider selection keeps an isolated GLM trial from silently using
+# the retained Ark/OpenAI credentials. Existing deployments still select Ark.
+VIDEO_PROVIDER = os.getenv("JBB_VIDEO_PROVIDER", "ark").strip().lower() or "ark"
+GLM_API_KEY = os.getenv("GLM_API_KEY", "").strip()
+GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
+GLM_MODEL = os.getenv("GLM_MODEL", "glm-5.3-flash").strip() or "glm-5.3-flash"
+GLM_REASONING_EFFORT = os.getenv("GLM_REASONING_EFFORT", "max").strip().lower()
+GLM_MAX_OUTPUT_TOKENS = max(32768, min(131072, int(os.getenv("GLM_MAX_OUTPUT_TOKENS", "131072"))))
+GLM_MAX_IN_FLIGHT = max(1, min(16, int(os.getenv("JBB_GLM_MAX_IN_FLIGHT", "1"))))
+GLM_RESPONSE_TIMEOUT_SECONDS = max(60.0, float(os.getenv("GLM_RESPONSE_TIMEOUT_SECONDS", "1200")))
+GLM_STREAM_IDLE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("GLM_STREAM_IDLE_TIMEOUT_SECONDS", "180")))
+GLM_RESPONSE_ATTEMPTS = max(1, min(3, int(os.getenv("GLM_RESPONSE_ATTEMPTS", "2"))))
 # Independent local ASR is the default evidence source.  It deliberately runs
 # outside the video-understanding model so dialogue omissions can be measured
 # instead of asking the same model to check its own answer.  Set the model to

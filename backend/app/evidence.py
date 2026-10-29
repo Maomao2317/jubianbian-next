@@ -40,6 +40,7 @@ from .config import (
     OCR_REMOTE_URL,
     OPENAI_API_KEY,
     EVIDENCE_CONCURRENCY,
+    VIDEO_PROVIDER,
 )
 from .logging_setup import logger, safe_error_text
 from .resource_limits import capacity, limited
@@ -287,7 +288,7 @@ def _audio_evidence(
             logger.warning("evidence_local_asr_failed file=%s error=%s", path.name, safe_error_text(exc))
             failures.append(f"本地 ASR 失败：{safe_error_text(exc)}")
 
-    if OPENAI_API_KEY:
+    if OPENAI_API_KEY and VIDEO_PROVIDER != "glm":
         try:
             # Lazy import prevents a provider/evidence import cycle.
             from .providers import openai_transcribe
