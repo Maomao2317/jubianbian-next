@@ -1061,6 +1061,10 @@ async def process_task(task_id: str) -> None:
     row = task_row(task_id)
     if not row:
         return
+    # Old task fixtures and rows created before batch processing was added do
+    # not necessarily expose this column.  Keep their completion and failure
+    # paths compatible while treating them as standalone tasks.
+    batch_id = row["batch_id"] if "batch_id" in row.keys() else None
     started = time.perf_counter()
     logger.info("task_start task_id=%s title=%s file=%s", task_id, row["title"], row["file_name"])
     try:
@@ -1111,13 +1115,13 @@ async def process_task(task_id: str) -> None:
             completed_at=now_iso(),
         )
         await asyncio.to_thread(discard_local_proxy, task_id)
-        if row["batch_id"]:
+        if batch_id:
             try:
-                continuity_changes = reconcile_batch_character_continuity(row["batch_id"])
+                continuity_changes = reconcile_batch_character_continuity(batch_id)
                 if continuity_changes:
                     logger.info(
                         "batch_character_continuity batch_id=%s task_id=%s changes=%s",
-                        row["batch_id"],
+                        batch_id,
                         task_id,
                         continuity_changes,
                     )
@@ -1127,7 +1131,7 @@ async def process_task(task_id: str) -> None:
                 # will retry the same deterministic pass.
                 logger.warning(
                     "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
-                    row["batch_id"],
+                    batch_id,
                     task_id,
                     safe_error_text(continuity_error),
                 )
@@ -1200,13 +1204,13 @@ async def process_task(task_id: str) -> None:
             progress_percent=100,
             duration_ms=(time.perf_counter() - started) * 1000,
         )
-        if row["batch_id"]:
+        if batch_id:
             try:
-                await asyncio.to_thread(reconcile_batch_character_continuity, row["batch_id"])
+                await asyncio.to_thread(reconcile_batch_character_continuity, batch_id)
             except Exception as continuity_error:  # pragma: no cover - defensive persistence boundary
                 logger.warning(
                     "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
-                    row["batch_id"],
+                    batch_id,
                     task_id,
                     safe_error_text(continuity_error),
                 )
