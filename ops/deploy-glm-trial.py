@@ -69,8 +69,11 @@ def health(build):
     raise RuntimeError('Staging health/build check failed')
 
 
-def main(commit):
+def main(commit, sample=None):
     assert re.fullmatch('[0-9a-f]{40}', commit)
+    if sample is not None:
+        sample = Path(sample).resolve(strict=True)
+        assert sample.is_file() and sample.stat().st_size < 200 * 1024 * 1024
     lock = Path('/run/lock/jubianbian-staging-deploy.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     assert git('ls-remote', 'origin', 'refs/heads/codex/repair-batch-content').decode().split()[0] == commit, 'Push first'
@@ -170,7 +173,14 @@ def main(commit):
         for name in FILES:
             actual = subprocess.check_output(['docker', 'exec', PROJECT + '-app-1', 'cat', '/app/' + name])
             assert hashlib.sha256(actual).hexdigest() == digests[name], name + ': runtime differs'
-        run('docker', 'exec', PROJECT + '-app-1', 'python', '/app/ops/verify-glm-trial.py')
+        verify_args = []
+        if sample is not None:
+            run('docker', 'cp', sample, PROJECT + '-app-1:/tmp/glm-trial-sample.mp4')
+            verify_args = ['--sample', '/tmp/glm-trial-sample.mp4']
+        run('docker', 'exec', PROJECT + '-app-1', 'python', '/app/ops/verify-glm-trial.py', *verify_args)
+        if sample is not None:
+            run('docker', 'exec', PROJECT + '-app-1', 'python', '-c',
+                "from pathlib import Path; Path('/tmp/glm-trial-sample.mp4').unlink()")
         proof = subprocess.check_output(['docker', 'exec', PROJECT + '-app-1', 'cat', '/tmp/glm-trial-verification.json'])
         record['liveVerification'] = json.loads(proof)
         assert fingerprint() == production, 'Production changed externally'
@@ -193,4 +203,4 @@ def main(commit):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
