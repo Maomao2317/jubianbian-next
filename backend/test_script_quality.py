@@ -784,6 +784,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 ]
             },
         )
+        self.assertEqual(simple["provider"], "ark")
         self.assertEqual(simple["band"], "simple")
         audio_without_ocr = select_ark_route(
             117,

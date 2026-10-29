@@ -161,12 +161,14 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
 
         with (patch.object(processing, "mark_task_stage"),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
-              patch.object(processing, "ark_recognize", side_effect=[(draft, {}), (reviewed, {})]) as recognize):
+              patch.object(processing, "ark_recognize", side_effect=[(draft, {}), (reviewed, {})]) as recognize,
+              patch.object(processing, "glm_recognize") as glm_recognize):
             result, quality, usage, _ = await processing._run_recognizer_with_media(
                 {"id": "task", "title": "第2集"}, Path("unused"), 30, evidence,
-                {"model": "lite", "mode": "lite", "band": "simple", "score": 0, "reasons": []}, {}, None)
+                {"provider": "ark", "model": "lite", "mode": "lite", "band": "simple", "score": 0, "reasons": []}, {}, None)
 
         self.assertEqual(recognize.call_count, 2)
+        glm_recognize.assert_not_called()
         self.assertEqual([call.args[4] for call in recognize.call_args_list], ["lite", "lite"])
         self.assertEqual(result["scenes"][0]["blocks"][1]["speaker"], "晓晨")
         self.assertEqual(result["scenes"][0]["blocks"][1]["text"], "我回来了。")

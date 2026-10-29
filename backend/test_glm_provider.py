@@ -75,6 +75,24 @@ class GLMTests(unittest.TestCase):
         self.assertNotIn("private.invalid", str(audit.save.call_args))
         self.assertNotIn("fixture-only", str(audit.save.call_args))
 
+    def test_prior_cast_context_is_sent_only_through_glm_request(self):
+        cast = {"characterProfiles": [
+            {"name": "晓晨", "aliases": ["小晨"], "appearance": "黑色短发"},
+        ]}
+        payload = {"output_text": json.dumps(draft()), "usage": {}}
+        with (patch.object(glm, "glm_stream_response", return_value=payload) as request,
+              patch.object(providers, "ark_stream_response") as ark):
+            glm.glm_recognize(
+                Path("source.mp4"), "第2集", 10,
+                evidence={"batchCharacterContext": cast},
+                prepared_video={"_video_uri": "s3://test/video.mp4"},
+            )
+        prompt = request.call_args.args[0]["messages"][1]["content"][1]["text"]
+        self.assertIn("同批前集累计的人物表", prompt)
+        self.assertIn("晓晨", prompt)
+        self.assertIn("小晨", prompt)
+        ark.assert_not_called()
+
     def test_invalid_result_retries_bounded_and_counts_both_calls(self):
         responses = [{"output_text": '{}', "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
                      {"output_text": json.dumps(draft()), "usage": {"prompt_tokens": 20, "completion_tokens": 4}}]
@@ -116,6 +134,60 @@ class GLMTests(unittest.TestCase):
 
 
 class GLMIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_identity_review_writes_canonical_name_and_stays_on_glm(self):
+        evidence = {
+            "durationSec": 30,
+            "batchCharacterContext": {"characterProfiles": [
+                {"name": "晓晨", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "黑色外套"},
+                {"name": "赵明", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "黑色外套"},
+            ]},
+        }
+        initial = {
+            "characters": ["黑衣男子"],
+            "characterProfiles": [
+                {"name": "黑衣男子", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "黑色外套"},
+            ],
+            "scenes": [{
+                "heading": "2-1 日 内 客厅", "location": "客厅",
+                "blocks": [
+                    {"type": "action", "text": "黑衣男子走进客厅。", "startSec": 0, "endSec": 30},
+                    {"type": "dialogue", "speaker": "黑衣男子", "text": "我回来了。", "startSec": 2, "endSec": 4},
+                ],
+            }],
+        }
+        reviewed = deepcopy(initial)
+        reviewed["characters"] = ["晓晨"]
+        reviewed["characterProfiles"][0]["name"] = "晓晨"
+        reviewed["characterProfiles"][0]["aliases"] = ["黑衣男子"]
+        reviewed["scenes"][0]["blocks"][1]["speaker"] = "晓晨"
+        route = {
+            "provider": "glm", "model": "glm-5.3-flash", "mode": "glm",
+            "band": "glm_max", "score": 0, "reasons": [],
+        }
+
+        with (patch.object(processing, "GLM_MODEL", "glm-5.3-flash"),
+              patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "glm_recognize", side_effect=[(initial, {}), (reviewed, {})]) as recognize,
+              patch.object(processing, "ark_recognize") as ark,
+              patch.object(processing, "openai_script") as openai):
+            result, quality, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第2集"}, Path("unused"), 30,
+                evidence, route, {"provider": "glm"}, None,
+            )
+
+        self.assertEqual(recognize.call_count, 2)
+        self.assertEqual([call.args[4] for call in recognize.call_args_list], ["glm-5.3-flash"] * 2)
+        self.assertIsNotNone(recognize.call_args_list[1].kwargs["review_context"])
+        self.assertEqual(result["scenes"][0]["blocks"][1]["speaker"], "晓晨")
+        self.assertEqual(result["scenes"][0]["blocks"][1]["text"], "我回来了。")
+        action_text = result["scenes"][0]["blocks"][0]["text"]
+        self.assertTrue(action_text.endswith("走进客厅。"))
+        self.assertEqual(quality["modelRoute"], "glm_max_review")
+        self.assertTrue(quality["automatedReview"]["accepted"])
+        self.assertEqual(usage["provider"], "glm")
+        ark.assert_not_called()
+        openai.assert_not_called()
+
     async def test_gap_repair_uses_glm_despite_retained_ark_key(self):
         route = {"provider": "glm", "model": "glm-5.3-flash", "band": "glm_max", "score": 0, "reasons": []}
         with patch.object(processing, "glm_recognize_range", return_value=(draft(4, 40), {}, 0, 40)) as repair, patch.object(processing, "ark_recognize_range") as ark:

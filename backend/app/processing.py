@@ -142,6 +142,7 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
         use_turbo = score >= 2
     selected_model = (ARK_TURBO_MODEL if use_turbo else ARK_LITE_MODEL).strip() or ARK_MODEL
     return {
+        "provider": "ark",
         "model": selected_model,
         "band": "complex" if use_turbo else "simple",
         "score": score,
