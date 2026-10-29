@@ -105,7 +105,12 @@ def update_task(task_id: str, **values: Any) -> None:
 
 
 def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any] | None:
-    """Read completed earlier episodes in order; never wait for other workers."""
+    """Build a best-effort roster from completed earlier episodes, without waiting.
+
+    Episodes are recognized concurrently. Pending or failed episodes are
+    skipped, while any already completed earlier cast profiles can still guide
+    the current recognition call.
+    """
     if not {"batch_id", "user_id"}.issubset(row.keys()) or not row["batch_id"] or not row["user_id"]:
         return None
     with db() as connection:
@@ -115,13 +120,15 @@ def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
                ORDER BY COALESCE(batch_index, 2147483647), created_at, id""",
             (row["batch_id"], row["user_id"]),
         ).fetchall()
-    if not rows or rows[0]["id"] == row["id"] or rows[0]["status"] not in {"done", "review"}:
+    if not rows:
         return None
     current_index = next((index for index, item in enumerate(rows) if item["id"] == row["id"]), None)
-    if current_index is None:
+    if current_index is None or current_index == 0:
         return None
+    earlier_rows = rows[:current_index]
     scripts = []
-    for earlier in rows[:current_index]:
+    reference_title = None
+    for earlier in earlier_rows:
         if earlier["status"] not in {"done", "review"}:
             continue
         try:
@@ -130,6 +137,8 @@ def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
             continue
         if isinstance(script, dict):
             scripts.append(script)
+            if reference_title is None:
+                reference_title = earlier["title"]
     apply_batch_character_continuity(scripts)
     profiles: dict[str, dict[str, Any]] = {}
     for script in scripts:
@@ -143,27 +152,26 @@ def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
             for key, value in compact.items():
                 if not existing.get(key):
                     existing[key] = value
-    return {"referenceTitle": rows[0]["title"], "characterProfiles": list(profiles.values())} if profiles else None
+    return {"referenceTitle": reference_title, "characterProfiles": list(profiles.values())} if profiles else None
 
 
 def reconcile_batch_character_continuity(batch_id: str | None) -> int:
     """Persist one stable cast naming table across completed batch episodes.
 
     Recognition runs independently per episode and may finish out of order.
-    Reconcile every completed result in batch order whenever one task finishes;
-    a later episode can therefore be corrected again once episode one arrives.
+    Reconcile once, after every task in the batch is terminal, so the O(batch
+    size) parse/merge pass does not become O(batch size squared).
     Only result JSON is changed here—the source evidence and QA records remain
     untouched for auditability.
     """
     if not batch_id:
         return 0
     with db() as connection:
-        first = connection.execute(
-            """SELECT id, status FROM tasks WHERE batch_id = ?
-               ORDER BY COALESCE(batch_index, 2147483647), created_at, id LIMIT 1""",
+        statuses = connection.execute(
+            "SELECT status FROM tasks WHERE batch_id = ?",
             (batch_id,),
-        ).fetchone()
-        if not first or first["status"] not in {"done", "review"}:
+        ).fetchall()
+        if not statuses or any(row["status"] not in {"done", "review", "failed"} for row in statuses):
             return 0
         rows = connection.execute(
             """
@@ -174,7 +182,7 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
             """,
             (batch_id,),
         ).fetchall()
-        if not rows or rows[0]["id"] != first["id"]:
+        if not rows:
             return 0
         scripts: list[dict[str, Any]] = []
         usable_rows: list[sqlite3.Row] = []

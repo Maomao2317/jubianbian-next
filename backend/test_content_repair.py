@@ -132,6 +132,48 @@ class CoverageTests(unittest.TestCase):
 
 
 class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lite_identity_review_writes_the_canonical_name_into_the_script(self):
+        evidence = {
+            "durationSec": 30,
+            "batchCharacterContext": {"characterProfiles": [
+                {"name": "晓晨", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "黑色外套"},
+                {"name": "赵明", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "黑色外套"},
+            ]},
+        }
+        draft = {
+            "characters": ["黑衣男子"],
+            "characterProfiles": [
+                {"name": "黑衣男子", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "黑色外套"},
+            ],
+            "scenes": [{
+                "heading": "2-1 日 内 客厅", "location": "客厅",
+                "blocks": [
+                    {"type": "action", "text": "黑衣男子走进客厅。", "startSec": 0, "endSec": 30},
+                    {"type": "dialogue", "speaker": "黑衣男子", "text": "我回来了。", "startSec": 2, "endSec": 4},
+                ],
+            }],
+        }
+        reviewed = deepcopy(draft)
+        reviewed["characters"] = ["晓晨"]
+        reviewed["characterProfiles"][0]["name"] = "晓晨"
+        reviewed["characterProfiles"][0]["aliases"] = ["黑衣男子"]
+        reviewed["scenes"][0]["blocks"][1]["speaker"] = "晓晨"
+
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ark_recognize", side_effect=[(draft, {}), (reviewed, {})]) as recognize):
+            result, quality, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第2集"}, Path("unused"), 30, evidence,
+                {"model": "lite", "mode": "lite", "band": "simple", "score": 0, "reasons": []}, {}, None)
+
+        self.assertEqual(recognize.call_count, 2)
+        self.assertEqual([call.args[4] for call in recognize.call_args_list], ["lite", "lite"])
+        self.assertEqual(result["scenes"][0]["blocks"][1]["speaker"], "晓晨")
+        self.assertEqual(result["scenes"][0]["blocks"][1]["text"], "我回来了。")
+        self.assertEqual(quality["modelRoute"], "same_model_identity_review")
+        self.assertTrue(quality["automatedReview"]["accepted"])
+        self.assertEqual(usage["model"], "lite")
+
     async def test_explicit_lite_modes_keep_their_original_model_policy(self):
         for mode in ("lite", "lite_only"):
             with self.subTest(mode=mode):

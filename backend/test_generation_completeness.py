@@ -4,7 +4,7 @@ from copy import deepcopy
 import unittest
 
 from app import processing
-from app.script import (apply_batch_character_continuity, normalize_script, quality_gate,
+from app.script import (apply_batch_character_context, apply_batch_character_continuity, normalize_script, quality_gate,
                         script_quality, script_to_markdown, suppress_redundant_subtitles)
 
 
@@ -26,6 +26,90 @@ def audio_evidence(blocks):
 
 
 class GenerationCompletenessTests(unittest.TestCase):
+    def test_visual_name_drift_is_flagged_then_written_back_to_the_script(self):
+        reference = normalize_script({
+            "characters": ["晓晨"],
+            "characterProfiles": [{"name": "晓晨", "appearance": "年轻男子，黑色短发，戴帽子",
+                                   "clothing": "黑色外套"}],
+            "scenes": [scene("1-1", [line("我回来了", 1, 2, speaker="晓晨")])],
+        }, "第1集")
+        later = normalize_script({
+            "characters": ["黑衣男子"],
+            "characterProfiles": [{"name": "黑衣男子", "appearance": "黑色短发，戴帽子",
+                                   "clothing": "黑色外套"}],
+            "scenes": [scene("2-1", [line("我回来了", 1, 2, speaker="黑衣男子")])],
+        }, "第2集")
+        evidence = {"batchCharacterContext": {"characterProfiles": reference["characterProfiles"]}}
+
+        issues = script_quality(later, "test", evidence)["issues"]
+        self.assertIn("人物身份连续性", [issue["tag"] for issue in issues])
+        original_dialogue = later["scenes"][0]["blocks"][0]["text"]
+
+        apply_batch_character_context(later, evidence)
+
+        self.assertEqual(later["characters"], ["晓晨"])
+        self.assertEqual(later["characterProfiles"][0]["name"], "晓晨")
+        self.assertEqual(later["scenes"][0]["blocks"][0]["speaker"], "晓晨")
+        self.assertEqual(later["scenes"][0]["blocks"][0]["text"], original_dialogue)
+        self.assertNotIn("人物身份连续性", [issue["tag"] for issue in script_quality(later, "test", evidence)["issues"]])
+
+    def test_identical_black_clothing_cannot_merge_two_established_people(self):
+        reference = normalize_script({
+            "characters": ["晓晨", "赵明"],
+            "characterProfiles": [
+                {"name": name, "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}
+                for name in ("晓晨", "赵明")
+            ],
+            "scenes": [scene("1-1", [line("我回来了", 1, 2, speaker="晓晨"),
+                                    line("我知道", 2, 3, speaker="赵明")])],
+        }, "第1集")
+        later = normalize_script({
+            "characters": ["黑衣男子"],
+            "characterProfiles": [{"name": "黑衣男子", "appearance": "黑色短发，戴帽子",
+                                   "clothing": "黑色外套"}],
+            "scenes": [scene("2-1", [line("我回来了", 1, 2, speaker="黑衣男子")])],
+        }, "第2集")
+        evidence = {"batchCharacterContext": {"characterProfiles": reference["characterProfiles"]}}
+
+        apply_batch_character_context(later, evidence)
+
+        self.assertEqual(later["scenes"][0]["blocks"][0]["speaker"], "黑衣男子")
+        tags = [issue["tag"] for issue in script_quality(later, "test", evidence)["issues"]]
+        self.assertIn("人物身份连续性", tags)
+
+    def test_single_distinctive_hat_label_requires_video_review_without_guessing(self):
+        evidence = {"batchCharacterContext": {"characterProfiles": [
+            {"name": "晓晨", "appearance": "年轻男子，黑色短发，戴帽子", "clothing": "浅色外套"},
+        ]}}
+        later = normalize_script({
+            "characters": ["戴帽子的男子"],
+            "characterProfiles": [{"name": "戴帽子的男子", "appearance": "戴帽子"}],
+            "scenes": [scene("2-1", [line("我回来了", 1, 2, speaker="戴帽子的男子")])],
+        }, "第2集")
+
+        apply_batch_character_context(later, evidence)
+
+        self.assertEqual(later["scenes"][0]["blocks"][0]["speaker"], "戴帽子的男子")
+        tags = [issue["tag"] for issue in script_quality(later, "test", evidence)["issues"]]
+        self.assertIn("人物身份连续性", tags)
+
+    def test_unrelated_new_character_is_not_flagged_or_merged(self):
+        evidence = {"batchCharacterContext": {"characterProfiles": [
+            {"name": "晓晨", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"},
+        ]}}
+        newcomer = normalize_script({
+            "characters": ["红衣少年"],
+            "characterProfiles": [{"name": "红衣少年", "appearance": "年轻少年，红色上衣",
+                                   "clothing": "红色上衣"}],
+            "scenes": [scene("3-1", [line("你好", 1, 2, speaker="红衣少年")])],
+        }, "第3集")
+
+        apply_batch_character_context(newcomer, evidence)
+
+        self.assertEqual(newcomer["scenes"][0]["blocks"][0]["speaker"], "红衣少年")
+        tags = [issue["tag"] for issue in script_quality(newcomer, "test", evidence)["issues"]]
+        self.assertNotIn("人物身份连续性", tags)
+
     def test_repeated_line_elsewhere_cannot_cover_an_omitted_occurrence(self):
         repeated = "这个秘密千万不要告诉别人"
         speech = [line(repeated, 1, 3), line("我先出去看看情况", 15, 18),

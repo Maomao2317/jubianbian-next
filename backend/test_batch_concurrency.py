@@ -323,7 +323,7 @@ class WorkerRecoveryTests(unittest.TestCase):
         self.connection = sqlite3.connect(":memory:")
         self.connection.row_factory = sqlite3.Row
         self.connection.execute(
-            "CREATE TABLE tasks (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER)"
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, user_id TEXT, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, attempts INTEGER, error TEXT, completed_at TEXT, credits_used INTEGER, batch_id TEXT)"
         )
         self.connection.execute(
             "CREATE TABLE task_recheck_snapshots (id INTEGER PRIMARY KEY, task_id TEXT, snapshot_json TEXT, state TEXT, created_at TEXT, resolved_at TEXT)"
@@ -333,7 +333,7 @@ class WorkerRecoveryTests(unittest.TestCase):
             "CREATE TABLE credit_ledger (user_id TEXT, amount INTEGER, balance_after INTEGER, entry_type TEXT, reason TEXT, created_at TEXT)"
         )
         self.connection.execute(
-            "INSERT INTO tasks VALUES ('task', 'user', 'running', 'vision', '1', '', 62, 0, NULL, NULL, 3)"
+            "INSERT INTO tasks VALUES ('task', 'user', 'running', 'vision', '1', '', 62, 0, NULL, NULL, 3, NULL)"
         )
         self.connection.execute("INSERT INTO users VALUES ('user', 10)")
         self.connection.commit()
@@ -360,6 +360,8 @@ class WorkerRecoveryTests(unittest.TestCase):
             self.assertEqual(event.call_args.args[1], "worker_interrupted")
 
     def test_interrupted_recheck_restores_previous_result_without_refund(self):
+        self.connection.execute("UPDATE tasks SET batch_id = 'batch' WHERE id = 'task'")
+
         def restore(connection, task_id, **kwargs):
             self.assertEqual(task_id, "task")
             self.assertEqual(kwargs["allowed_statuses"], ("running",))
@@ -368,6 +370,7 @@ class WorkerRecoveryTests(unittest.TestCase):
 
         with (patch.object(worker, "db", self.database),
               patch.object(worker, "restore_recheck_snapshot_with_connection", side_effect=restore),
+              patch.object(worker, "reconcile_batch_character_continuity", return_value=1) as reconcile,
               patch.object(worker, "_refund_task_once") as refund,
               patch.object(worker, "record_task_event") as event):
             worker._recover_unexpected_task_exit("task", asyncio.CancelledError())
@@ -375,6 +378,7 @@ class WorkerRecoveryTests(unittest.TestCase):
         row = self.connection.execute("SELECT status, stage FROM tasks WHERE id = 'task'").fetchone()
         self.assertEqual(tuple(row), ("done", "done"))
         refund.assert_not_called()
+        reconcile.assert_called_once_with("batch")
         self.assertEqual(event.call_args.args[1], "worker_recovered")
 
 

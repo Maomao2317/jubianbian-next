@@ -92,6 +92,26 @@ class LargeBatchTests(unittest.TestCase):
         with connection:
             self.assertEqual(worker._claim_next_task(connection, Counter({"a": 9, "b": 9}), "b"), ("n-0", ""))
 
+    def test_same_batch_episodes_remain_eligible_for_parallel_workers(self):
+        connection = self.database()
+        connection.executemany(
+            "INSERT INTO tasks(id,user_id,status,stage,created_at,batch_id,batch_index) VALUES (?, 'owner', 'queued', 'queued', ?, 'batch', ?)",
+            [(f"episode-{index}", f"{index:04}", index) for index in range(1, 5)],
+        )
+        connection.commit()
+
+        claimed = []
+        active = Counter()
+        last_user = None
+        for _ in range(4):
+            with connection:
+                task_id, last_user = worker._claim_next_task(connection, active, last_user)
+            claimed.append(task_id)
+            active[last_user] += 1
+
+        self.assertEqual(claimed, ["episode-1", "episode-2", "episode-3", "episode-4"])
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM tasks WHERE status='running'").fetchone()[0], 4)
+
     def test_accepted_upload_is_idempotent_after_worker_claim_and_completion(self):
         for status, stage in [("queued", "queued"), ("running", "vision"), ("done", "done"), ("review", "review")]:
             row = {"status": status, "stage": stage}

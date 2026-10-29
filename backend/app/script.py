@@ -2887,6 +2887,134 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
         register(script)
     return total_changes
 
+
+def apply_batch_character_context(script: dict[str, Any], evidence: dict[str, Any] | None) -> int:
+    """Reconcile one episode against the accumulated roster supplied by its batch."""
+    context = (evidence or {}).get("batchCharacterContext")
+    profiles = context.get("characterProfiles") if isinstance(context, dict) else None
+    if not isinstance(script, dict) or not isinstance(profiles, list) or not profiles:
+        return 0
+    reference_profiles = [dict(profile) for profile in profiles if isinstance(profile, dict)]
+    if not reference_profiles:
+        return 0
+    reference = {
+        "characters": [character_label(profile.get("name")) for profile in reference_profiles
+                       if character_label(profile.get("name"))],
+        "characterProfiles": reference_profiles,
+    }
+    return apply_batch_character_continuity([reference, script])
+
+
+_IDENTITY_FEATURE_PATTERNS = (
+    ("color_dark", r"黑色|深色|墨色|乌黑"),
+    ("color_light", r"浅色|白色|米色|银灰"),
+    ("color_gray", r"灰色|灰白"),
+    ("color_blue", r"蓝色|藏青|宝蓝"),
+    ("color_red", r"红色|鲜红|暗红"),
+    ("color_green", r"绿色|军绿|墨绿"),
+    ("clothing_upper", r"衣服|衣衫|上衣|衣着|衣物|穿着|着装|衣"),
+    ("clothing_workwear", r"工装|工作服"),
+    ("clothing_suit", r"西装|正装"),
+    ("clothing_outerwear", r"外套|大衣|夹克|风衣|皮衣|棉衣|羽绒服"),
+    ("clothing_uniform", r"制服|校服|工服"),
+    ("clothing_dress", r"长裙|连衣裙|裙子"),
+    ("clothing_shirt", r"衬衫|T恤|针织衫"),
+    ("hair_short", r"短发|寸头|光头"),
+    ("hair_long", r"长发|披肩发"),
+    ("hair_ponytail", r"马尾|高马尾|双马尾"),
+    ("hair_curly", r"卷发|卷曲"),
+    ("accessory_hat", r"帽子|戴帽|鸭舌帽|礼帽"),
+    ("accessory_glasses", r"眼镜|墨镜"),
+    ("facial_beard", r"胡子|胡须|络腮"),
+    ("age_young", r"年轻|少年|青年"),
+    ("age_middle", r"中年"),
+    ("age_elder", r"老人|老年|年迈|白发"),
+)
+_IDENTITY_FEATURES = tuple((name, re.compile(pattern)) for name, pattern in _IDENTITY_FEATURE_PATTERNS)
+_IDENTITY_REVIEW_SINGLE_FEATURES = {
+    "hair_short", "hair_long", "hair_ponytail", "hair_curly",
+    "accessory_hat", "accessory_glasses", "facial_beard",
+}
+_DESCRIPTIVE_CHARACTER_ROLE_RE = re.compile(
+    r"(?:男子|女子|男人|女人|男孩|女孩|男生|女生|老人|老妇|妇人|大叔|阿姨|小伙|少年|少女|"
+    r"杀手|跟班|职员|下属|保安|助理|秘书|路人)"
+)
+
+
+def _identity_features(values: list[Any]) -> set[str]:
+    text = " ".join(str(value or "") for value in values)
+    return {name for name, pattern in _IDENTITY_FEATURES if pattern.search(text)}
+
+
+def _batch_character_drift_issues(script: dict[str, Any], evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Flag descriptive labels resembling prior cast without safely merging.
+
+    Clothing is intentionally never sufficient to auto-merge identities. When
+    two or more visual features overlap but the conservative continuity pass
+    could not resolve the label, keep delivery behind review instead of
+    silently presenting a likely known person as a newly invented stranger.
+    """
+    context = (evidence or {}).get("batchCharacterContext")
+    prior_profiles = context.get("characterProfiles") if isinstance(context, dict) else None
+    if not isinstance(prior_profiles, list) or not prior_profiles:
+        return []
+    alias_keys = set()
+    for profile in prior_profiles:
+        if not isinstance(profile, dict):
+            continue
+        alias_keys.add(_character_key(profile.get("name")))
+        alias_keys.update(_character_key(alias) for alias in profile.get("aliases") or [])
+
+    current_profiles = {
+        character_label(profile.get("name")): profile
+        for profile in script.get("characterProfiles") or []
+        if isinstance(profile, dict) and character_label(profile.get("name"))
+    }
+    issues = []
+    for candidate in _script_character_names(script, include_generic=True):
+        key = _character_key(candidate)
+        if not key or key in alias_keys or not _DESCRIPTIVE_CHARACTER_ROLE_RE.search(candidate):
+            continue
+        profile = current_profiles.get(candidate, {})
+        candidate_features = _identity_features([
+            candidate, profile.get("appearance"), profile.get("clothing"),
+            profile.get("firstAppearance"), profile.get("identityEvidence"),
+        ])
+        if not candidate_features:
+            continue
+        possible_matches = []
+        for prior in prior_profiles:
+            if not isinstance(prior, dict):
+                continue
+            prior_name = character_label(prior.get("name"))
+            if not prior_name:
+                continue
+            prior_features = _identity_features([
+                prior_name, prior.get("appearance"), prior.get("clothing"),
+                prior.get("firstAppearance"), prior.get("identityEvidence"),
+            ])
+            shared = candidate_features & prior_features
+            # A bare but distinctive label such as “戴帽子的男子” may be the
+            # only clue left by the first model. It is not safe enough for a
+            # deterministic merge, but it is enough to require a video review.
+            if len(shared) >= 2 or shared & _IDENTITY_REVIEW_SINGLE_FEATURES:
+                possible_matches.append((prior_name, shared))
+        if not possible_matches:
+            continue
+        names = list(dict.fromkeys(name for name, _ in possible_matches))
+        descriptions = "、".join(names[:4])
+        suffix = "等" if len(names) > 4 else ""
+        issues.append({
+            "tag": "人物身份连续性",
+            "severity": "P0",
+            "description": (
+                f"人物标签“{candidate}”与前集人物“{descriptions}{suffix}”有多项外观/服装特征重合，"
+                "但证据不足以安全确认是否同一人。请回看原片并沿用已确认姓名，不能仅凭服装自动合并；"
+                "若确为新人物，再保留独立稳定称呼。"
+            ),
+        })
+    return issues
+
 def has_screenplay_body(script: Any) -> bool:
     """Count visible dramatic content, independently of timestamps or headings."""
     if not isinstance(script, dict):
@@ -3089,6 +3217,7 @@ def script_quality(
                 and not any(str(profile.get(key) or "").strip()
                             for key in ("nameEvidence", "identityEvidence", "appearance", "clothing"))):
             add_issue("人物姓名缺少依据", "P0", f"{name}仅有姓名标签，没有姓名来源或人物身份资料，需回看姓名条、称呼或签名确认，不能猜名。")
+    issues.extend(_batch_character_drift_issues(script, evidence))
     content_duration = (evidence or {}).get("durationSec")
     content_gap_ranges = content_gaps(script, content_duration) if isinstance(content_duration, (int, float)) else []
     for window in content_gap_ranges:

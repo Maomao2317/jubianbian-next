@@ -41,6 +41,7 @@ from .glm_provider import glm_prepare_video, glm_recognize, glm_recognize_range
 from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
 from .script import (
+    apply_batch_character_context,
     has_screenplay_body,
     normalize_script,
     quality_gate,
@@ -156,6 +157,10 @@ def _evaluate_quality(
     route: dict[str, Any],
     *, recover_evidence: bool = True,
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    # The provider is instructed to reuse the batch roster, but deterministic
+    # label reconciliation is still required before QA.  It only changes
+    # structured cast/speaker labels and never dialogue or action text.
+    apply_batch_character_context(script, evidence)
     if recover_evidence and restore_spoken_subtitles(script, evidence):
         script.update(normalize_script(script, script.get("title") or "未命名视频"))
     evidence, subtitle_overrides = subtitle_aligned_evidence(script, evidence, update_script=recover_evidence)
@@ -542,7 +547,7 @@ def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
     critical_tags = {
         "台词归属错", "漏台词", "OS漏标", "OS/VO混淆", "音频对白不一致",
         "音频对白需核对", "疑似漏台词片段", "正文混入校对备注", "事实臆造",
-        "疑似漏画面文字片段", "字幕对白遗漏",
+        "疑似漏画面文字片段", "字幕对白遗漏", "人物身份连续性",
     }
     return [
         issue
@@ -877,12 +882,24 @@ async def _run_recognizer_with_media(
                         "视频中仍有未识别片段，系统将自动重新处理，避免交付残缺剧本。",
                         provider_code="content_repair_incomplete",
                     )
+            identity_review_needed = any(
+                issue.get("tag") == "人物身份连续性" and issue.get("severity") == "P0"
+                for issue in quality.get("issues") or [] if isinstance(issue, dict)
+            )
+            # Explicit lite routing normally avoids the extra review call. A
+            # suspected cast-name drift is the exception: review it with the
+            # already selected model so the correction is written into the
+            # screenplay instead of being left as a user-facing TODO.
+            review_model = (
+                route["model"] if route.get("mode") in {"lite", "lite_only"} and identity_review_needed
+                else turbo_model
+            )
             may_auto_review = (
                 not quality.get("contentGapRanges") and _needs_automated_content_review(quality)
                 and (not has_content_gaps or not quality_gate(quality)[0])
                 and not any(error.get("balanceError") for error in quality.get("contentRepair", {}).get("errors", []))
-                and route.get("mode") not in {"lite", "lite_only"}
-                and bool(turbo_model)
+                and (route.get("mode") not in {"lite", "lite_only"} or identity_review_needed)
+                and bool(review_model)
             )
             if may_auto_review:
                 mark_task_stage(row["id"], status="running", stage="reviewing", progress_percent=78,
@@ -890,7 +907,7 @@ async def _run_recognizer_with_media(
                 review_issues = _automated_review_issues(quality)
                 context = _automated_review_context(script, review_issues, quality=quality)
                 review_metadata.update({
-                    "reviewModel": turbo_model,
+                    "reviewModel": review_model,
                     "attemptCount": review_metadata["attemptCount"] + 1,
                     "reviewScope": context["scope"],
                     "triggeringIssues": review_issues,
@@ -900,7 +917,7 @@ async def _run_recognizer_with_media(
                     provider,
                     row["id"],
                     initial_model,
-                    turbo_model,
+                    review_model,
                     len(review_issues),
                 )
                 try:
@@ -910,15 +927,23 @@ async def _run_recognizer_with_media(
                         row["title"],
                         duration,
                         evidence,
-                        turbo_model,
+                        review_model,
                         review_context=context,
                         prepared_video=prepared_video,
                     )
                     review_route = {
                         **route,
-                        "model": turbo_model,
-                        "band": "glm_max_review" if is_glm else "turbo_review",
-                        "reasons": [*route["reasons"], "glm_quality_review" if is_glm else "lite_quality_gate_failed_turbo_review"],
+                        "model": review_model,
+                        "band": (
+                            "glm_max_review" if is_glm else "same_model_identity_review"
+                            if review_model == route["model"] else "turbo_review"
+                        ),
+                        "reasons": [
+                            *route["reasons"],
+                            "glm_quality_review" if is_glm else
+                            "identity_continuity_same_model_review" if review_model == route["model"] else
+                            "lite_quality_gate_failed_turbo_review",
+                        ],
                     }
                     reviewed_script = normalize_script(reviewed_script, row["title"])
                     reviewed_quality, _reviewed_approved, _reviewed_blocking = _evaluate_quality(
@@ -945,7 +970,7 @@ async def _run_recognizer_with_media(
                         if "contentRepair" in quality:
                             reviewed_quality["contentRepair"] = quality["contentRepair"]
                         quality = reviewed_quality
-                        final_model = turbo_model
+                        final_model = review_model
                 except ArkError as review_exc:
                     final_usage = _merge_usage(final_usage, getattr(review_exc, "usage", {}))
                     review_metadata["reviewError"] = safe_error_text(review_exc)
@@ -1175,4 +1200,14 @@ async def process_task(task_id: str) -> None:
             progress_percent=100,
             duration_ms=(time.perf_counter() - started) * 1000,
         )
+        if row["batch_id"]:
+            try:
+                await asyncio.to_thread(reconcile_batch_character_continuity, row["batch_id"])
+            except Exception as continuity_error:  # pragma: no cover - defensive persistence boundary
+                logger.warning(
+                    "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
+                    row["batch_id"],
+                    task_id,
+                    safe_error_text(continuity_error),
+                )
         logger.error("task_failed task_id=%s duration_ms=%.1f error=%s", task_id, (time.perf_counter() - started) * 1000, message)

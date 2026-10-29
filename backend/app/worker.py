@@ -12,15 +12,16 @@ from .logging_setup import logger, safe_error_text
 from .processing import _refund_task_once, process_task
 from .rechecks import restore_recheck_snapshot_with_connection
 from .storage import delete_media
-from .task_store import record_task_event
+from .task_store import record_task_event, reconcile_batch_character_continuity
 
 
 def _claim_next_task(connection, active_users: Counter, last_user: str | None):
     """Choose a least-occupied ready user, rotating ties; FIFO within each user."""
     connection.execute("BEGIN IMMEDIATE")
-    # Only fetch each user's FIFO head.  The previous query materialized every
-    # queued row on every free worker slot, so a 999-episode batch repeatedly
-    # scanned and transferred the same large queue while choosing one task.
+    # Preserve FIFO scheduling while letting every available worker slot claim
+    # a different episode. Character continuity uses completed episodes as
+    # best-effort context and reconciles the batch after generation; recognition
+    # itself must remain parallel.
     rows = connection.execute(
         """SELECT task.id, task.user_id
            FROM (SELECT DISTINCT user_id FROM tasks INDEXED BY idx_tasks_ready_user
@@ -53,7 +54,7 @@ async def _expire_incomplete_uploads() -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=UPLOAD_RESERVATION_TTL_SECONDS)).isoformat()
     with db() as connection:
         rows = connection.execute(
-            "SELECT id, user_id, stored_path, credits_used FROM tasks WHERE status = 'queued' AND stage = 'uploading' AND created_at < ?",
+            "SELECT id, user_id, stored_path, credits_used, batch_id FROM tasks WHERE status = 'queued' AND stage = 'uploading' AND created_at < ?",
             (cutoff,),
         ).fetchall()
     for row in rows:
@@ -71,6 +72,11 @@ async def _expire_incomplete_uploads() -> None:
             logger.warning("upload_expiry_delete_failed task_id=%s", row["id"])
         _refund_task_once(row["id"], row["user_id"], int(row["credits_used"] or 0))
         record_task_event(row["id"], "upload_expired", "视频上传超时，已退回本集积分", status="failed", stage="failed", progress_percent=100)
+        if row["batch_id"]:
+            try:
+                await asyncio.to_thread(reconcile_batch_character_continuity, row["batch_id"])
+            except Exception:
+                logger.warning("batch_character_continuity_failed batch_id=%s task_id=%s", row["batch_id"], row["id"])
 
 
 def _recover_unexpected_task_exit(task_id: str, error: BaseException | None) -> None:
@@ -81,7 +87,7 @@ def _recover_unexpected_task_exit(task_id: str, error: BaseException | None) -> 
     task = None
     with db() as connection:
         task = connection.execute(
-            "SELECT id, user_id, status, stage, attempts, credits_used FROM tasks WHERE id = ?",
+            "SELECT * FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if not task or task["status"] != "running":
@@ -126,6 +132,28 @@ def _recover_unexpected_task_exit(task_id: str, error: BaseException | None) -> 
     elif outcome == "failed":
         record_task_event(task_id, "worker_interrupted", failure_message, status="failed", stage="failed", progress_percent=100)
         logger.error("worker_task_recovered task_id=%s outcome=failed stage=%s error=%s", task_id, stage, detail)
+
+    # The last batch episode may reach a terminal state through crash recovery
+    # rather than the normal processing path. Run the same one-time naming
+    # reconciliation after recovery so those scripts are still corrected.
+    batch_id = task["batch_id"] if task and "batch_id" in task.keys() else None
+    if outcome in {"failed", "restored"} and batch_id:
+        try:
+            changes = reconcile_batch_character_continuity(batch_id)
+            if changes:
+                logger.info(
+                    "batch_character_continuity batch_id=%s task_id=%s changes=%s",
+                    batch_id,
+                    task_id,
+                    changes,
+                )
+        except Exception as continuity_error:  # pragma: no cover - defensive persistence boundary
+            logger.warning(
+                "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
+                batch_id,
+                task_id,
+                safe_error_text(continuity_error),
+            )
 
 
 async def run_worker() -> None:

@@ -395,12 +395,73 @@ class ProviderDeliveryTests(unittest.TestCase):
         row = {"id": "two", "user_id": "owner", "batch_id": "batch"}
         with patch.object(task_store, "db", return_value=connection):
             self.assertIsNone(task_store.batch_character_context(row))
+            connection.execute(
+                "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)",
+                ("three", "owner", "batch", 3, "3", "第3集", "running", None),
+            )
+            partial_context = task_store.batch_character_context(
+                {"id": "three", "user_id": "owner", "batch_id": "batch"}
+            )
+            self.assertEqual(partial_context["referenceTitle"], "第2集")
+            self.assertEqual([profile["name"] for profile in partial_context["characterProfiles"]], ["苏婉晴"])
             connection.execute("UPDATE tasks SET status='done',result_json=? WHERE id='one'", (cast,))
             context = task_store.batch_character_context(row)
         self.assertEqual(context["referenceTitle"], "第1集")
         prompt = providers.ark_prompt("第2集", 100, {"batchCharacterContext": context})
         self.assertIn("苏婉晴", prompt)
         self.assertIn("原始称谓仍逐字保留", prompt)
+        connection.close()
+
+    def test_identity_review_instructions_require_script_correction_not_user_todo(self):
+        review_context = {
+            "scope": "full_video_with_issue_ranges",
+            "issues": [{"tag": "人物身份连续性", "severity": "P0"}],
+            "ranges": [],
+            "draft": {
+                "characters": ["黑衣男子"],
+                "characterProfiles": [{"name": "黑衣男子", "aliases": []}],
+                "scenes": [],
+            },
+        }
+        prompt = providers.ark_prompt(
+            "第2集", 60,
+            {"batchCharacterContext": {"characterProfiles": [{"name": "晓晨", "aliases": ["小晨"]}]}},
+            review_context,
+        )
+
+        self.assertIn("automatic edit, not a note for the user", prompt)
+        self.assertIn("correct the returned screenplay itself", prompt)
+        self.assertIn("visibleSpeaker", prompt)
+        self.assertIn("小晨", prompt)
+
+    def test_batch_continuity_waits_until_terminal_and_persists_script_labels(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE tasks(id, batch_id, batch_index, created_at, status, result_json, updated_at)")
+        first = {
+            "characters": ["晓晨"],
+            "characterProfiles": [{"name": "晓晨", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}],
+            "scenes": [{"characters": ["晓晨"], "blocks": [{"type": "dialogue", "speaker": "晓晨", "text": "我回来了"}]}],
+        }
+        later = {
+            "characters": ["黑衣男子"],
+            "characterProfiles": [{"name": "黑衣男子", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}],
+            "scenes": [{"characters": ["黑衣男子"], "blocks": [{"type": "dialogue", "speaker": "黑衣男子", "text": "我回来了"}]}],
+        }
+        connection.executemany("INSERT INTO tasks(id,batch_id,batch_index,created_at,status,result_json) VALUES(?,?,?,?,?,?)", [
+            ("one", "batch", 1, "1", "done", json.dumps(first, ensure_ascii=False)),
+            ("two", "batch", 2, "2", "running", json.dumps(later, ensure_ascii=False)),
+        ])
+
+        with patch.object(task_store, "db", return_value=connection):
+            self.assertEqual(task_store.reconcile_batch_character_continuity("batch"), 0)
+            connection.execute("UPDATE tasks SET status='done' WHERE id='two'")
+            self.assertGreater(task_store.reconcile_batch_character_continuity("batch"), 0)
+
+        saved = json.loads(connection.execute("SELECT result_json FROM tasks WHERE id='two'").fetchone()[0])
+        self.assertEqual(saved["characters"], ["晓晨"])
+        self.assertEqual(saved["scenes"][0]["blocks"][0]["speaker"], "晓晨")
+        self.assertEqual(saved["scenes"][0]["blocks"][0]["text"], "我回来了")
         connection.close()
 
     def test_indexed_review_preserves_all_other_dialogue_and_emotion(self):
