@@ -1,5 +1,6 @@
 import tempfile
 import sqlite3
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -81,6 +82,36 @@ class RemoteCircuitTests(unittest.TestCase):
         self.assertNotEqual(left, remote._scope("asr", "http://172.19.0.1:18867", "rotated"))
         self.gate.admit(left, 60)
         self.assertNotIn(secret.encode(), (Path(self.temp.name)/"gpu-circuit.sqlite3").read_bytes())
+
+    def test_gpu_capacity_burst_waits_across_credentials(self):
+        url, first_token, second_token = "http://gpu", "production-token", "staging-token"
+        for token in (first_token, second_token):
+            scope = remote._scope("ocr", url, token)
+            epoch, _ = self.gate.admit(scope, 90)
+            self.gate.finish(scope, epoch, True)
+        first_entered, release_first, second_entered = (threading.Event() for _ in range(3))
+
+        def first():
+            with remote.remote_attempt("ocr", url, first_token, 90):
+                first_entered.set()
+                if not release_first.wait(3):
+                    raise TimeoutError("test did not release first GPU request")
+
+        def second():
+            with remote.remote_attempt("ocr", url, second_token, 90):
+                second_entered.set()
+
+        with (patch.object(remote, "circuit", self.gate),
+              patch.object(remote.config, "GPU_OCR_MAX_IN_FLIGHT", 1),
+              ThreadPoolExecutor(max_workers=2) as pool):
+            first_call = pool.submit(first)
+            self.assertTrue(first_entered.wait(1))
+            second_call = pool.submit(second)
+            self.assertFalse(second_entered.wait(.2))
+            release_first.set()
+            first_call.result(2)
+            second_call.result(2)
+            self.assertTrue(second_entered.is_set())
 
     def test_bookkeeping_failure_preserves_success_and_original_remote_error(self):
         with (patch.object(remote, "circuit", self.gate), patch.object(remote, "_probe"),

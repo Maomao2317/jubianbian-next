@@ -33,6 +33,8 @@ MEDIA_DOWNLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_DOWNLOAD_T
 # Keep a finite process deadline while allowing a 40 MiB proxy at 50 KiB/s.
 MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS = max(10.0, float(os.getenv("JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS", "900")))
 GPU_CIRCUIT_COOLDOWN_SECONDS = max(5.0, float(os.getenv("JBB_GPU_CIRCUIT_COOLDOWN_SECONDS", "30")))
+GPU_ASR_MAX_IN_FLIGHT = max(1, min(4, int(os.getenv("JBB_GPU_ASR_MAX_IN_FLIGHT", "2"))))
+GPU_OCR_MAX_IN_FLIGHT = max(1, min(4, int(os.getenv("JBB_GPU_OCR_MAX_IN_FLIGHT", "2"))))
 LOCAL_ASR_CONCURRENCY = max(1, min(2, int(os.getenv("JBB_LOCAL_ASR_CONCURRENCY", "1"))))
 LOCAL_ASR_CPU_THREADS = max(1, min(8, int(os.getenv("JBB_LOCAL_ASR_CPU_THREADS", "4"))))
 OCR_PROCESS_CONCURRENCY = max(1, min(8, int(os.getenv("JBB_OCR_PROCESS_CONCURRENCY", "4"))))

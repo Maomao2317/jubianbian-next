@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, build_opener, ProxyHandler
 
 from . import config
+from .resource_limits import capacity
 
 
 class CircuitOpen(RuntimeError):
@@ -76,12 +77,22 @@ def _finish(scope, epoch, success):
         logger.warning("gpu_circuit_state_update_failed success=%s", success)
 
 
-def _scope(kind, url, token):
+def _endpoint(url):
     parts = urlsplit(url)
     # Both Docker networks route to the same local GPU tunnel.
     host = "host-gateway" if parts.hostname in {"172.18.0.1", "172.19.0.1"} else parts.hostname
-    endpoint = urlunsplit((parts.scheme, f"{host}:{parts.port or (443 if parts.scheme == 'https' else 80)}", parts.path.rstrip('/'), '', ''))
-    return hashlib.sha256(f"{kind}\0{endpoint}\0{token}".encode()).hexdigest()
+    return urlunsplit((parts.scheme, f"{host}:{parts.port or (443 if parts.scheme == 'https' else 80)}", parts.path.rstrip('/'), '', ''))
+
+
+def _scope(kind, url, token):
+    return hashlib.sha256(f"{kind}\0{_endpoint(url)}\0{token}".encode()).hexdigest()
+
+
+def _capacity_scope(kind, url):
+    # Capacity belongs to the physical GPU endpoint, not to a credential.
+    # Production and staging must still share the same two slots after one
+    # environment rotates its remote token.
+    return hashlib.sha256(f"{kind}\0{_endpoint(url)}".encode()).hexdigest()
 
 
 def _probe(kind, url, token):
@@ -99,13 +110,25 @@ def _probe(kind, url, token):
 @contextmanager
 def remote_attempt(kind, url, token, timeout):
     scope = _scope(kind, url, token)
-    epoch, probe = circuit.admit(scope, timeout + 3)
-    try:
-        if probe:
-            _probe(kind, url, token)
-        yield
-    except Exception:
-        _finish(scope, epoch, False)
-        raise
-    else:
-        _finish(scope, epoch, True)
+    capacity_scope = _capacity_scope(kind, url)
+    limits = {"asr": config.GPU_ASR_MAX_IN_FLIGHT, "ocr": config.GPU_OCR_MAX_IN_FLIGHT}
+    if kind not in limits:
+        raise ValueError(f"Unsupported remote GPU kind: {kind}")
+    limit = limits[kind]
+    directory = circuit.directory or config.RESOURCE_DIR
+    # Evidence collection can run wider than the private GPU service. Queue at
+    # the application boundary so a harmless burst does not become HTTP 503,
+    # circuit cooldown, and unnecessary CPU fallback. The hashed scope keeps
+    # separate GPU endpoints independent without persisting URLs or tokens.
+    with capacity(f"gpu-remote-{capacity_scope}", limit, directory=directory) as queue_ms:
+        logger.info("gpu_remote_admitted kind=%s limit=%s queue_ms=%.1f", kind, limit, queue_ms)
+        epoch, probe = circuit.admit(scope, timeout + 3)
+        try:
+            if probe:
+                _probe(kind, url, token)
+            yield
+        except Exception:
+            _finish(scope, epoch, False)
+            raise
+        else:
+            _finish(scope, epoch, True)

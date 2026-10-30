@@ -30,6 +30,8 @@ class RuntimeSettingsTests(unittest.TestCase):
             "JBB_ARK_ACCOUNT_MAX_IN_FLIGHT": "8",
             "JBB_SHARED_MODEL_CONCURRENCY": "24",
             "JBB_EVIDENCE_CONCURRENCY": "4",
+            "JBB_GPU_ASR_MAX_IN_FLIGHT": "2",
+            "JBB_GPU_OCR_MAX_IN_FLIGHT": "2",
             "JBB_ARK_UPLOAD_MAX_IN_FLIGHT": "4",
             "JBB_ARK_PROXY_MAX_IN_FLIGHT": "2",
             "JBB_ARK_QUOTA_SCOPE": "per-key",
@@ -42,6 +44,8 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings["ARK_ACCOUNT_MAX_IN_FLIGHT"], 8)
         self.assertEqual(settings["SHARED_MODEL_CONCURRENCY"], 24)
         self.assertEqual(settings["EVIDENCE_CONCURRENCY"], 4)
+        self.assertEqual(settings["GPU_ASR_MAX_IN_FLIGHT"], 2)
+        self.assertEqual(settings["GPU_OCR_MAX_IN_FLIGHT"], 2)
         self.assertEqual(settings["ARK_UPLOAD_MAX_IN_FLIGHT"], 4)
         self.assertEqual(settings["ARK_UPLOAD_PROXY_MAX_IN_FLIGHT"], 2)
 
