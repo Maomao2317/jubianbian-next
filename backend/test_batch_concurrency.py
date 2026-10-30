@@ -14,9 +14,43 @@ from unittest.mock import AsyncMock, patch
 from app import config, evidence, processing, providers, worker
 
 
-def sixteen_lane_settings():
-    with patch.dict(os.environ, {"JBB_WORKER_CONCURRENCY": "16", "JBB_ARK_MAX_IN_FLIGHT": "16"}):
+def twenty_four_lane_settings():
+    with patch.dict(os.environ, {"JBB_WORKER_CONCURRENCY": "24", "JBB_ARK_MAX_IN_FLIGHT": "24"}):
         return runpy.run_path(config.__file__)
+
+
+class RuntimeSettingsTests(unittest.TestCase):
+    def test_three_accounts_and_independent_stage_defaults_support_twenty_four_lanes(self):
+        values = {
+            "ARK_API_KEY": "account-one",
+            "ARK_API_KEY_2": "account-two",
+            "ARK_API_KEY_3": "account-three",
+            "JBB_WORKER_CONCURRENCY": "24",
+            "JBB_ARK_MAX_IN_FLIGHT": "24",
+            "JBB_ARK_ACCOUNT_MAX_IN_FLIGHT": "8",
+            "JBB_SHARED_MODEL_CONCURRENCY": "24",
+            "JBB_EVIDENCE_CONCURRENCY": "4",
+            "JBB_ARK_UPLOAD_MAX_IN_FLIGHT": "4",
+            "JBB_ARK_PROXY_MAX_IN_FLIGHT": "2",
+            "JBB_ARK_QUOTA_SCOPE": "per-key",
+        }
+        with patch.dict(os.environ, values):
+            settings = runpy.run_path(config.__file__)
+        self.assertEqual(settings["ARK_API_KEYS"], ("account-one", "account-two", "account-three"))
+        self.assertEqual(settings["WORKER_CONCURRENCY"], 24)
+        self.assertEqual(settings["ARK_MAX_IN_FLIGHT"], 24)
+        self.assertEqual(settings["ARK_ACCOUNT_MAX_IN_FLIGHT"], 8)
+        self.assertEqual(settings["SHARED_MODEL_CONCURRENCY"], 24)
+        self.assertEqual(settings["EVIDENCE_CONCURRENCY"], 4)
+        self.assertEqual(settings["ARK_UPLOAD_MAX_IN_FLIGHT"], 4)
+        self.assertEqual(settings["ARK_UPLOAD_PROXY_MAX_IN_FLIGHT"], 2)
+
+    def test_account_selection_round_robins_three_distinct_keys(self):
+        keys = ("account-one", "account-two", "account-three")
+        with (patch.object(providers, "ARK_API_KEYS", keys),
+              patch.object(providers, "_ark_pool_index", 0),
+              patch.object(providers, "_ark_cooldowns", {})):
+            self.assertEqual([providers.ark_account_key() for _ in range(6)], list(keys) * 2)
 
 
 class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -204,13 +238,13 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(running, return_exceptions=True)
                 connection.close()
 
-    async def test_sixteen_episodes_run_and_seventeenth_waits_for_a_free_slot(self):
-        settings = sixteen_lane_settings()
+    async def test_twenty_four_episodes_run_and_twenty_fifth_waits_for_a_free_slot(self):
+        settings = twenty_four_lane_settings()
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         connection.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, stage TEXT, created_at TEXT, updated_at TEXT, progress_percent INTEGER, user_id TEXT)")
         connection.execute("CREATE INDEX idx_tasks_ready_user ON tasks(user_id, created_at, id) WHERE status = 'queued' AND stage = 'queued'")
-        names = [f"{index:02d}" for index in range(1, 18)]
+        names = [f"{index:02d}" for index in range(1, 26)]
         connection.executemany("INSERT INTO tasks VALUES (?, 'queued', 'queued', ?, '', 0, 'user')", [(name, name) for name in names])
         connection.commit()
 
@@ -242,14 +276,14 @@ class WorkerSchedulingTests(unittest.IsolatedAsyncioTestCase):
               patch.object(worker, "process_task", side_effect=process)):
             running = asyncio.create_task(worker.run_worker())
             try:
-                await asyncio.wait_for(asyncio.gather(*(started[name].wait() for name in names[:16])), 2)
-                self.assertEqual(len(active), 16)
-                self.assertFalse(started["17"].is_set())
-                self.assertEqual(connection.execute("SELECT status FROM tasks WHERE id = '17'").fetchone()[0], "queued")
+                await asyncio.wait_for(asyncio.gather(*(started[name].wait() for name in names[:24])), 2)
+                self.assertEqual(len(active), 24)
+                self.assertFalse(started["25"].is_set())
+                self.assertEqual(connection.execute("SELECT status FROM tasks WHERE id = '25'").fetchone()[0], "queued")
                 release["01"].set()
-                await asyncio.wait_for(started["17"].wait(), 2)
-                self.assertEqual(len(active), 16)
-                self.assertEqual(peak, 16)
+                await asyncio.wait_for(started["25"].wait(), 2)
+                self.assertEqual(len(active), 24)
+                self.assertEqual(peak, 24)
             finally:
                 running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
@@ -383,11 +417,13 @@ class WorkerRecoveryTests(unittest.TestCase):
 
 
 class ModelConcurrencyTests(unittest.TestCase):
-    def test_sixteen_streams_run_and_seventeenth_waits_then_capacity_recovers(self):
-        settings = sixteen_lane_settings()
-        lane = threading.BoundedSemaphore(settings["ARK_MAX_IN_FLIGHT"])
+    def test_three_accounts_run_twenty_four_streams_and_twenty_fifth_waits(self):
+        settings = twenty_four_lane_settings()
+        request_lane = threading.BoundedSemaphore(settings["ARK_MAX_IN_FLIGHT"])
+        generation_lane = threading.BoundedSemaphore(settings["ARK_MAX_IN_FLIGHT"])
+        account_lanes = {key: threading.BoundedSemaphore(8) for key in ("account-1", "account-2", "account-3")}
         lock = threading.Lock()
-        sixteen_entered = threading.Event()
+        twenty_four_entered = threading.Event()
         all_attempted = threading.Event()
         release = threading.Event()
         entered = 0
@@ -403,8 +439,8 @@ class ModelConcurrencyTests(unittest.TestCase):
                 entered += 1
                 active += 1
                 peak = max(peak, active)
-                if entered == 16:
-                    sixteen_entered.set()
+                if entered == 24:
+                    twenty_four_entered.set()
             try:
                 if not release.wait(5):
                     raise TimeoutError("test did not release model streams")
@@ -413,37 +449,40 @@ class ModelConcurrencyTests(unittest.TestCase):
                 with lock:
                     active -= 1
 
-        def request():
+        def request(index=0):
             nonlocal attempted
             with lock:
                 attempted += 1
-                if attempted == 17:
+                if attempted == 25:
                     all_attempted.set()
-            return providers.ark_stream_response({"model": "test", "input": []}, "test")
+            key = f"account-{index % 3 + 1}"
+            return providers.ark_stream_response({"model": "test", "input": []}, key)
 
-        with (patch.object(providers, "_ark_request_semaphore", lane),
+        with (patch.object(providers, "_ark_request_semaphore", request_lane),
+              patch.object(providers, "_ark_generation_semaphore", generation_lane),
+              patch.object(providers, "_ark_key_generation_semaphore", side_effect=account_lanes.get),
               patch.object(providers, "urlopen", side_effect=response),
-              ThreadPoolExecutor(max_workers=17) as callers):
-            futures = [callers.submit(request) for _ in range(17)]
+              ThreadPoolExecutor(max_workers=25) as callers):
+            futures = [callers.submit(request, index) for index in range(25)]
             try:
                 self.assertTrue(all_attempted.wait(2))
-                self.assertTrue(sixteen_entered.wait(2))
+                self.assertTrue(twenty_four_entered.wait(2))
                 with lock:
-                    self.assertEqual(entered, 16)
-                    self.assertEqual(active, 16)
+                    self.assertEqual(entered, 24)
+                    self.assertEqual(active, 24)
                 self.assertTrue(all(not future.done() for future in futures))
             finally:
                 release.set()
-            self.assertEqual([future.result(timeout=2) for future in futures], [completed] * 17)
-            self.assertEqual(peak, 16)
-            self.assertEqual(entered, 17)
+            self.assertEqual([future.result(timeout=2) for future in futures], [completed] * 25)
+            self.assertEqual(peak, 24)
+            self.assertEqual(entered, 25)
             # A completed request must release its capacity for subsequent calls.
-            self.assertEqual(request(), completed)
+            self.assertEqual(request(0), completed)
 
 
 class RecognizerThreadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_sixteen_generations_run_while_general_thread_is_busy(self):
-        settings = sixteen_lane_settings()
+    async def test_twenty_four_generations_run_while_general_thread_is_busy(self):
+        settings = twenty_four_lane_settings()
         loop = asyncio.get_running_loop()
         loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         general_started = asyncio.Event()
@@ -464,13 +503,13 @@ class RecognizerThreadTests(unittest.IsolatedAsyncioTestCase):
         def recognize(*args, **kwargs):
             with lock:
                 request_ids.append(config.REQUEST_ID.get())
-                if len(request_ids) == 16:
+                if len(request_ids) == 24:
                     loop.call_soon_threadsafe(all_models_started.set)
             if not release_models.wait(5):
-                raise TimeoutError("model calls could not fill sixteen slots")
+                raise TimeoutError("model calls could not fill twenty-four slots")
             return script, {"total_tokens": 1}
 
-        token = config.REQUEST_ID.set("sixteen-model-request")
+        token = config.REQUEST_ID.set("twenty-four-model-request")
         with (ThreadPoolExecutor(max_workers=settings["ARK_MAX_IN_FLIGHT"]) as model_pool,
               patch.object(processing, "_model_executor", model_pool),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
@@ -486,7 +525,7 @@ class RecognizerThreadTests(unittest.IsolatedAsyncioTestCase):
                 model_tasks = [asyncio.create_task(processing._run_recognizer_with_media(
                     {"id": str(index), "title": f"第{index}集"}, Path("source.mp4"), 1,
                     collected, {"model": "test"}, video, None,
-                )) for index in range(16)]
+                )) for index in range(24)]
                 await asyncio.wait_for(all_models_started.wait(), 2)
                 self.assertFalse(general_task.done())
                 self.assertTrue(all(not task.done() for task in model_tasks))
@@ -496,8 +535,8 @@ class RecognizerThreadTests(unittest.IsolatedAsyncioTestCase):
                 results = await asyncio.gather(*model_tasks, return_exceptions=True)
                 await general_task
                 config.REQUEST_ID.reset(token)
-            self.assertEqual(request_ids, ["sixteen-model-request"] * 16)
-            self.assertEqual(quality.call_count, 16)
+            self.assertEqual(request_ids, ["twenty-four-model-request"] * 24)
+            self.assertEqual(quality.call_count, 24)
             for result in results:
                 self.assertNotIsInstance(result, BaseException)
                 self.assertEqual(result[0], script)

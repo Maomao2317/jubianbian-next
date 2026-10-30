@@ -57,6 +57,14 @@ _EDITORIAL_ARTIFACT_RE = re.compile(
     r"\d+[：:][^。]{0,20}(?:这里|说话|台词|字幕)"
     r")"
 )
+_NON_STORY_DISCLAIMER_RE = re.compile(
+    r"(?:"
+    r"(?:本(?:故事|剧|片|节目)|故事|剧情|人物|情节).{0,12}纯属虚构|"
+    r"如有雷同.{0,6}纯属巧合|"
+    r"无不良导向.{0,12}(?:切勿|请勿|不要)模仿|"
+    r"(?:危险|专业)动作.{0,12}(?:切勿|请勿|不要)模仿"
+    r")"
+)
 _SCENE_HEADING_RE = re.compile(
     r"^\s*\d+-\d+\s+(?:日|夜|清晨|黄昏|傍晚|傍晚转夜|日转夜|不明)\s+"
     r"(?:内|外|内外|内转外|外转内|不明)\s+.+"
@@ -1152,6 +1160,41 @@ def order_blocks_without_crossing_sentences(blocks: list[dict[str, Any]]) -> lis
     ]
 
 
+def dedupe_overlapping_speech_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop only an exact speech duplicate from the same source moment.
+
+    Dialogue remains one sentence per block. Repeated words at different times
+    are source content and must remain; overlapping timestamps plus identical
+    type, speaker and text are required before removing a generated copy.
+    """
+    output: list[dict[str, Any]] = []
+
+    def duplicate_source_moment(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if left.get("type") not in {"dialogue", "vo"} or right.get("type") != left.get("type"):
+            return False
+        if str(left.get("speaker") or "").strip() != str(right.get("speaker") or "").strip():
+            return False
+        if left.get("type") == "vo" and str(left.get("voKind") or "") != str(right.get("voKind") or ""):
+            return False
+        if evidence_comparison_text(left.get("text")) != evidence_comparison_text(right.get("text")):
+            return False
+        values = (left.get("startSec"), left.get("endSec"), right.get("startSec"), right.get("endSec"))
+        if not all(type(value) in {int, float} and math.isfinite(float(value)) for value in values):
+            return False
+        left_start, left_end, right_start, right_end = map(float, values)
+        overlap = min(left_end, right_end) - max(left_start, right_start)
+        shortest = min(max(0.001, left_end - left_start), max(0.001, right_end - right_start))
+        return overlap >= 0 and (overlap / shortest >= 0.8 or (
+            abs(left_start - right_start) <= 0.15 and abs(left_end - right_end) <= 0.15
+        ))
+
+    for block in blocks:
+        if any(duplicate_source_moment(previous, block) for previous in reversed(output)):
+            continue
+        output.append(block)
+    return output
+
+
 def merge_continuous_scenes(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Consolidate one continuous setting without changing any block content.
 
@@ -1292,6 +1335,19 @@ def is_editorial_artifact(text: Any, block_type: str = "") -> bool:
     ):
         return True
     return False
+
+
+def is_non_story_disclaimer(text: Any) -> bool:
+    """Return true only for a non-diegetic fiction/safety disclaimer.
+
+    Screen text can carry plot facts (messages, names, dates and addresses), so
+    this intentionally does not use a broad word such as ``提示``. It matches
+    the familiar fiction/no-imitation notice and leaves all other overlays in
+    the screenplay.
+    """
+    value = unicodedata.normalize("NFKC", str(text or ""))
+    value = re.sub(r"[\s【】\[\]（）()，,。.!！?？:：;；、]+", "", value)
+    return bool(value and _NON_STORY_DISCLAIMER_RE.search(value))
 
 
 def compact_performance(value: Any) -> str:
@@ -2162,6 +2218,8 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
                 text = normalize_text(text)
             if not text:
                 continue
+            if block_type == "screen_text" and is_non_story_disclaimer(text):
+                continue
             block: dict[str, Any] = {"type": block_type, "text": text}
             start = number(raw_block.get("startSec"))
             end = number(raw_block.get("endSec"))
@@ -2311,6 +2369,7 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
             + [str(profile.get("name") or "").strip() for profile in character_profiles]
         ))
         repair_dialogue_speakers(blocks, [name for name in known_speakers if name])
+        blocks = dedupe_overlapping_speech_blocks(blocks)
         blocks = compact_action_blocks(blocks)
         raw_scene_characters = names(raw_scene.get("characters"))
         all_profile_names = [

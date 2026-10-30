@@ -12,6 +12,68 @@ from app.script import apply_batch_character_continuity, clean_action_text, comp
 
 
 class ScriptQualityRegressionTests(unittest.TestCase):
+    def test_non_story_disclaimer_is_removed_but_plot_screen_text_remains(self):
+        script = normalize_script({
+            "characters": ["晓晨"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [
+                    {"type": "screen_text", "screenType": "system", "text": "【字幕:本故事纯属虚构无不良导向切勿模仿】"},
+                    {"type": "screen_text", "screenType": "system", "text": "系统提示：账户将在今晚冻结"},
+                    {"type": "action", "text": "晓晨看向手机。"},
+                ],
+            }],
+        }, "第1集")
+
+        overlays = [block["text"] for block in script["scenes"][0]["blocks"]
+                    if block["type"] == "screen_text"]
+        self.assertEqual(overlays, ["系统提示：账户将在今晚冻结"])
+        self.assertNotIn("本故事纯属虚构", script_to_markdown({"title": "第1集", "result": script}))
+
+    def test_consecutive_lines_from_same_speaker_remain_sentence_by_sentence(self):
+        script = normalize_script({
+            "characters": ["晓晨", "林川"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [
+                    {"type": "dialogue", "speaker": "晓晨", "text": "你回来了", "startSec": 1, "endSec": 2},
+                    {"type": "dialogue", "speaker": "晓晨", "text": "我等了很久", "startSec": 2.1, "endSec": 3},
+                    {"type": "dialogue", "speaker": "林川", "text": "对不起", "startSec": 3.1, "endSec": 4},
+                    {"type": "dialogue", "speaker": "晓晨", "text": "别说了", "startSec": 4.1, "endSec": 5},
+                ],
+            }],
+        }, "第1集")
+
+        dialogue = [block for block in script["scenes"][0]["blocks"] if block["type"] == "dialogue"]
+        self.assertEqual([(block["speaker"], block["text"]) for block in dialogue], [
+            ("晓晨", "你回来了。"),
+            ("晓晨", "我等了很久。"),
+            ("林川", "对不起。"),
+            ("晓晨", "别说了。"),
+        ])
+        self.assertEqual(script_to_markdown({"title": "第1集", "result": script}).count("晓晨："), 3)
+
+    def test_only_overlapping_exact_dialogue_duplicate_is_dropped(self):
+        script = normalize_script({
+            "characters": ["晓晨"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [
+                    {"type": "dialogue", "speaker": "晓晨", "text": "等等", "startSec": 1, "endSec": 2},
+                    {"type": "dialogue", "speaker": "晓晨", "text": "等等", "startSec": 1.02, "endSec": 2.02},
+                    {"type": "dialogue", "speaker": "晓晨", "text": "等等", "startSec": 5, "endSec": 6},
+                ],
+            }],
+        }, "第1集")
+
+        dialogue = [block for block in script["scenes"][0]["blocks"] if block["type"] == "dialogue"]
+        self.assertEqual(len(dialogue), 2)
+        self.assertEqual([block["text"] for block in dialogue], ["等等。", "等等。"])
+        self.assertEqual([(block["startSec"], block["endSec"]) for block in dialogue], [(1.0, 2.0), (5.0, 6.0)])
+
     def test_ark_upload_proxy_leaves_small_source_untouched(self):
         source = Path(__file__)
         with patch.object(providers, "ARK_UPLOAD_PROXY_MAX_MB", 32):

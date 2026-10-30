@@ -17,6 +17,7 @@ python -m uvicorn app.main:app --port 8000
 ```env
 ARK_API_KEY=你的方舟APIKey
 ARK_API_KEY_2=你的第二个方舟APIKey（可选）
+ARK_API_KEY_3=你的第三个方舟APIKey（可选）
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_MODEL=doubao-seed-2-1-turbo-260628
 ARK_LITE_MODEL=doubao-seed-2-0-lite-260428
@@ -110,17 +111,17 @@ Files 默认单次连接/停滞等待 120 秒、最多 2 次，累计传输由 `
 
 ## 独立证据与质量复核
 
-多视频任务在已有任务运行时仍每秒检查上传完成的队列，及时补满 `JBB_WORKER_CONCURRENCY`（默认 16）允许的空闲名额。`JBB_ARK_MAX_IN_FLIGHT` 默认同时允许 16 路模型请求；两项配置均支持 1–16，超过 16 时截到 16。正式与测试 Compose 使用相同默认值；已有 `fangzhou.env` 中的旧值会覆盖默认值，启用 16 路时需将这两项均设为 16，并重启后端或重建应用容器。
+多视频任务在已有任务运行时仍每秒检查上传完成的队列，及时补满 `JBB_WORKER_CONCURRENCY`（默认 24）允许的空闲名额。`JBB_ARK_MAX_IN_FLIGHT` 默认同时允许 24 路模型请求；两项配置均支持 1–24，超过 24 时截到 24。正式环境可配置三个方舟 Key，并用 `JBB_ARK_ACCOUNT_MAX_IN_FLIGHT=8` 将每个账号限制为 8 路。测试环境默认继续使用智谱，不消耗方舟账号并发。已有 `fangzhou.env` 中的旧值会覆盖新默认值，启用 24 路时需同步更新这些配置并重建应用容器。
 
-语音与 OCR 使用独立的有界采集队列，`JBB_EVIDENCE_CONCURRENCY`（默认 2）分别限制两种来源的并发；慢语音不再占住后续集的字幕采集名额。本地 ASR 默认单路、4 CPU 线程（`JBB_LOCAL_ASR_CONCURRENCY=1`、`JBB_LOCAL_ASR_CPU_THREADS=4`），可设置双路做对照，模型、beam、VAD 和词时间戳不变。证据协调与模型生成各有独立线程池，给视频准备及上传保留通用线程；初稿、自动复核及备用文本生成共用模型线程池。下载默认 2 路，Files/识别副本上传默认 2 路，转码默认 1 路，解码默认 2 路，OCR 子进程合计默认 4 路（每进程单线程），分别控制本地资源。
+语音与 OCR 使用独立的有界采集队列，`JBB_EVIDENCE_CONCURRENCY`（默认 4）分别限制两种来源的并发；慢语音不再占住后续集的字幕采集名额。本地 ASR 默认单路、4 CPU 线程（`JBB_LOCAL_ASR_CONCURRENCY=1`、`JBB_LOCAL_ASR_CPU_THREADS=4`），可设置双路做对照，模型、beam、VAD 和词时间戳不变。证据协调与模型生成各有独立线程池，给视频准备及上传保留通用线程；初稿、自动复核及备用文本生成共用模型线程池。下载默认 2 路，Files/识别副本上传默认 4 路，转码默认 2 路，解码默认 2 路，OCR 子进程合计默认 4 路（每进程单线程），分别控制本地资源。
 
-队列按用户当前占用名额公平补位，同一用户保持就绪顺序；两名用户都就绪时可各用 8 路，单人可用满 16 路。新用户到来后优先取得释放的名额，不中断已运行任务。
+队列按用户当前占用名额公平补位，同一用户保持就绪顺序；多用户共享 24 路全局名额，单个方舟账号最多占用 8 路。新用户到来后优先取得释放的名额，不中断已运行任务。
 
-正式与测试 Compose 挂载同一个 `jubianbian-runtime-limits` 本地卷；方舟生成在所有已更新容器间合计最多 `JBB_SHARED_MODEL_CONCURRENCY=16` 路，断流后的后台轮询仍占用名额，进程退出时系统自动释放锁。下载、上传、转码、ASR、OCR 也共享资源名额。两个容器必须同时更新、挂载相同资源目录并使用一致上限；只更新一边不能约束旧容器。该机制针对同机本地磁盘，不支持多主机或网络文件系统。
+正式与测试 Compose 挂载同一个 `jubianbian-runtime-limits` 本地卷；方舟生成在所有已更新容器间合计最多 `JBB_SHARED_MODEL_CONCURRENCY=24` 路，断流后的后台轮询仍占用名额，进程退出时系统自动释放锁。下载、上传、转码、ASR、OCR 也共享资源名额。两个容器必须同时更新、挂载相同资源目录并使用一致上限；只更新一边不能约束旧容器。该机制针对同机本地磁盘，不支持多主机或网络文件系统。
 
-`JBB_ARK_QUOTA_SCOPE` 区分账户额度组，默认保守地合并两个 Key。`JBB_ARK_QUOTA_RPM/TPM` 应填写方舟已激活的真实配额，默认 0 表示未指定；TPM 使用 `JBB_ARK_INPUT_TOKEN_RESERVE` 加输出预算做保守预留，结束后按实际 usage 回填，不能当作精确分词器。429 冷却在两个环境间共享，按 Retry-After（缺失时 30 秒）等待；有限重试复用已准备视频。16 路是允许的上限，实际吞吐取决于证据准备、硬件与账户配额。
+`JBB_ARK_QUOTA_SCOPE=per-key` 为三个方舟账号分别记录额度与冷却；单个 Key 遇到 429 或余额问题时只暂停该账号，其他账号继续轮转。`JBB_ARK_QUOTA_RPM/TPM` 应填写方舟已激活的真实配额，默认 0 表示未指定；TPM 使用 `JBB_ARK_INPUT_TOKEN_RESERVE` 加输出预算做保守预留，结束后按实际 usage 回填，不能当作精确分词器。有限重试复用已准备视频。24 路是应用允许的上限，实际吞吐取决于证据准备、硬件与各账号配额。
 
-实测使用 `ops/benchmark_batch.py`（Linux 应用镜像内运行），分别选择 `asr`、`evidence`、`batch` 模式，输出必须是不存在的新目录，避免打开线上数据库。`batch` 显式传 `--allow-paid-models` 后运行实际任务、复核及质量门禁；可用相同证据的 `--evidence-from` 对比 8/12/16 路模型吞吐，但报告会标记缓存复用，不能作为完整冷启动耗时。
+实测使用 `ops/benchmark_batch.py`（Linux 应用镜像内运行），分别选择 `asr`、`evidence`、`batch` 模式，输出必须是不存在的新目录，避免打开线上数据库。`batch` 显式传 `--allow-paid-models` 后运行实际任务、复核及质量门禁；可用相同证据的 `--evidence-from` 对比 8/16/24 路模型吞吐，但报告会标记缓存复用，不能作为完整冷启动耗时。
 
 清单中无 `batchId` 的样本独立运行；仅同一部剧的关联视频填写相同 `batchId`，并用 `batchIndex` / `batchTotal` 保留真实集序及总集数。不同原始批次不得为方便压测合并，否则会污染跨集人物上下文。报告记录关联批次数和独立样本数。
 

@@ -21,11 +21,11 @@ MAX_DURATION_SECONDS = MAX_DURATION_MINUTES * 60
 RATE_LIMIT_API_PER_MINUTE = max(1, int(os.getenv("JBB_RATE_LIMIT_API_PER_MINUTE", "120")))
 RATE_LIMIT_CREATE_PER_WINDOW = max(1, int(os.getenv("JBB_RATE_LIMIT_CREATE_PER_WINDOW", "10")))
 RATE_LIMIT_CREATE_WINDOW_SECONDS = max(60, int(os.getenv("JBB_RATE_LIMIT_CREATE_WINDOW_SECONDS", "600")))
-WORKER_CONCURRENCY = max(1, min(16, int(os.getenv("JBB_WORKER_CONCURRENCY", "16"))))
-ARK_MAX_IN_FLIGHT = max(1, min(16, int(os.getenv("JBB_ARK_MAX_IN_FLIGHT", "16"))))
-EVIDENCE_CONCURRENCY = max(1, min(4, int(os.getenv("JBB_EVIDENCE_CONCURRENCY", "2"))))
+WORKER_CONCURRENCY = max(1, min(24, int(os.getenv("JBB_WORKER_CONCURRENCY", "24"))))
+ARK_MAX_IN_FLIGHT = max(1, min(24, int(os.getenv("JBB_ARK_MAX_IN_FLIGHT", "24"))))
+EVIDENCE_CONCURRENCY = max(1, min(4, int(os.getenv("JBB_EVIDENCE_CONCURRENCY", "4"))))
 RESOURCE_DIR = Path(os.getenv("JBB_RESOURCE_DIR", DATA_DIR / "runtime-limits"))
-SHARED_MODEL_CONCURRENCY = max(1, min(16, int(os.getenv("JBB_SHARED_MODEL_CONCURRENCY", "16"))))
+SHARED_MODEL_CONCURRENCY = max(1, min(24, int(os.getenv("JBB_SHARED_MODEL_CONCURRENCY", "24"))))
 DOWNLOAD_CONCURRENCY = max(1, min(8, int(os.getenv("JBB_DOWNLOAD_CONCURRENCY", "2"))))
 MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", "600")))
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "300")))
@@ -40,7 +40,7 @@ OCR_PROCESS_CONCURRENCY = max(1, min(8, int(os.getenv("JBB_OCR_PROCESS_CONCURREN
 ARK_QUOTA_RPM = max(0, int(os.getenv("JBB_ARK_QUOTA_RPM", "0")))
 ARK_QUOTA_TPM = max(0, int(os.getenv("JBB_ARK_QUOTA_TPM", "0")))
 ARK_INPUT_TOKEN_RESERVE = max(1, int(os.getenv("JBB_ARK_INPUT_TOKEN_RESERVE", "65536")))
-ARK_QUOTA_SCOPE = os.getenv("JBB_ARK_QUOTA_SCOPE", "shared-account").strip() or "shared-account"
+ARK_QUOTA_SCOPE = os.getenv("JBB_ARK_QUOTA_SCOPE", "per-key").strip() or "per-key"
 QUEUE_MAX_WAIT_MINUTES = max(1, int(os.getenv("JBB_QUEUE_MAX_WAIT_MINUTES", "600")))
 UPLOAD_RESERVATION_TTL_SECONDS = max(900, int(os.getenv("JBB_UPLOAD_RESERVATION_TTL_SECONDS", "7200")))
 TRUST_PROXY_HEADERS = os.getenv("JBB_TRUST_PROXY_HEADERS", "0").strip().lower() in {"1", "true", "yes"}
@@ -101,7 +101,9 @@ OCR_REMOTE_TOKEN = os.getenv("JBB_OCR_REMOTE_TOKEN", "").strip()
 OCR_REMOTE_TIMEOUT_SECONDS = max(5, min(300, float(os.getenv("JBB_OCR_REMOTE_TIMEOUT_SECONDS", "90"))))
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_API_KEY_2 = os.getenv("ARK_API_KEY_2", "").strip()
-ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2) if key))
+ARK_API_KEY_3 = os.getenv("ARK_API_KEY_3", "").strip()
+ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2, ARK_API_KEY_3) if key))
+ARK_ACCOUNT_MAX_IN_FLIGHT = max(1, min(24, int(os.getenv("JBB_ARK_ACCOUNT_MAX_IN_FLIGHT", "8"))))
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
 # The staging Ark accounts have the 2.0 Lite service enabled.  The newer 2.1
@@ -140,7 +142,7 @@ ARK_UPLOAD_PROXY_VIDEO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_VIDEO_BITRATE", "25
 ARK_UPLOAD_PROXY_AUDIO_BITRATE = os.getenv("ARK_UPLOAD_PROXY_AUDIO_BITRATE", "96k").strip() or "96k"
 ARK_UPLOAD_PROXY_PRESET = os.getenv("ARK_UPLOAD_PROXY_PRESET", "veryfast").strip() or "veryfast"
 ARK_UPLOAD_PROXY_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_PROXY_TIMEOUT_SECONDS", "300")))
-ARK_UPLOAD_PROXY_MAX_IN_FLIGHT = max(1, min(4, int(os.getenv("JBB_ARK_PROXY_MAX_IN_FLIGHT", "1"))))
+ARK_UPLOAD_PROXY_MAX_IN_FLIGHT = max(1, min(4, int(os.getenv("JBB_ARK_PROXY_MAX_IN_FLIGHT", "2"))))
 ARK_UPLOAD_PROXY_THREADS = max(1, min(8, int(os.getenv("ARK_UPLOAD_PROXY_THREADS", "2"))))
 # Uploads can be slow on a small cloud instance, but the upload itself should
 # still have a bounded wait before the task can fail over.
@@ -152,7 +154,7 @@ ARK_UPLOAD_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_UPLOAD_ATTEMPTS", "2"))))
 ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS", "900")))
 ARK_UPLOAD_MAX_IN_FLIGHT = max(
     1,
-    min(ARK_MAX_IN_FLIGHT, int(os.getenv("JBB_ARK_UPLOAD_MAX_IN_FLIGHT", "2"))),
+    min(ARK_MAX_IN_FLIGHT, int(os.getenv("JBB_ARK_UPLOAD_MAX_IN_FLIGHT", "4"))),
 )
 # Real successful Ark responses in staging take roughly 190-290 seconds for
 # 1-2 minute clips.  A slower Turbo response has crossed 300 seconds in the

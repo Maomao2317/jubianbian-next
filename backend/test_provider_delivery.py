@@ -254,7 +254,9 @@ class ProviderDeliveryTests(unittest.TestCase):
         model_lane = Mock()
         model_lane.__enter__ = Mock(side_effect=AssertionError("upload blocked model slot"))
         model_lane.__exit__ = Mock(return_value=False)
-        with patch.object(providers, "_ark_request_semaphore", model_lane), patch.object(providers, "urlopen", return_value=response):
+        with (patch.object(providers, "_ark_request_semaphore", model_lane),
+              patch.object(providers.provider_budget, "wait_cooldown"),
+              patch.object(providers, "urlopen", return_value=response)):
             self.assertEqual(providers.ark_http("POST", "/files", b"video", api_key="key", upload=True), {"id": "file"})
         model_lane.__enter__.assert_not_called()
 

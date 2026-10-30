@@ -63,7 +63,12 @@ class AccountBalanceTests(unittest.TestCase):
                               ("video_url https://private.test/?signature=secret", "AccountOverdue")):
             with self.subTest(code=code):
                 body = json.dumps({"error": {"message": message, "code": code}}).encode()
-                error = providers._ark_http_error(HTTPError("https://api.test", 403, "Forbidden", {}, io.BytesIO(body)), "key")
+                with patch.object(providers, "_cool_down_ark_account") as cooldown:
+                    error = providers._ark_http_error(
+                        HTTPError("https://api.test", 403, "Forbidden", {}, io.BytesIO(body)),
+                        "key",
+                    )
+                cooldown.assert_called_once_with("key", 300)
                 self.assertEqual(error.status_code, 403)
                 self.assertEqual(error.provider_code, "account_balance_exhausted")
                 self.assertIn("欠费", str(error))

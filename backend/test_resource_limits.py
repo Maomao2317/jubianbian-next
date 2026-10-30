@@ -143,19 +143,35 @@ class ProviderBudgetTests(unittest.TestCase):
             with patch.object(resource_limits.time, "time", return_value=future):
                 other.reserve("account", rpm=1, tpm=100, tokens=100)
 
-    def test_429_backoff_is_visible_to_another_budget_instance(self):
-        with tempfile.TemporaryDirectory() as root:
-            first, other = ProviderBudget(Path(root)), ProviderBudget(Path(root))
-            with patch.object(providers, "provider_budget", first):
-                error = providers._ark_http_error(HTTPError("https://test", 429, "limited", {"Retry-After": "1"}, io.BytesIO(b"{}")), "private-key")
-            self.assertEqual(error.status_code, 429)
-            with self.assertRaises(TimeoutError):
-                other.reserve(providers._ark_quota_scope(), timeout=.05)
-            with self.assertRaises(TimeoutError):
-                other.wait_cooldown(providers._ark_quota_scope(), timeout=.05)
-            with patch.object(resource_limits.time, "time", return_value=time.time() + 2):
-                other.wait_cooldown(providers._ark_quota_scope(), timeout=.05)
-                other.reserve(providers._ark_quota_scope(), timeout=.05)
+    def test_429_backoff_uses_the_selected_account_scope(self):
+        with (patch.object(providers.provider_budget, "cooldown") as cooldown,
+              patch.object(providers, "ARK_API_KEYS", ("private-key",)),
+              patch.object(providers, "ARK_QUOTA_SCOPE", "per-key"),
+              patch.object(providers, "_ark_cooldowns", {})):
+            expected_scope = providers._ark_quota_scope("private-key")
+            error = providers._ark_http_error(
+                HTTPError("https://test", 429, "limited", {"Retry-After": "1"}, io.BytesIO(b"{}")),
+                "private-key",
+            )
+        self.assertEqual(error.status_code, 429)
+        cooldown.assert_called_once_with(expected_scope, 1.0)
+
+    def test_one_account_cooldown_does_not_block_other_accounts(self):
+        keys = ("account-one", "account-two", "account-three")
+        with (patch.object(providers.provider_budget, "cooldown") as cooldown,
+              patch.object(providers, "ARK_API_KEYS", keys),
+              patch.object(providers, "ARK_QUOTA_SCOPE", "per-key"),
+              patch.object(providers, "_ark_pool_index", 0),
+              patch.object(providers, "_ark_cooldowns", {})):
+            providers._ark_http_error(
+                HTTPError("https://test", 429, "limited", {"Retry-After": "1"}, io.BytesIO(b"{}")),
+                keys[0],
+            )
+            first_scope = providers._ark_quota_scope(keys[0])
+            second_scope = providers._ark_quota_scope(keys[1])
+            self.assertNotEqual(first_scope, second_scope)
+            cooldown.assert_called_once_with(first_scope, 1.0)
+            self.assertEqual(providers.ark_account_key(), keys[1])
 
     def test_impossible_token_budget_fails_without_hanging(self):
         with tempfile.TemporaryDirectory() as root:

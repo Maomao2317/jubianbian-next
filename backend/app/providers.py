@@ -56,6 +56,7 @@ from .config import (
     ARK_QUOTA_RPM,
     ARK_QUOTA_TPM,
     ARK_INPUT_TOKEN_RESERVE,
+    ARK_ACCOUNT_MAX_IN_FLIGHT,
     ARK_VIDEO_FPS,
     ARK_REVIEW_VIDEO_FPS,
     ARK_VIDEO_SOURCE_MODE,
@@ -91,6 +92,8 @@ def ark_fallback_message(error: ArkError) -> str:
 _ark_pool_lock = threading.Lock()
 _ark_pool_index = 0
 _ark_cooldowns: dict[str, float] = {}
+_ark_key_semaphore_lock = threading.Lock()
+_ark_key_generation_semaphores: dict[str, threading.BoundedSemaphore] = {}
 _ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
 _ark_generation_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
 _ark_upload_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
@@ -100,10 +103,31 @@ _ark_upload_body_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT
 _ark_proxy_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_PROXY_MAX_IN_FLIGHT)
 
 
-def _ark_quota_scope() -> str:
-    # Both API keys may belong to the same account. Aggregate conservatively;
-    # never use credentials as quota identities or persist them to the volume.
-    return hashlib.sha256(f"{ARK_BASE_URL}|{ARK_QUOTA_SCOPE}".encode()).hexdigest()
+def _ark_quota_scope(api_key: str | None = None) -> str:
+    """Return a non-secret quota identity, optionally isolated per account."""
+    scope = ARK_QUOTA_SCOPE.casefold()
+    account = "shared"
+    if api_key and scope in {"per-key", "per_key", "per-account", "per_account"}:
+        try:
+            account = f"account-{ARK_API_KEYS.index(api_key) + 1}"
+        except ValueError:
+            account = "account-" + hashlib.sha256(api_key.encode()).hexdigest()[:12]
+    return hashlib.sha256(f"{ARK_BASE_URL}|{scope}|{account}".encode()).hexdigest()
+
+
+def _ark_key_generation_semaphore(api_key: str) -> threading.BoundedSemaphore:
+    """Keep each Ark account at its own eight-lane budget."""
+    with _ark_key_semaphore_lock:
+        return _ark_key_generation_semaphores.setdefault(
+            api_key, threading.BoundedSemaphore(ARK_ACCOUNT_MAX_IN_FLIGHT)
+        )
+
+
+def _cool_down_ark_account(api_key: str, seconds: float) -> None:
+    seconds = max(1.0, min(300.0, float(seconds)))
+    with _ark_pool_lock:
+        _ark_cooldowns[api_key] = max(_ark_cooldowns.get(api_key, 0), time.monotonic() + seconds)
+    provider_budget.cooldown(_ark_quota_scope(api_key), seconds)
 
 
 def ark_account_key() -> str:
@@ -136,6 +160,7 @@ def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
     except (OSError, ValueError):
         pass
     if is_account_balance_error(ArkError(detail, status_code=exc.code, provider_code=provider_code)):
+        _cool_down_ark_account(api_key, 300)
         return ArkError(
             "方舟账户欠费或余额不足，请管理员恢复账户后重新识别；原片和已采集结果已保留。",
             status_code=exc.code,
@@ -147,9 +172,7 @@ def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
         except ValueError:
             retry_after = 30.0
         retry_after = max(1.0, min(300.0, retry_after))
-        with _ark_pool_lock:
-            _ark_cooldowns[api_key] = time.monotonic() + retry_after
-        provider_budget.cooldown(_ark_quota_scope(), retry_after)
+        _cool_down_ark_account(api_key, retry_after)
         # Provider 429 bodies may contain account identifiers and internal
         # quota text. Keep the actionable cause without echoing that data.
         detail = "模型当前达到推理限额或已暂停，请在方舟模型激活页调整限额或关闭 Safe Experience Mode"
@@ -217,7 +240,7 @@ def ark_http(
     try:
         try:
             provider_budget.wait_cooldown(
-                _ark_quota_scope(),
+                _ark_quota_scope(api_key),
                 timeout=max(0, upload_deadline - time.monotonic()) if upload_deadline else 300,
             )
         except TimeoutError as exc:
@@ -330,9 +353,10 @@ def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
 
 def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
     """Hold a shared generation slot through SSE AND stored-response recovery."""
-    scope = _ark_quota_scope()
+    scope = _ark_quota_scope(api_key)
     queued = time.perf_counter()
-    with _ark_generation_semaphore, capacity("ark-generation", SHARED_MODEL_CONCURRENCY):
+    with (_ark_generation_semaphore, _ark_key_generation_semaphore(api_key),
+          capacity("ark-generation", SHARED_MODEL_CONCURRENCY)):
         queue_ms = (time.perf_counter() - queued) * 1000
         started = time.perf_counter()
         reservation = provider_budget.reserve(
@@ -878,14 +902,14 @@ def ark_prepare_video(path: Path, duration_sec: float = 0, *, source_uri: str | 
 
 SUBTITLE_PRIORITY_RULE = (
     "字幕是画面证据，不是台词的输出类型：听到人物说话必须输出dialogue或vo，不能只输出screen_text；"
-    "电话、画外催促声、回忆声和重复出现的短句也逐句输出为台词，voKind按声音来源标记，无法确认身份时用未知说话人，不能猜成正在看手机的人。"
+    "电话、画外催促声、回忆声和真实重复出现的短句也必须按原片次数逐句输出，voKind按声音来源标记，无法确认身份时用未知说话人，不能猜成正在看手机的人；一句台词一个块，同一说话人连续发言也不要合并。"
     "手机短信等只有文字没有人声的内容保持screen_text，screenType=other；标题、姓名条、系统提示也不得标成subtitle。"
     "对白与字幕规则：声音清晰时，dialogue/VO必须按实际听到的原话记录；即使字幕措辞不同，也不能用字幕改写台词。"
     "同一时间段已有台词时（包括由字幕补足的台词），对应的screen_text字幕只作为内部OCR证据，不在剧本正文重复输出；导出和界面只保留台词。"
     "声音听不清、ASR低置信度或明确标记audioUnclear=true/speechClarity=unclear时，才可以用时间对应且OCR确认的字幕补足原话，并标记textSource=subtitle。"
     "说话人未知或uncertain=true本身不表示声音听不清，不能据此用字幕改写清晰原声。"
     "字幕只覆盖对应时间范围，不得用半句字幕覆盖整段台词；说话人、VO/OS分类和表演情绪仍按原声音及画面判断。"
-    "姓名条、标题、弹幕、广告、系统提示、免责声明和其他非对白画面文字必须保留为screen_text，不能当作对白字幕替换台词。"
+    "姓名条、标题、弹幕、广告、系统提示和其他剧情相关非对白画面文字必须保留为screen_text，不能当作对白字幕替换台词；‘本故事纯属虚构／无不良导向／切勿模仿’等片头片尾免责声明不输出。"
     "没有可靠声音或字幕证据时保留原始可辨识文字并标记confidence=low、uncertain=true，不猜字、不敏感词替换、不做同义改写。"
 )
 
@@ -1010,15 +1034,15 @@ def ark_prompt(
         "6. 严禁写‘特写、近景、正反打、镜头切到、推近、拉远、俯拍、仰拍、画面给到’等拍摄或剪辑指令。后期剪辑处理不进入剧本正文。"
         "7. 不输出 environment 字段；画面中的地点、人物关系和动作直接写进 action block，不另设环境段落。"
         "8. 人物第一次出现时，必须在 characterProfiles 的 firstAppearance、appearance 或 clothing 中补齐视频实际可见的识别信息；appearance 和 clothing 要写具体发型、服装、颜色、体貌等可见细节，并与正文第一次 action 中的外形描述保持一致；只写能帮助表演的外观/服装，不要猜年龄、身份或剧情之外的颜色饰品。看不清就留空并标记需要核对。"
-        "9. dialogue 必须一人一句、完整保留原话，不能改写成剧情概括，不能省略、合并、调换顺序或补写听不清的内容。台词文字是不可改写字段：只允许恢复中文标点和清理空白，不能替换同义词。每个 dialogue block 只能对应一个 speaker；发现说话人切换就拆成多个 block，仍逐字保留。先根据语气和语法恢复准确中文标点：逗号分隔分句，句末使用‘。’、‘？’、‘！’或‘……’，不要输出无标点的长句，也不要连续重复标点。听不清的人名、称谓和代词保留‘[听不清]’，confidence 写 low、uncertain 写 true。"
+        "9. dialogue 必须一人一句、完整保留原话，不能改写成剧情概括，不能省略、合并、调换顺序或补写听不清的内容。台词文字是不可改写字段：只允许恢复中文标点和清理空白，不能替换同义词。每句 dialogue 单独一个 block；同一 speaker 连续说多句也逐句输出，发现说话人切换同样新建 block，不能把两个人的台词合并。先根据语气和语法恢复准确中文标点：逗号分隔分句，句末使用‘。’、‘？’、‘！’或‘……’，不要输出无标点的长句，也不要连续重复标点。听不清的人名、称谓和代词保留‘[听不清]’，confidence 写 low、uncertain 写 true。"
         "9a. 对白括号只保留一到两个简短、可执行的情绪/状态词，例如‘震惊’、‘急切呼喊’、‘语气坚定’；只要视频能观察到表情、动作或语气，就必须填写 performance 或 speechTone，不能把已有情绪证据静默省略；不要输出音高、音量、停顿、重音、语气分析、同义重复或完整表演说明。不要把两个人的台词合并到一个 speaker 下，下一位说话人必须新建 dialogue block。"
-        "9b. 独立 ASR 证据中的每个 transcript_segment 都必须在同一时间顺序中逐句对照；声音清晰时以实际听到的台词为准，不能用不同措辞的字幕改写台词。声音听不清时标记audioUnclear=true、speechClarity=unclear，才可用时间对应且可靠的字幕补足；仅说话人不确定不能覆盖清晰原声。不得用剧情概括替代任何一句，也不得把两段不同时间的对白合并。无法确认某句或说话人时，保留原始可辨识文字、confidence 写 low、uncertain 写 true，并将 speaker 写‘未知说话人’，绝不能按上下文猜测或把上一句人物沿用给下一句。"
+        "9b. 独立 ASR 证据中的每个 transcript_segment 都必须在同一时间顺序中逐句对照；声音清晰时以实际听到的台词为准，不能用不同措辞的字幕改写台词。声音听不清时标记audioUnclear=true、speechClarity=unclear，才可用时间对应且可靠的字幕补足；仅说话人不确定不能覆盖清晰原声。不得用剧情概括替代任何一句，也不得把两段台词合并。无法确认某句或说话人时，保留原始可辨识文字、confidence 写 low、uncertain 写 true，并将 speaker 写‘未知说话人’，绝不能按上下文猜测或把上一句人物沿用给下一句。"
         "9c. 一个字、两个字或被停顿切开的短台词也必须各自保留，例如‘今天’、‘我’、‘决定’、‘咋’、‘啊’、‘呵’、再次出现的‘我’都不能因太短、重复或语义不完整而省略；逐个 transcript_segment 和words时间锚点对齐次数和时间，不得去重。快闪字幕要与同期声音相互核对，ASR/OCR可能有误，以原视频为准。"
         "10. 情绪必须绑定可观察证据：先写画面动作/声音，再填写 emotionType、emotionEvidence 和简短 performance；强度、触发、变化和对象仅在证据明确时填写。看不清就省略情绪字段，不得编造心理。对白语气只有视频确实能判断时才填写，必须同步给出一到两个简短的 performance 可执行提示，不输出独立情绪段。"
         "11. 明确的内心声、旁白、回忆声、电话另一端和场内画外对白使用 type=vo，在speaker写对应角色规范名或‘旁白’。voKind分别为os（明确内心独白）、offscreen（场内画外对白）、narration（叙述旁白）、memory（回忆声）、phone（电话另一端）。没有明确来源证据写unknown，不得把嘴未动、画外说话或动画口型不足猜成OS。若说话角色无法确认，speaker写‘未知说话人’并标uncertain；没有声音依据不能臆造VO。"
         "11a. 画面中能看到人物开口说话的内容一律是 dialogue，不能只用 screen_text 替代；声音在画外、电话另一端或回忆中则使用vo并标明voKind。人物自己的内心独白才是 OS，不能因为句子像旁白就把普通对白标成 VO/OS。对白字幕仅作为内部证据保留，绝不能代替台词。"
         "11b. speaker按声音的实际归属填写，先核对起句时的声源、同期口型、声音连续性和实际说话人切换。A一句未结束而画面转到B听话或反应，仍归A并填speechContinuity=true，不因切镜换speaker；确认是新的发声者才另建块。visibleSpeaker只填明确与此声同步的角色姓名字符串或空字符串，绝不能填布尔值；mouthMoving是布尔值，无法确认可省略。口型或画面中出现某人单独不足以证明声音归属，动画、动物、机器人等也按声音及字幕证据判定。"
-        "12. 正式扒剧本不输出背景音乐；sound 只保留原片确实听到且对剧情有作用的动作音效或环境声。逐条识别画面文字并保持出现顺序：对白字幕仅保留为内部screen_text证据，同期有声内容必须另有dialogue或vo；人物姓名条、作品/AI免责声明、系统提示、标题字样等非对白文字使用相应非subtitle的screenType，不能漏掉、合并或改写；闪回、回到现实和闪白等使用 transition。"
+        "12. 正式扒剧本不输出背景音乐；sound 只保留原片确实听到且对剧情有作用的动作音效或环境声。逐条识别剧情相关画面文字并保持出现顺序：对白字幕仅保留为内部screen_text证据，同期有声内容必须另有dialogue或vo；人物姓名条、系统提示、标题字样等非对白文字使用相应非subtitle的screenType，不能漏掉、合并或改写；‘本故事纯属虚构／无不良导向／切勿模仿’及同义片头片尾免责声明不要输出；闪回、回到现实和闪白等使用 transition。"
         "13. characterProfiles为每个角色建立唯一id、规范name和aliases，出场人物characters及台词前speaker标签必须用首次确定的同一名字。周守田是周向东父亲，后面再次出现仍标周守田，不能改为向东爸，更不能归并到周向东；台词、字幕和动作原文的称谓保持原样。姓名从姓名条、字幕、直接称呼及自报身份确认，用nameEvidence记录原视频依据；仅凭剧情或相似外观不能编造姓名。relationships中target=周向东、relation=父亲表示此角色是周向东父亲，仅确认关系时填写。动物、动画及其他非人角色也属于角色，species记录可见类型；确无姓名时首次用可区分的稳定称呼，后续沿用并保留身份疑点，不能漏掉其对白。"
         "14. 全片实际出现的画面动作、对白和文字都必须保留，包括回顾recap、预告trailer、片头和片尾；"
         "segmentType只标记片段类别，不是删减指令，不能把重复剧情当成可省略内容。纯标题或演职员文字用screen_text。"
@@ -1028,7 +1052,7 @@ def ark_prompt(
         "17. 输出前做一次正文纯净度检查：参考文档中的校对备注、缺漏标注和操作指令（例如‘这里不需要展示’、‘缺少某人台词’、‘少某人说话’、‘这几句是旁白’、‘画面应该是2-2’、‘这一大段不需要’、‘待补充’）不是视频内容，严禁写进 action、dialogue、vo 或 screen_text；只有视频真实出现的文字才可写入 screen_text。"
         "17a. ‘需核对’、‘待核对’、‘内部校对’等只属于系统质量字段，严禁出现在剧本正文、人物名、台词或动作中；不确定信息通过 uncertain/confidence 和时间字段交给复核流程。"
         "18. 同一 action 不得把多个角色的多轮动作拼成一条长总结；一个 action 只写同一主体的一次连续可见动作，出现‘拿起—递给—接过’、‘开门—走出—关门’或多人先后动作时按先后拆成多个 block，并保留每一步的对象和结果。"
-        "19. 清晰声音与字幕去重：人物开口内容写 dialogue；同一时间段已有台词时（包括由字幕补足的台词），对应对白字幕只保留为内部证据，不在剧本正文重复输出。声音听不清时才用字幕作为台词来源。姓名条、标题、系统提示、免责声明等非对白文字必须作为 screen_text 保留。"
+        "19. 清晰声音与字幕去重：人物开口内容写 dialogue；同一时间段已有台词时（包括由字幕补足的台词），对应对白字幕只保留为内部证据，不在剧本正文重复输出。声音听不清时才用字幕作为台词来源。不得把同一时间片的相同 speaker、相同 text 重复生成两次；真实发生在不同时间的重复说话仍按次数保留。姓名条、标题、系统提示等剧情相关非对白文字必须作为 screen_text 保留，片头片尾免责声明除外。"
         "20. 场次编号先按视频/文件中明确的集数分组，再在每集内从1递增（2-1、2-2、3-1、3-2）；批量视频不能把所有场次统一改成第一集或按全局序号覆盖集数。"
         f"视频标题：{title}；视频时长：{duration_sec:.1f} 秒。"
         f"\n{evidence_fragment}"
@@ -1890,8 +1914,8 @@ def openai_script(title: str, duration_sec: float, transcript: str, evidence: di
         "只要画面从一个明确空间切换到另一个空间就拆新场次，重新编号并只列该场实际出现/说话的人；heading 要写清日夜、内外景和地点，允许‘内转外’、‘外转内’、‘傍晚转夜’，不能把多个镜头地点压成一个场次。"
         "blocks 可使用 action、dialogue、vo、sound、screen_text、transition、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名、视频中实际动词、动作对象和结果，不能省略动作主语或把动作概括成泛化词。人物第一次在正文 action 中出现时，要把可见发型、服装、颜色和体貌直接写在人物名前，例如‘梳双丸子头、穿红碎花袄的小女孩希希趴在米缸口……’；不能只把外形放在 characterProfiles。"
         "每条 action 只写一到两句可拍摄的主体、动词、对象和结果，连续动作拆成多个 block，不重复整段环境或同一人物外形。"
-        "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；‘今天’、‘我’、‘决定’等一到三个字的短台词以及重复出现的短词也必须按次数和顺序逐句保留。每个 block 只能有一个 speaker。画面中人物开口说话必须是 dialogue，不能只写成字幕或 VO；若视频同时有对白字幕，仅保留为内部screen_text证据。人物嘴没有动不能据此判断OS，只有明确内心独白才写voKind=os；画外音、电话另一端、回忆声分别使用offscreen、phone、memory，来源不明用unknown，不猜人物。对白括号只写一到两个简短情绪词，不写音高、音量、停顿、重音等技术分析。"
-        "sound 只描述原片中确实听到且有用的动作音效或环境声，不输出背景音乐；必须逐条保留所有额外画面文字、人物姓名条、免责声明和系统提示，使用 screen_text，不能把人物实际说出的台词误写成 screen_text；闪回和回到现实使用 transition。"
+        "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；同一角色连续发言也逐句输出，每句单独一个 block；‘今天’、‘我’、‘决定’等一到三个字的短台词以及真实重复出现的短词仍必须按次数和顺序保留。每个 block 只能有一个 speaker。画面中人物开口说话必须是 dialogue，不能只写成字幕或 VO；若视频同时有对白字幕，仅保留为内部screen_text证据。同一时间片的相同 speaker、相同 text 只生成一次。人物嘴没有动不能据此判断OS，只有明确内心独白才写voKind=os；画外音、电话另一端、回忆声分别使用offscreen、phone、memory，来源不明用unknown，不猜人物。对白括号只写一到两个简短情绪词，不写音高、音量、停顿、重音等技术分析。"
+        "sound 只描述原片中确实听到且有用的动作音效或环境声，不输出背景音乐；必须逐条保留剧情相关额外画面文字、人物姓名条和系统提示，使用 screen_text，不能把人物实际说出的台词误写成 screen_text；‘本故事纯属虚构／无不良导向／切勿模仿’等片头片尾免责声明不要输出；闪回和回到现实使用 transition。"
         "16. props 必须记录视频中实际出现的关键道具及其状态/证据；跨场景的手机、证物、钱、钥匙等必须在 continuityIn/continuityOut 或 props 中保持可追踪。时间锚点、室内外和门内外变化必须写入场次头或衔接字段，不能让正文自行猜测。"
         "17. 提示中的人物和场景名称只是格式示例，不能照搬；针对当前视频自适应识别题材、时代、地点、人物关系和叙事语气，覆盖现代、古装、校园、职场、悬疑、动作、喜剧等各种类型，只写视频证据，不套用类型套路或示例剧情。"
         "18. 严禁把参考文档的校对备注或操作指令写进正文，例如‘这里不需要展示’、‘缺少某人台词’、‘少某人说话’、‘画面应该是2-2’、‘这一大段不需要’、‘待补充’；这些不是视频内容。"
