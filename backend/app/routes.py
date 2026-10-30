@@ -43,6 +43,7 @@ from .config import (
     MAX_DURATION_MINUTES,
     MAX_DURATION_SECONDS,
     MAX_UPLOAD_BYTES,
+    ARK_MIN_GROSS_MARGIN_RATIO,
     POINTS_PER_MINUTE,
     POINTS_PER_YUAN,
     QUEUE_MAX_WAIT_MINUTES,
@@ -794,7 +795,27 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
         billed_minutes = float(item.get("credits_used") or 0)
         item["points_used"] = round(billed_minutes * POINTS_PER_MINUTE, 1)
         item["points_value_rmb"] = round(item["points_used"] / POINTS_PER_YUAN, 2)
-        item["model_usage"] = _admin_model_usage(usage_rows.get(row["group_id"], []))
+        task_usage_rows = usage_rows.get(row["group_id"], [])
+        item["model_usage"] = _admin_model_usage(task_usage_rows)
+        item["api_cost_rmb"] = round(sum(
+            max(0.0, float(usage_row["api_cost_rmb"] or 0)) for usage_row in task_usage_rows
+        ), 6)
+        gross_profit = item["points_value_rmb"] - item["api_cost_rmb"]
+        item["gross_profit_rmb"] = round(gross_profit, 4)
+        item["gross_margin"] = round(gross_profit / item["points_value_rmb"], 4) if item["points_value_rmb"] > 0 else None
+        lite_calls = int(item["model_usage"]["lite"]["calls"] or 0)
+        turbo_calls = int(item["model_usage"]["turbo"]["calls"] or 0)
+        item["model_mix_status"] = (
+            "lite_dominant" if lite_calls > turbo_calls else
+            "turbo_not_lower" if turbo_calls else "no_calls"
+        )
+        item["economics_status"] = (
+            "loss" if gross_profit < 0 else
+            "risk" if (
+                item["gross_margin"] is not None and item["gross_margin"] < ARK_MIN_GROSS_MARGIN_RATIO
+            ) or item["model_mix_status"] == "turbo_not_lower" else
+            "healthy"
+        )
         grouped.append(item)
     return {"items": grouped, "total": int(total), "limit": limit, "offset": offset}
 

@@ -112,7 +112,13 @@ ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
 # accounts. A deployment can still override it when its account catalog differs.
 ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-1-lite-260915").strip()
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
-ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() or "complexity"
+ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "lite_first").strip().lower() or "lite_first"
+# Normal traffic starts on Lite and may spend at most one Turbo call only when
+# a source-fidelity blocker remains.  The upgrade estimate keeps a real margin
+# after the already-spent Lite call; uncertain estimates are padded before a
+# paid request is admitted.
+ARK_MIN_GROSS_MARGIN_RATIO = max(0.0, min(0.9, float(os.getenv("JBB_ARK_MIN_GROSS_MARGIN_RATIO", "0.20"))))
+ARK_TURBO_COST_SAFETY_FACTOR = max(1.0, min(5.0, float(os.getenv("JBB_ARK_TURBO_COST_SAFETY_FACTOR", "1.25"))))
 # Keep the initial pass dense enough for source fidelity. Cost control comes
 # from bounded issue review and avoiding repeated full-video calls; deployments
 # may override this explicitly after a measured quality comparison.

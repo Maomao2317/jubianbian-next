@@ -156,12 +156,14 @@ class RecognitionRegressions(unittest.TestCase):
         apply_batch_character_continuity([first, second])
         self.assertEqual(second["scenes"][0]["blocks"][1]["speaker"], "丈夫")
 
-    def test_blocking_review_includes_only_corroborated_missing_line_advisories(self):
+    def test_paid_review_includes_only_delivery_blocking_issues(self):
         blocking = {"tag": "台词归属错", "severity": "P0", "scene": 1, "block": 1}
         supported = {"tag": "疑似漏台词片段", "severity": "P1", "ocrConfirmed": True}
         unsupported = {"tag": "疑似漏台词片段", "severity": "P1"}
         quality = {"issues": [blocking, supported, unsupported]}
-        self.assertEqual(processing._automated_review_issues(quality), [blocking, supported])
+        self.assertEqual(processing._automated_review_issues(quality), [blocking])
+        self.assertIn(supported, quality["issues"])
+        self.assertIn(unsupported, quality["issues"])
 
     def test_name_first_established_in_second_episode_is_used_in_third(self):
         first = episode(["周向东"], [{"type": "dialogue", "speaker": "周向东", "text": "走"}])
@@ -183,14 +185,14 @@ class RecognitionRegressions(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["startSec"], 5)
 
-    def test_animal_subtitle_with_speech_cue_needs_dialogue_review(self):
+    def test_animal_subtitle_with_speech_cue_keeps_local_advisory_without_paid_review(self):
         script = episode(["老虎"], [
             {"type": "action", "text": "老虎开口说道", "startSec": 1, "endSec": 2},
             {"type": "screen_text", "screenType": "subtitle", "text": "啊", "startSec": 1.1, "endSec": 1.4},
         ], [{"name": "老虎", "species": "动画动物"}])
         issues = script_quality(script, "test")["issues"]
         self.assertIn("字幕对白遗漏", [issue["tag"] for issue in issues])
-        self.assertTrue(processing._needs_automated_content_review({"issues": issues}))
+        self.assertFalse(processing._needs_automated_content_review({"issues": issues}))
         title = episode([], [{"type": "screen_text", "screenType": "title_card", "text": "老虎", "startSec": 1, "endSec": 2}])
         self.assertNotIn("字幕对白遗漏", [issue["tag"] for issue in script_quality(title, "test")["issues"]])
 

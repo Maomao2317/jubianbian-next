@@ -22,7 +22,9 @@ ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_MODEL=doubao-seed-2-1-turbo-260628
 ARK_LITE_MODEL=doubao-seed-2-1-lite-260915
 ARK_TURBO_MODEL=doubao-seed-2-1-turbo-260628
-ARK_ROUTING_MODE=complexity
+ARK_ROUTING_MODE=lite_first
+JBB_ARK_MIN_GROSS_MARGIN_RATIO=0.20
+JBB_ARK_TURBO_COST_SAFETY_FACTOR=1.25
 ARK_VIDEO_FPS=1.0
 ARK_FILE_POLL_SECONDS=1
 ARK_RESPONSE_POLL_TIMEOUT_SECONDS=900
@@ -78,7 +80,7 @@ sudo /opt/jubianbian-staging/ops/install-staging-automation.sh
 
 配置 `ARK_API_KEY` 后，任务会优先走“上传视频 → 方舟 Responses API → 结构化剧本 → Markdown/TXT 导出”的真实链路。方舟返回限流、额度耗尽或暂时不可用时，默认（`ARK_FALLBACK_ON_ERROR=1`）自动尝试 OpenAI；备用识别也失败时任务进入重试/失败流程，不生成未经证实的本地伪剧本，并在识别概况中显示降级提示；需要严格暴露方舟故障时可将该开关设为 `0`。
 
-`ARK_ROUTING_MODE=complexity` 时，系统会在调用方舟前根据视频时长、独立转写/OCR证据和关键帧可用性选择 Lite 或 Turbo，并把实际模型与路由原因写入任务质量记录；设为 `lite_only` 或 `turbo_only` 可用于对照测试。
+`ARK_ROUTING_MODE=lite_first` 时，常规任务一次 Lite 直出；只有真实缺段或 P0 质量阻断，并且预估成本仍能保留至少 `JBB_ARK_MIN_GROSS_MARGIN_RATIO` 毛利时，才允许每集最多一次 Turbo 升级。修复只处理合并后的缺段或问题范围，不重放整条任务；Turbo 后仍有局部阻断时最多再做一次 Lite 清理。最终未通过 P0 门禁的候选稿只留档审计，不交付、不转人工、也不触发质量退费。`complexity`、`lite_only`、`turbo_only` 仅用于显式对照测试或应急切换。
 
 批量上传使用“创建批次 → 每集独立上传”的两阶段协议，浏览器默认同时上传 4 集；任意一集上传完成即可进入识别，不需要等待整个 50–100 集批次。若配置下面的 S3 兼容参数，浏览器会通过预签名 URL 直传对象存储，应用服务器不再中转上传流量；未配置时自动使用本地数据卷，不影响现有部署：
 

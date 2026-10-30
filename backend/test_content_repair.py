@@ -240,81 +240,74 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
                 {"id": "task", "title": "第11集"}, Path("unused"), 120, {"durationSec": 120},
                 {"model": "lite", "mode": "complexity", "band": "simple", "score": 0, "reasons": []}, {}, None)
         self.assertEqual(whole.call_count, 1)
-        self.assertEqual(ranges.call_count, 3)
+        self.assertEqual(ranges.call_count, 1)
         self.assertEqual(content_gaps(result, 120), [])
         self.assertEqual(quality["automatedReview"]["reviewScope"], "missing_video_segments")
-        self.assertEqual(quality["automatedReview"]["attemptCount"], 4)
-        self.assertEqual(usage["total_tokens"], 25)
+        self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
+        self.assertEqual(usage["total_tokens"], 15)
 
     async def test_balance_failure_stops_calls_and_keeps_completed_clip(self):
         original = script(action(110, 120, "保留原稿。"))
         before = deepcopy(original)
         failure = ArkError("account balance insufficient", status_code=403, provider_code="InsufficientBalance")
-        model = AsyncMock(side_effect=[(script(action(0, 38, "甲打开门。")), {"total_tokens": 20}, 0, 39), failure])
+        model = AsyncMock(side_effect=failure)
         stop = asyncio.Event()
         with patch.object(processing, "_run_model_call", model):
             repaired, quality, usage = await processing.repair_content_gaps(
                 Path("unused.mp4"), "第11集", 120, original, {},
                 {"band": "simple", "score": 0, "reasons": []}, stop_event=stop)
-        self.assertEqual(model.await_count, 2)
+        self.assertEqual(model.await_count, 1)
         self.assertEqual(original, before)
         text = [b["text"] for s in repaired["scenes"] for b in s["blocks"]]
         self.assertIn("保留原稿。", text)
-        self.assertIn("甲打开门。", text)
-        self.assertEqual(usage["total_tokens"], 20)
+        self.assertNotIn("甲打开门。", text)
+        self.assertIsNone(usage.get("total_tokens"))
         self.assertTrue(quality["contentRepair"]["errors"][0]["balanceError"])
         self.assertTrue(stop.is_set())
         self.assertTrue(quality["contentRepair"]["remainingRanges"])
         self.assertFalse(quality_gate(quality)[0])
 
-    async def test_capacity_timeout_retries_range_on_second_pass(self):
+    async def test_capacity_timeout_stops_without_same_tier_retry(self):
         original = script(action(40, 60, "保留结尾。"))
         failure = ArkError(
             "upload capacity timeout",
             provider_code="video_upload_capacity_timeout",
         )
-        model = AsyncMock(side_effect=[
-            failure,
-            (script(action(0, 40, "补全开头。")), {"total_tokens": 8}, 0, 40),
-        ])
+        model = AsyncMock(side_effect=failure)
         with patch.object(processing, "_run_model_call", model):
             repaired, quality, usage = await processing.repair_content_gaps(
                 Path("unused.mp4"), "第11集", 60, original, {},
                 {"band": "simple", "score": 0, "reasons": []},
             )
-        self.assertEqual(content_gaps(repaired, 60), [])
-        self.assertEqual(usage["total_tokens"], 8)
+        self.assertEqual(model.await_count, 1)
+        self.assertEqual(content_gaps(repaired, 60), [{"startSec": 0.0, "endSec": 40.0}])
+        self.assertIsNone(usage.get("total_tokens"))
         self.assertEqual(
             [call.kwargs["repair_attempt"] for call in model.await_args_list],
-            [0, 1],
+            [0],
         )
         metadata = quality["contentRepair"]
-        self.assertEqual(len(metadata["passes"]), 2)
-        self.assertEqual(len(metadata["completedRanges"]), 1)
-        self.assertEqual(metadata["remainingRanges"], [])
+        self.assertEqual(len(metadata["passes"]), 1)
+        self.assertEqual(metadata["completedRanges"], [])
+        self.assertEqual(metadata["remainingRanges"], [{"startSec": 0.0, "endSec": 40.0}])
 
     async def test_partial_model_output_recomputes_only_remaining_gap(self):
         original = script(action(40, 60, "保留结尾。"))
-        model = AsyncMock(side_effect=[
-            (script(action(0, 10, "补一小段。")), {"total_tokens": 4}, 0, 40),
-            (script(action(0, 30, "补全剩余。")), {"total_tokens": 6}, 10, 30),
-        ])
+        model = AsyncMock(return_value=(script(action(0, 10, "补一小段。")), {"total_tokens": 4}, 0, 40))
         with patch.object(processing, "_run_model_call", model):
             repaired, quality, usage = await processing.repair_content_gaps(
                 Path("unused.mp4"), "第11集", 60, original, {},
                 {"band": "simple", "score": 0, "reasons": []},
             )
-        self.assertEqual(content_gaps(repaired, 60), [])
-        self.assertEqual(usage["total_tokens"], 10)
+        self.assertEqual(model.await_count, 1)
+        self.assertEqual(content_gaps(repaired, 60), [{"startSec": 10.0, "endSec": 40.0}])
+        self.assertEqual(usage["total_tokens"], 4)
         requested = [call.args[6] for call in model.await_args_list]
-        self.assertEqual(requested, [
-            {"startSec": 0.0, "endSec": 40.0},
-            {"startSec": 10.0, "endSec": 40.0},
-        ])
+        self.assertEqual(requested, [{"startSec": 0.0, "endSec": 40.0}])
         metadata = quality["contentRepair"]
-        self.assertEqual(len(metadata["completedRanges"]), 1)
+        self.assertEqual(metadata["completedRanges"], [])
         self.assertFalse(metadata["attemptedRanges"][0]["resolved"])
-        self.assertTrue(metadata["attemptedRanges"][1]["resolved"])
+        self.assertEqual(metadata["remainingRanges"], [{"startSec": 10.0, "endSec": 40.0}])
 
     async def test_unresolved_repair_is_retried_instead_of_delivered(self):
         original = script(action(50, 60, "只识别到结尾。"))
@@ -349,9 +342,14 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         repaired = normalize_script(script(action(0, 120), {
             "type": "dialogue", "speaker": "未知说话人", "text": "我来了。",
             "uncertain": True, "startSec": 10, "endSec": 12}), "第11集")
-        route = {"model": "lite", "mode": "complexity", "band": "simple", "score": 0, "reasons": []}
+        route = {"model": "lite", "mode": "lite_first", "band": "simple", "score": 0, "reasons": []}
         quality = processing._evaluate_quality(repaired, "ark", {"durationSec": 120}, route)[0]
-        metadata = {"completedRanges": [{"startSec": 0, "endSec": 110}], "errors": [], "remainingRanges": []}
+        metadata = {
+            "attemptedRanges": [{"startSec": 0, "endSec": 110, "resolved": True}],
+            "completedRanges": [{"startSec": 0, "endSec": 110}],
+            "errors": [],
+            "remainingRanges": [],
+        }
         quality["contentRepair"] = metadata
         self.assertFalse(quality_gate(quality)[0])
         reviewed = deepcopy(repaired)
@@ -365,6 +363,7 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
             result, final, usage, _ = await processing._run_recognizer_with_media(
                 {"id": "task", "title": "第11集"}, Path("unused"), 120, {"durationSec": 120}, route, {}, None)
         self.assertEqual(whole.call_count, 2)
+        self.assertEqual([call.args[4] for call in whole.call_args_list], ["lite", "lite"])
         self.assertIn("台词归属错", [item["tag"] for item in whole.call_args.kwargs["review_context"]["issues"]])
         self.assertEqual(usage["total_tokens"], 60)
         self.assertEqual(final["contentRepair"], metadata)

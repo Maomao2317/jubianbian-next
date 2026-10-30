@@ -153,7 +153,11 @@ class UserReviewTests(unittest.TestCase):
         self.assertIn("对白可能有遗漏", detail["quality"]["issues"][0]["description"])
         for data in (detail, routes.list_tasks(None), routes.task_event_list(None, "one", 100)):
             text = json.dumps(data, ensure_ascii=False)
-            for internal in ("ASR", "OCR", "internal-model", "secret-lite", "account-1", "api_cost_rmb", "total_tokens", "覆盖率", "P0", "vendor"):
+            for internal in (
+                "ASR", "OCR", "internal-model", "secret-lite", "account-1",
+                "api_cost_rmb", "apiCostRmb", "total_tokens", "gross_profit_rmb",
+                "gross_margin", "Lite", "Turbo", "覆盖率", "P0", "vendor",
+            ):
                 self.assertNotIn(internal, text)
         with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
             admin = routes.admin_task_detail(None, "one")
@@ -164,6 +168,32 @@ class UserReviewTests(unittest.TestCase):
             routes.download_task(None, "one", "md")
         self.approve(["one"])
         self.assertIn("我们出发吧", routes.download_task(None, "one", "md").body.decode())
+
+    def test_quality_blocked_candidate_is_admin_only(self):
+        with auth_store.db() as c:
+            c.execute(
+                "UPDATE tasks SET status='failed', stage='quality_blocked' WHERE id='one'"
+            )
+        task_store.record_task_event(
+            "one", "quality_blocked", "internal quality diagnosis",
+            status="quality_blocked", stage="quality_blocked",
+        )
+        detail = routes.task_detail(None, "one")
+        self.assertEqual(detail["status"], "failed")
+        self.assertEqual(detail["stage"], "failed")
+        self.assertIsNone(detail["result"])
+        self.assertFalse(detail["reviewAvailable"])
+        self.assertEqual(detail["quality"], {"issues": []})
+        self.assertNotIn("quality_blocked", json.dumps(detail, ensure_ascii=False))
+        public_events = routes.task_event_list(None, "one", 100)
+        self.assertNotIn("quality_blocked", json.dumps(public_events, ensure_ascii=False))
+        self.assertEqual(public_events[0]["status"], "failed")
+        self.assertEqual(public_events[0]["stage"], "failed")
+        with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
+            admin = routes.admin_task_detail(None, "one")
+        self.assertEqual(admin["status"], "failed")
+        self.assertEqual(admin["stage"], "quality_blocked")
+        self.assertTrue(admin["result"])
 
     def test_unknown_issue_never_echoes_raw_text_and_body_is_preserved(self):
         from app.user_view import user_issue, user_result

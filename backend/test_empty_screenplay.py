@@ -83,8 +83,9 @@ class EmptyScreenplayTests(unittest.TestCase):
               patch.object(processing, "_refund_task_once") as refund,
               patch.object(processing, "update_task") as update):
             asyncio.run(processing.process_task("task"))
-        refund.assert_called_once()
+        refund.assert_not_called()
         self.assertEqual(update.call_args.kwargs["status"], "failed")
+        self.assertEqual(update.call_args.kwargs["stage"], "quality_blocked")
         self.assertTrue(all("result_json" not in call.kwargs for call in update.call_args_list))
 
     def test_admin_cannot_approve_an_empty_review_candidate(self):

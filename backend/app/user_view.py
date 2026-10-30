@@ -77,13 +77,16 @@ def user_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for event in events:
         stage = event.get("stage")
+        if stage == "quality_blocked":
+            stage = "failed"
         stage = stage if stage in STAGE_MESSAGES else "reviewing"
         message = STAGE_MESSAGES[stage]
         if event.get("type") == "user_approved":
             message = "已确认查看检查提示，剧本可下载"
         elif event.get("type") in {"admin_recheck_failed_restored", "admin_recheck_restored"}:
             message = "已恢复上次完成的剧本"
-        result.append({"type": "stage", "status": event.get("status"),
+        status = "failed" if event.get("status") == "quality_blocked" else event.get("status")
+        result.append({"type": "stage", "status": status,
                        "stage": stage, "message": message,
                        **{key: event.get(key) for key in ("progressPercent", "durationMs", "createdAt")}})
     return result
@@ -106,6 +109,12 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
               "durationSec", "estimatedMinutes", "creditsUsed", "progressPercent", "stageProgressPercent",
               "createdAt", "updatedAt", "completedAt", "batchId", "batchTitle", "batchIndex", "batchTotal"}
     result = {key: value for key, value in task.items() if key in fields}
+    quality_blocked = task.get("status") == "failed" and task.get("stage") == "quality_blocked"
+    if quality_blocked:
+        # This is an internal gate/audit state. Customers only need the public
+        # failure state; revealing the gate name would expose implementation
+        # details that are intentionally confined to the admin console.
+        result["stage"] = "failed"
     quality = task.get("quality") if isinstance(task.get("quality"), dict) else {}
     issues = []
     raw_issues = [issue for key in ("blockingIssues", "issues")
@@ -114,9 +123,17 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
         public = user_issue(issue)
         if public not in issues:
             issues.append(public)
-    result["reviewAvailable"] = bool(issues) or task.get("status") == "review"
-    result["quality"] = {"issues": issues}
-    result["result"] = user_result(task.get("result"))
+    result["reviewAvailable"] = task.get("status") == "review"
+    result["quality"] = {"issues": [] if quality_blocked else issues}
+    # Failed quality candidates are retained for admin audit and accounting,
+    # but exposing their body in the customer detail API would be an implicit
+    # delivery that bypasses the P0 gate. Only completed and explicit review
+    # states may return screenplay content to the owner.
+    result["result"] = (
+        user_result(task.get("result"))
+        if task.get("status") in {"done", "review"}
+        else None
+    )
     if task.get("status") == "done" and task.get("result") is not None:
         result["downloadable"] = has_screenplay_body(task.get("result"))
     if task.get("error"):

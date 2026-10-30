@@ -127,15 +127,22 @@ class ArkCostControlTests(unittest.TestCase):
             self.assertIsNone(cache.proxy())
             self.assertEqual(len(list((cache.directory / "segments").glob("*/proxy.mp4"))), 1)
 
-    def test_noisy_advisory_does_not_trigger_but_all_p0_and_corroborated_issues_do(self):
+    def test_only_p0_issues_trigger_paid_content_review(self):
         for tag in ("疑似漏台词片段", "疑似漏画面文字片段", "音频对白需核对"):
             issue = {"tag": tag, "severity": "P1", "startSec": 1, "endSec": 2}
             self.assertFalse(processing._needs_automated_content_review({"issues": [issue]}))
-            for extra in ({"severity": "P0"}, {"audioSupported": True}, {"ocrConfirmed": True}):
-                quality = {"issues": [{**issue, **extra}]}
-                self.assertTrue(processing._needs_automated_content_review(quality))
-                self.assertEqual(processing._automated_review_issues(quality), quality["issues"])
-        self.assertTrue(processing._needs_automated_content_review({"tailGapSec": 8, "issues": []}))
+            self.assertEqual(processing._automated_review_issues({"issues": [issue]}), [])
+            for evidence in ({"audioSupported": True}, {"ocrConfirmed": True}):
+                advisory = {**issue, **evidence}
+                quality = {"issues": [advisory]}
+                self.assertFalse(processing._needs_automated_content_review(quality))
+                self.assertEqual(processing._automated_review_issues(quality), [])
+                self.assertIn(advisory, quality["issues"])
+            blocking = {**issue, "severity": "P0"}
+            quality = {"issues": [blocking]}
+            self.assertTrue(processing._needs_automated_content_review(quality))
+            self.assertEqual(processing._automated_review_issues(quality), [blocking])
+        self.assertFalse(processing._needs_automated_content_review({"tailGapSec": 8, "issues": []}))
 
     def test_cost_estimates_follow_model_and_input_tier_and_provider_cost_wins(self):
         with (patch.object(providers, "ARK_INPUT_TOKEN_PRICE_RMB_PER_MILLION", 0),

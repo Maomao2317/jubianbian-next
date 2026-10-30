@@ -14,13 +14,16 @@ from typing import Any, Callable
 
 from .config import (
     POINTS_PER_MINUTE,
+    POINTS_PER_YUAN,
     ARK_API_KEY,
     ARK_API_KEYS,
     ARK_FALLBACK_ON_ERROR,
     ARK_LITE_MODEL,
+    ARK_MIN_GROSS_MARGIN_RATIO,
     ARK_MODEL,
     ARK_MAX_IN_FLIGHT,
     ARK_ROUTING_MODE,
+    ARK_TURBO_COST_SAFETY_FACTOR,
     ARK_TURBO_MODEL,
     MAX_DURATION_SECONDS,
     OPENAI_API_KEY,
@@ -71,12 +74,12 @@ async def _run_model_call(function: Callable[..., Any], *args: Any, **kwargs: An
 
 
 def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> dict[str, Any]:
-    """Choose Lite/Turbo before the video call using only deterministic signals.
+    """Choose the initial model and retain deterministic routing diagnostics.
 
-    The route is deliberately conservative: missing audio or visual anchors
-    increases the score because the model has less independent evidence to
-    work with.  The result is stored with the task so cost and quality can be
-    compared later without inferring the chosen model from environment state.
+    Production defaults to ``lite_first`` so every normal task gets the
+    fastest, lowest-cost draft. Complexity signals are still recorded for
+    audit and can drive the legacy ``complexity`` mode, while P0 quality gates
+    decide whether a bounded corrective call is needed after the first draft.
     """
     duration = max(0.0, float(duration_sec or 0))
     score = 0
@@ -135,9 +138,9 @@ def select_ark_route(duration_sec: float, evidence: dict[str, Any] | None) -> di
     if mode in {"turbo", "turbo_only"}:
         use_turbo = True
         reasons.append("routing_mode=turbo")
-    elif mode in {"lite", "lite_only"}:
+    elif mode in {"lite", "lite_only", "lite_first"}:
         use_turbo = False
-        reasons.append("routing_mode=lite")
+        reasons.append("routing_mode=lite_first" if mode == "lite_first" else "routing_mode=lite")
     else:
         use_turbo = score >= 2
     selected_model = (ARK_TURBO_MODEL if use_turbo else ARK_LITE_MODEL).strip() or ARK_MODEL
@@ -210,16 +213,152 @@ def _merge_usage(*records: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _row_number(row: Any, key: str, default: float = 0.0) -> float:
+    try:
+        value = row[key]
+    except (KeyError, TypeError, IndexError):
+        value = None
+    return float(value) if isinstance(value, (int, float)) else default
+
+
+def _is_turbo_model(model: Any) -> bool:
+    return "turbo" in str(model or "").casefold()
+
+
+def _usage_has_paid_call(usage: Any) -> bool:
+    if not isinstance(usage, dict):
+        return False
+    if any(isinstance(usage.get(key), (int, float)) and usage.get(key) > 0
+           for key in ("input_tokens", "output_tokens", "total_tokens", "api_cost_rmb")):
+        return True
+    return any(isinstance(call, dict) for call in (usage.get("calls") or []))
+
+
+def _quality_call_budget(
+    row: Any,
+    duration: float,
+    scope_seconds: float,
+    usage: dict[str, Any],
+    model: str,
+) -> dict[str, Any]:
+    """Admit a corrective model call only while the task keeps its margin.
+
+    The previous call's token counts are repriced for the requested model. A
+    duration floor covers short prompts and provider accounting gaps, then a
+    safety factor is applied. This guard does not replace final accounting.
+    """
+    billed_minutes = _row_number(row, "credits_used")
+    if billed_minutes <= 0:
+        billed_minutes = max(1.0, (max(0.0, duration) + 59.999) // 60)
+    revenue = billed_minutes * POINTS_PER_MINUTE / POINTS_PER_YUAN
+    current_cost = max(0.0, float(usage.get("api_cost_rmb") or 0))
+    whole_duration = max(1.0, float(duration or 0))
+    scope = max(1.0, min(whole_duration, float(scope_seconds or whole_duration)))
+    scale = min(1.0, max(0.1, scope / whole_duration))
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    token_estimate = 0.0
+    turbo = _is_turbo_model(model)
+    input_price, output_price = (3.0, 15.0) if turbo else (0.8, 2.7)
+    if isinstance(input_tokens, (int, float)) or isinstance(output_tokens, (int, float)):
+        token_estimate = (
+            max(0.0, float(input_tokens or 0)) * input_price
+            + max(0.0, float(output_tokens or 0)) * output_price
+        ) / 1_000_000 * scale
+    # Turbo video calls have a materially higher floor. Lite corrections are
+    # intentionally tried first so a short task never needs a loss-making
+    # Turbo call just to fix a small, well-localised issue.
+    per_minute_floor = 0.18 if turbo else 0.06
+    conservative_floor = per_minute_floor * max(0.5, scope / 60.0)
+    estimated_call = max(token_estimate, conservative_floor) * ARK_TURBO_COST_SAFETY_FACTOR
+    cost_ceiling = revenue * (1.0 - ARK_MIN_GROSS_MARGIN_RATIO)
+    projected_cost = current_cost + estimated_call
+    allowed = projected_cost <= cost_ceiling
+    return {
+        "allowed": allowed,
+        "revenueRmb": round(revenue, 6),
+        "currentCostRmb": round(current_cost, 6),
+        "model": model,
+        "tier": "turbo" if turbo else "lite",
+        "estimatedCallCostRmb": round(estimated_call, 6),
+        "projectedCostRmb": round(projected_cost, 6),
+        "costCeilingRmb": round(cost_ceiling, 6),
+        "minimumGrossMargin": ARK_MIN_GROSS_MARGIN_RATIO,
+        "scopeSeconds": round(scope, 3),
+        "reason": "within_margin" if allowed else "minimum_margin_would_be_breached",
+    }
+
+
+def _turbo_upgrade_budget(
+    row: Any,
+    duration: float,
+    scope_seconds: float,
+    usage: dict[str, Any],
+) -> dict[str, Any]:
+    """Compatibility wrapper for callers and diagnostics that name Turbo."""
+    return _quality_call_budget(
+        row, duration, scope_seconds, usage, ARK_TURBO_MODEL.strip() or ARK_MODEL
+    )
+
+
+def _quality_failure(
+    message: str,
+    provider_code: str,
+    usage: dict[str, Any],
+    quality: dict[str, Any],
+    candidate: dict[str, Any] | None = None,
+) -> ArkError:
+    error = ArkError(message, provider_code=provider_code)
+    error.usage = dict(usage)
+    error.quality = dict(quality)
+    if candidate is not None:
+        error.candidate = candidate
+    return error
+
+
+def _is_quality_gate_failure(error: BaseException) -> bool:
+    """Separate non-deliverable model output from infrastructure failures.
+
+    Quality failures keep their spend and candidate for auditing. Upload,
+    account and other infrastructure failures retain the existing refund
+    policy because they never produced a usable automatic result.
+    """
+    return str(getattr(error, "provider_code", "") or "") in {
+        "empty_screenplay",
+        "content_repair_incomplete",
+        "quality_budget_guard",
+        "quality_upgrade_exhausted",
+    }
+
+
+def _merge_content_repair_metadata(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the audit trail when a Lite repair is followed by one Turbo repair."""
+    if not previous:
+        return current
+    merged = dict(current)
+    for key in ("requestedRanges", "attemptedRanges", "completedRanges", "errors", "passes"):
+        merged[key] = [*(previous.get(key) or []), *(current.get(key) or [])]
+    merged["models"] = [
+        *(previous.get("models") or ([previous.get("model")] if previous.get("model") else [])),
+        *(current.get("models") or ([current.get("model")] if current.get("model") else [])),
+    ]
+    return merged
+
+
 async def repair_content_gaps(
     path: Path, title: str, duration: float, script: dict[str, Any],
     evidence: dict[str, Any], route: dict[str, Any], *, cache: RecognitionCache | None = None,
     stop_event: asyncio.Event | None = None, task_attempt: int = 0,
+    model: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Run two bounded passes over the actual remaining content gaps.
+    """Run one consolidated repair over all measured content gaps.
 
-    Encoded clips are reused, while each pass and task retry receives a fresh
-    model checkpoint. A range is complete only when it no longer overlaps a
-    measured gap; returning some blocks alone is insufficient.
+    The caller chooses Lite or Turbo. Consolidating disjoint windows may create
+    a longer clip, but it prevents every gap from becoming a separate paid
+    request. A later tier may retry only the still-missing range.
     """
     from copy import deepcopy
     from .content_coverage import normalize_additive_repair
@@ -228,7 +367,7 @@ async def repair_content_gaps(
     evidence = {**evidence, "durationSec": duration}
     initial_windows = repair_windows(content_gaps(script, duration))
     provider = route.get("provider", VIDEO_PROVIDER)
-    model = GLM_MODEL if provider == "glm" else (ARK_TURBO_MODEL.strip() or ARK_MODEL)
+    selected_model = model or (GLM_MODEL if provider == "glm" else (ARK_TURBO_MODEL.strip() or ARK_MODEL))
     recognize_range = glm_recognize_range if provider == "glm" else ark_recognize_range
     metadata: dict[str, Any] = {
         "requestedRanges": initial_windows,
@@ -238,29 +377,18 @@ async def repair_content_gaps(
         "passes": [],
     }
     usage: dict[str, Any] = {}
-    abort = False
-    for repair_pass in range(2):
-        windows = repair_windows(content_gaps(script, duration))
-        if not windows or abort:
-            break
-        pass_record: dict[str, Any] = {
-            "pass": repair_pass + 1,
-            "requestedRanges": windows,
-            "attempts": [],
+    if initial_windows:
+        window = {
+            "startSec": min(item["startSec"] for item in initial_windows),
+            "endSec": max(item["endSec"] for item in initial_windows),
         }
+        pass_record: dict[str, Any] = {"pass": 1, "requestedRanges": initial_windows, "attempts": []}
         metadata["passes"].append(pass_record)
-        for window in windows:
-            if stop_event is not None and stop_event.is_set():
-                stopped = {
-                    **window,
-                    "pass": repair_pass + 1,
-                    "error": "本批修订已停止，未发起新调用",
-                    "balanceError": False,
-                }
-                metadata["errors"].append(stopped)
-                pass_record["attempts"].append(stopped)
-                abort = True
-                break
+        if stop_event is not None and stop_event.is_set():
+            stopped = {**window, "pass": 1, "error": "本批修订已停止，未发起新调用", "balanceError": False}
+            metadata["errors"].append(stopped)
+            pass_record["attempts"].append(stopped)
+        else:
             cast = deepcopy(evidence.get("batchCharacterContext") or {})
             profiles = cast.setdefault("characterProfiles", [])
             names = {profile.get("name") for profile in profiles}
@@ -269,12 +397,8 @@ async def repair_content_gaps(
                 for profile in script.get("characterProfiles") or []
                 if profile.get("name") not in names
             )
-            generation = max(0, int(task_attempt)) * 2 + repair_pass
-            attempt_record: dict[str, Any] = {
-                **window,
-                "pass": repair_pass + 1,
-                "generation": generation,
-            }
+            generation = max(0, int(task_attempt))
+            attempt_record: dict[str, Any] = {**window, "pass": 1, "generation": generation}
             metadata["attemptedRanges"].append(attempt_record)
             pass_record["attempts"].append(attempt_record)
             try:
@@ -284,7 +408,7 @@ async def repair_content_gaps(
                     title,
                     duration,
                     {**evidence, "batchCharacterContext": cast},
-                    model,
+                    selected_model,
                     window,
                     cache=cache,
                     repair_attempt=generation,
@@ -292,34 +416,23 @@ async def repair_content_gaps(
                 usage = _merge_usage(usage, clip_usage)
                 candidate, added = merge_gap_repair(script, clip, window, offset, clip_duration)
                 if not added:
-                    raise ArkError("该缺段没有返回可定位的正文，保留原稿等待自动重试")
+                    raise ArkError("该缺段没有返回可定位的正文，已保留原稿并停止追加付费调用")
                 script = normalize_additive_repair(script, candidate, title)
                 remaining = content_gaps(script, duration)
                 overlaps = [
-                    gap
-                    for gap in remaining
-                    if gap["startSec"] < window["endSec"]
-                    and gap["endSec"] > window["startSec"]
+                    gap for gap in remaining
+                    if gap["startSec"] < window["endSec"] and gap["endSec"] > window["startSec"]
                 ]
-                attempt_record.update(
-                    addedBlocks=added,
-                    resolved=not overlaps,
-                    remainingRanges=overlaps,
-                )
+                attempt_record.update(addedBlocks=added, resolved=not overlaps, remainingRanges=overlaps)
                 if not overlaps:
-                    metadata["completedRanges"].append(
-                        {**window, "pass": repair_pass + 1, "addedBlocks": added}
-                    )
+                    metadata["completedRanges"].append({**window, "pass": 1, "addedBlocks": added})
                 if cache:
-                    cache.save(
-                        "content_repair_candidate",
-                        {"script": script, "metadata": metadata},
-                    )
+                    cache.save("content_repair_candidate", {"script": script, "metadata": metadata})
             except Exception as exc:
                 usage = _merge_usage(usage, getattr(exc, "usage", {}))
                 failure = {
                     **window,
-                    "pass": repair_pass + 1,
+                    "pass": 1,
                     "generation": generation,
                     "error": safe_error_text(exc),
                     "balanceError": is_account_balance_error(exc),
@@ -329,18 +442,11 @@ async def repair_content_gaps(
                 attempt_record.update(failure)
                 metadata["errors"].append(failure)
                 logger.warning(
-                    "content_repair_failed title=%s pass=%s start=%.1f end=%.1f error=%s",
-                    title,
-                    repair_pass + 1,
-                    window["startSec"],
-                    window["endSec"],
-                    safe_error_text(exc),
+                    "content_repair_failed title=%s pass=1 start=%.1f end=%.1f error=%s",
+                    title, window["startSec"], window["endSec"], safe_error_text(exc),
                 )
-                if is_account_balance_error(exc):
-                    if stop_event is not None:
-                        stop_event.set()
-                    abort = True
-                    break
+                if is_account_balance_error(exc) and stop_event is not None:
+                    stop_event.set()
     quality, _approved, _blocking = _evaluate_quality(
         script,
         provider,
@@ -349,7 +455,7 @@ async def repair_content_gaps(
         recover_evidence=False,
     )
     metadata["remainingRanges"] = content_gaps(script, duration)
-    metadata["model"] = model
+    metadata["model"] = selected_model
     quality["contentRepair"] = metadata
     if cache:
         cache.save(
@@ -521,43 +627,14 @@ def _automated_review_context(
 
 
 def _needs_automated_content_review(quality: dict[str, Any]) -> bool:
-    """Review source-fidelity risks, not every advisory screenplay heuristic."""
-    tail_gap = quality.get("tailGapSec")
-    if isinstance(tail_gap, (int, float)) and tail_gap >= 8:
-        return True
-    if not quality_gate(quality)[0]:
-        return True
-    return bool(_automated_review_issues(quality))
+    """Spend an upgrade only for a delivery-blocking source-fidelity issue."""
+    return not quality_gate(quality)[0]
 
 
 def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
-    issues = [issue for issue in (quality.get("issues") or []) if isinstance(issue, dict)]
-    blocking = quality_gate(quality)[1]
-    if blocking:
-        # Repair delivery blockers first. If the patch still has room, include
-        # at most four subtitle-backed missing beats in the same review call.
-        # Uncorroborated ASR disagreements can alter correct words, so they
-        # stay advisory and never displace a blocking issue.
-        if len(blocking) >= 40:
-            return blocking
-        corroborated = [issue for issue in issues if issue.get("severity") == "P1" and (
-            (issue.get("tag") == "疑似漏台词片段" and issue.get("ocrConfirmed") is True)
-            or (issue.get("tag") == "字幕对白遗漏" and issue.get("audioSupported") is True)
-        )]
-        return blocking + corroborated[:min(4, 40 - len(blocking))]
-    critical_tags = {
-        "台词归属错", "漏台词", "OS漏标", "OS/VO混淆", "音频对白不一致",
-        "音频对白需核对", "疑似漏台词片段", "正文混入校对备注", "事实臆造",
-        "疑似漏画面文字片段", "字幕对白遗漏", "人物身份连续性",
-    }
-    return [
-        issue
-        for issue in issues
-        if str(issue.get("tag") or "") in critical_tags
-        and (str(issue.get("severity") or "").upper() == "P0"
-             or issue.get("tag") not in {"疑似漏台词片段", "疑似漏画面文字片段", "音频对白需核对"}
-             or issue.get("ocrConfirmed") is True or issue.get("audioSupported") is True)
-    ]
+    # P1/P2 findings remain visible for editors but never justify an extra
+    # Turbo bill.  quality_gate is the single definition of a delivery blocker.
+    return quality_gate(quality)[1]
 
 
 def _is_lite_model_unavailable(error: ArkError) -> bool:
@@ -569,7 +646,16 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
-    if getattr(error, "provider_code", "") in {"empty_screenplay", "glm_configuration", "provider_configuration", "glm_api_error"}:
+    if getattr(error, "provider_code", "") in {
+        "empty_screenplay", "glm_configuration", "provider_configuration", "glm_api_error",
+        "content_repair_incomplete", "quality_budget_guard", "quality_upgrade_exhausted",
+        "profit_budget_guard",
+    }:
+        return True
+    # Once a provider has accepted a paid generation, replaying the whole task
+    # can only increase cost and may repeat the same quality failure. Preserve
+    # the usage for accounting and require an explicit human retry instead.
+    if _usage_has_paid_call(getattr(error, "usage", None)):
         return True
     if is_account_balance_error(error):
         return True
@@ -614,8 +700,12 @@ def _task_error_message(error: BaseException) -> str:
         for marker in ("exceeds the limit", "exceeds limit", "input video", "video size", "request entity too large", "50 mib", "50 mb")
     ):
         return "视频文件超过方舟单次输入上限，已停止无效重试；请重新处理（系统将先压缩大视频再提交）。"
-    if _is_non_retryable_provider_error(error):
+    if _is_non_retryable_provider_error(error) and any(
+        marker in text for marker in ("modelnotopen", "model_not_open", "not active", "未激活")
+    ):
         return "当前 Lite 模型未启用，已停止重复重试；请启用该模型或改用 Turbo 后再识别。"
+    if _is_non_retryable_provider_error(error):
+        return safe_error_text(error)
     if any(marker in text for marker in ("timed out", "timeout", "超时")):
         return ("智谱" if VIDEO_PROVIDER == "glm" else "方舟") + "识别暂时超时，自动恢复与重试均未成功；请稍后重新识别。"
     return safe_error_text(error)
@@ -791,6 +881,20 @@ async def _run_recognizer_with_media(
             ark_error = exc
             turbo_model = ARK_TURBO_MODEL.strip() or ARK_MODEL
             if not is_glm and route["model"] == ARK_LITE_MODEL.strip() and turbo_model and turbo_model != route["model"] and _is_lite_model_unavailable(exc):
+                failure_usage = getattr(exc, "usage", {})
+                if not isinstance(failure_usage, dict):
+                    failure_usage = {}
+                fallback_budget = _quality_call_budget(
+                    row, duration, duration, failure_usage, turbo_model
+                )
+                if not fallback_budget["allowed"]:
+                    budget_error = ArkError(
+                        "Lite 模型当前不可用，Turbo 回退会低于最低毛利率，已停止额外调用。",
+                        provider_code="profit_budget_guard",
+                    )
+                    budget_error.usage = dict(failure_usage)
+                    budget_error.profit_guard = fallback_budget
+                    raise budget_error from exc
                 logger.warning(
                     "provider_fallback provider=ark reason=lite_model_unavailable task_id=%s from_model=%s to_model=%s",
                     row["id"],
@@ -843,45 +947,111 @@ async def _run_recognizer_with_media(
                 "unresolvedIssues": blocking,
                 "reviewScope": None,
             }
+            turbo_upgrade_used = not is_glm and _is_turbo_model(initial_model)
+            post_turbo_lite_used = False
 
             turbo_model = GLM_MODEL if is_glm else (ARK_TURBO_MODEL.strip() or ARK_MODEL)
             has_content_gaps = bool(quality.get("contentGapRanges"))
             if has_content_gaps and turbo_model and route.get("mode") not in {"lite", "lite_only"}:
-                mark_task_stage(row["id"], status="running", stage="repairing", progress_percent=72,
-                                message="正在核对并补全缺失片段")
                 row_keys = row.keys() if hasattr(row, "keys") else ()
                 task_attempt = int(row["attempts"] or 0) if "attempts" in row_keys else 0
-                script, quality, repair_usage = await repair_content_gaps(
-                    path, row["title"], duration, script, evidence, route,
-                    cache=prepared_video.get("_cache"), task_attempt=task_attempt,
-                )
-                final_usage = _merge_usage(final_usage, repair_usage)
-                final_model = turbo_model
-                repair_metadata = quality["contentRepair"]
-                attempted_ranges = repair_metadata.get("attemptedRanges")
-                if attempted_ranges is None:
-                    # Keep compatibility with persisted candidates and test
-                    # doubles created before attemptedRanges was introduced.
-                    attempted_ranges = [
-                        *repair_metadata.get("completedRanges", []),
-                        *repair_metadata.get("errors", []),
-                    ]
-                review_metadata.update({"reviewModel": turbo_model,
-                                        "attemptCount": 1 + len(attempted_ranges),
-                                        "reviewScope": "missing_video_segments",
-                                        "unresolvedIssues": quality.get("blockingIssues", [])})
+                if is_glm:
+                    repair_models = [turbo_model]
+                elif route.get("mode") == "lite_first" and not _is_turbo_model(initial_model):
+                    # Keep normal traffic Lite-dominant. A hard gap may use a
+                    # single Turbo pass, followed by one cheaper Lite cleanup
+                    # over only the still-missing range.
+                    repair_models = [initial_model]
+                    if turbo_model != initial_model:
+                        repair_models.extend((turbo_model, initial_model))
+                elif not turbo_upgrade_used:
+                    repair_models = [turbo_model]
+                else:
+                    repair_models = []
+                repair_metadata: dict[str, Any] | None = None
+                profit_guards: list[dict[str, Any]] = []
+                for repair_index, repair_model in enumerate(repair_models):
+                    if not quality.get("contentGapRanges"):
+                        break
+                    if not is_glm and _is_turbo_model(repair_model) and turbo_upgrade_used:
+                        continue
+                    gap_ranges = quality.get("contentGapRanges") or []
+                    repair_scope = (
+                        max(float(item["endSec"]) for item in gap_ranges)
+                        - min(float(item["startSec"]) for item in gap_ranges)
+                        if gap_ranges else duration
+                    )
+                    if not is_glm:
+                        budget = _quality_call_budget(
+                            row, duration, repair_scope, final_usage, repair_model
+                        )
+                        profit_guards.append(budget)
+                        if not budget["allowed"]:
+                            # A rejected Turbo estimate can still leave room
+                            # for the following Lite cleanup. If Lite itself
+                            # is unaffordable, no later tier can be admitted.
+                            if _is_turbo_model(repair_model):
+                                continue
+                            break
+                    if not is_glm and turbo_upgrade_used and not _is_turbo_model(repair_model):
+                        if post_turbo_lite_used:
+                            break
+                        # Count the attempt before entering provider code. A
+                        # failed call must not open a second post-Turbo slot.
+                        post_turbo_lite_used = True
+                    if not is_glm and _is_turbo_model(repair_model):
+                        # Turbo is also attempt-limited, including provider
+                        # failures, so no later branch can silently retry it.
+                        turbo_upgrade_used = True
+                    mark_task_stage(
+                        row["id"], status="running", stage="repairing", progress_percent=72,
+                        message="正在用 Lite 优先核对并补全缺失片段",
+                    )
+                    previous_metadata = repair_metadata
+                    script, quality, repair_usage = await repair_content_gaps(
+                        path, row["title"], duration, script, evidence, route,
+                        cache=prepared_video.get("_cache"),
+                        task_attempt=task_attempt + repair_index,
+                        model=repair_model,
+                    )
+                    repair_metadata = _merge_content_repair_metadata(
+                        previous_metadata, quality["contentRepair"]
+                    )
+                    quality["contentRepair"] = repair_metadata
+                    final_usage = _merge_usage(final_usage, repair_usage)
+                    final_model = repair_model
+                if profit_guards:
+                    quality["profitGuards"] = profit_guards
+                    review_metadata["profitGuards"] = profit_guards
+                repair_metadata = quality.get("contentRepair") or {
+                    "attemptedRanges": [], "errors": [],
+                    "remainingRanges": quality.get("contentGapRanges") or [],
+                }
+                attempted_ranges = repair_metadata.get("attemptedRanges") or []
+                review_metadata.update({
+                    "reviewModel": final_model if attempted_ranges else None,
+                    "attemptCount": 1 + len(attempted_ranges),
+                    "reviewScope": "missing_video_segments",
+                    "unresolvedIssues": quality.get("blockingIssues", []),
+                })
                 if repair_metadata["remainingRanges"]:
                     balance_failure = next((error for error in repair_metadata["errors"]
                                             if error.get("balanceError")), None)
                     if balance_failure:
-                        raise ArkError(
+                        error = ArkError(
                             balance_failure["error"],
                             status_code=balance_failure.get("statusCode"),
                             provider_code=balance_failure.get("providerCode") or "InsufficientBalance",
                         )
-                    raise ArkError(
-                        "视频中仍有未识别片段，系统将自动重新处理，避免交付残缺剧本。",
-                        provider_code="content_repair_incomplete",
+                        error.usage = dict(final_usage)
+                        error.quality = dict(quality)
+                        raise error
+                    raise _quality_failure(
+                        "视频中仍有未识别片段，自动质量修复已用完可盈利预算，残缺结果不会交付。",
+                        "content_repair_incomplete",
+                        {**final_usage, "provider": provider, "model": final_model},
+                        quality,
+                        script,
                     )
             identity_review_needed = any(
                 issue.get("tag") == "人物身份连续性" and issue.get("severity") == "P0"
@@ -892,7 +1062,10 @@ async def _run_recognizer_with_media(
             # already selected model so the correction is written into the
             # screenplay instead of being left as a user-facing TODO.
             review_model = (
-                route["model"] if route.get("mode") in {"lite", "lite_only"} and identity_review_needed
+                route["model"] if (
+                    route.get("mode") == "lite_first"
+                    or route.get("mode") in {"lite", "lite_only"} and identity_review_needed
+                )
                 else turbo_model
             )
             may_auto_review = (
@@ -900,13 +1073,44 @@ async def _run_recognizer_with_media(
                 and (not has_content_gaps or not quality_gate(quality)[0])
                 and not any(error.get("balanceError") for error in quality.get("contentRepair", {}).get("errors", []))
                 and (route.get("mode") not in {"lite", "lite_only"} or identity_review_needed)
+                and (
+                    is_glm
+                    or not turbo_upgrade_used
+                    or review_model == route["model"]
+                    and not _is_turbo_model(review_model)
+                    and not post_turbo_lite_used
+                )
                 and bool(review_model)
             )
+            review_issues: list[dict[str, Any]] = []
+            context: dict[str, Any] | None = None
+            if may_auto_review:
+                review_issues = _automated_review_issues(quality)
+                context = _automated_review_context(script, review_issues, quality=quality)
+                if not is_glm:
+                    ranges = context.get("ranges") or []
+                    review_scope = duration if context.get("scope", "").startswith("full_video") else sum(
+                        max(0.0, float(item.get("endSec") or 0) - float(item.get("startSec") or 0))
+                        for item in ranges
+                    ) or duration
+                    budget = _quality_call_budget(
+                        row, duration, review_scope, final_usage, review_model
+                    )
+                    quality["profitGuard"] = budget
+                    review_metadata["profitGuard"] = budget
+                    if not budget["allowed"]:
+                        may_auto_review = False
+                        review_metadata.update({
+                            "reviewModel": None,
+                            "reviewScope": context["scope"],
+                            "triggeringIssues": review_issues,
+                            "unresolvedIssues": review_issues,
+                            "skippedReason": "minimum_margin_would_be_breached",
+                        })
             if may_auto_review:
                 mark_task_stage(row["id"], status="running", stage="reviewing", progress_percent=78,
                                 message="正在复核台词和画面内容")
-                review_issues = _automated_review_issues(quality)
-                context = _automated_review_context(script, review_issues, quality=quality)
+                assert context is not None
                 review_metadata.update({
                     "reviewModel": review_model,
                     "attemptCount": review_metadata["attemptCount"] + 1,
@@ -922,6 +1126,10 @@ async def _run_recognizer_with_media(
                     len(review_issues),
                 )
                 try:
+                    if not is_glm and turbo_upgrade_used and not _is_turbo_model(review_model):
+                        post_turbo_lite_used = True
+                    if not is_glm and _is_turbo_model(review_model):
+                        turbo_upgrade_used = True
                     reviewed_script, reviewed_usage = await _run_model_call(
                         recognize,
                         path,
@@ -976,7 +1184,7 @@ async def _run_recognizer_with_media(
                     final_usage = _merge_usage(final_usage, getattr(review_exc, "usage", {}))
                     review_metadata["reviewError"] = safe_error_text(review_exc)
                     quality["warning"] = ("智谱自动复核失败，已保留初稿并记录复核提示。" if is_glm else (
-                        "Turbo 自动复核失败，已保留 Lite 草稿并等待用户复核。" if not quality_gate(quality)[0]
+                        "自动复核失败，候选稿已保留并继续由质量门禁自动处理。" if not quality_gate(quality)[0]
                         else "Turbo 自动复核失败，已保留通过 P0 门禁的 Lite 结果并记录提示。"))
                     logger.warning(
                         "provider_review_failed provider=%s task_id=%s error=%s",
@@ -984,6 +1192,187 @@ async def _run_recognizer_with_media(
                         row["id"],
                         safe_error_text(review_exc),
                     )
+
+            # Lite-first quality repair is intentionally a two-tier funnel:
+            # one focused Lite correction comes before the only permitted
+            # Turbo upgrade. This keeps normal batches Lite-dominant while
+            # still giving a hard P0 blocker the stronger model when margin
+            # remains.
+            needs_turbo_followup = (
+                not is_glm
+                and route.get("mode") == "lite_first"
+                and not turbo_upgrade_used
+                and not quality.get("contentGapRanges")
+                and not quality_gate(quality)[0]
+                and bool(turbo_model)
+                and turbo_model != route["model"]
+            )
+            if needs_turbo_followup:
+                turbo_issues = _automated_review_issues(quality)
+                turbo_context = _automated_review_context(script, turbo_issues, quality=quality)
+                ranges = turbo_context.get("ranges") or []
+                turbo_scope = duration if turbo_context.get("scope", "").startswith("full_video") else sum(
+                    max(0.0, float(item.get("endSec") or 0) - float(item.get("startSec") or 0))
+                    for item in ranges
+                ) or duration
+                turbo_budget = _quality_call_budget(
+                    row, duration, turbo_scope, final_usage, turbo_model
+                )
+                review_metadata["turboProfitGuard"] = turbo_budget
+                quality["turboProfitGuard"] = turbo_budget
+                if turbo_budget["allowed"]:
+                    mark_task_stage(
+                        row["id"], status="running", stage="reviewing", progress_percent=80,
+                        message="Lite 定向修复后仍有质量阻断，正在进行一次 Turbo 复核",
+                    )
+                    review_metadata.update({
+                        "reviewModel": turbo_model,
+                        "attemptCount": review_metadata["attemptCount"] + 1,
+                        "reviewScope": turbo_context["scope"],
+                        "triggeringIssues": turbo_issues,
+                    })
+                    try:
+                        turbo_upgrade_used = True
+                        turbo_script, turbo_usage = await _run_model_call(
+                            recognize,
+                            path,
+                            row["title"],
+                            duration,
+                            evidence,
+                            turbo_model,
+                            review_context=turbo_context,
+                            prepared_video=prepared_video,
+                        )
+                        final_usage = _merge_usage(final_usage, turbo_usage)
+                        turbo_route = {
+                            **route,
+                            "model": turbo_model,
+                            "band": "turbo_review",
+                            "reasons": [*route["reasons"], "lite_review_failed_turbo_review"],
+                        }
+                        turbo_script = normalize_script(turbo_script, row["title"])
+                        turbo_quality, _turbo_approved, _turbo_blocking = _evaluate_quality(
+                            turbo_script, provider, evidence, turbo_route
+                        )
+                        regression = _review_regression_reason(quality, turbo_quality)
+                        review_metadata["accepted"] = regression is None
+                        if regression:
+                            review_metadata["retainedDraftReason"] = regression
+                            review_metadata["unresolvedIssues"] = turbo_issues
+                        else:
+                            unresolved = _automated_review_issues(turbo_quality)
+                            unresolved_ids = {_issue_identity(issue) for issue in unresolved}
+                            review_metadata["resolvedIssues"] = [
+                                issue for issue in turbo_issues
+                                if _issue_identity(issue) not in unresolved_ids
+                            ]
+                            review_metadata["unresolvedIssues"] = unresolved
+                            if "contentRepair" in quality:
+                                turbo_quality["contentRepair"] = quality["contentRepair"]
+                            script = turbo_script
+                            quality = turbo_quality
+                            final_model = turbo_model
+                    except ArkError as turbo_exc:
+                        final_usage = _merge_usage(final_usage, getattr(turbo_exc, "usage", {}))
+                        review_metadata["turboReviewError"] = safe_error_text(turbo_exc)
+                        logger.warning(
+                            "provider_review_failed provider=%s task_id=%s model=%s error=%s",
+                            provider, row["id"], turbo_model, safe_error_text(turbo_exc),
+                        )
+                else:
+                    review_metadata["skippedReason"] = "minimum_margin_would_be_breached"
+
+            # If the one permitted Turbo upgrade improved the candidate but a
+            # P0 issue remains, spend at most one final Lite call on those
+            # issue ranges. This preserves Lite dominance and is cheaper and
+            # faster than replaying either the whole task or another Turbo.
+            needs_final_lite_cleanup = (
+                not is_glm
+                and route.get("mode") == "lite_first"
+                and turbo_upgrade_used
+                and _is_turbo_model(final_model)
+                and not quality.get("contentGapRanges")
+                and not quality_gate(quality)[0]
+                and bool(initial_model)
+                and not _is_turbo_model(initial_model)
+                and not post_turbo_lite_used
+            )
+            if needs_final_lite_cleanup:
+                cleanup_issues = _automated_review_issues(quality)
+                cleanup_context = _automated_review_context(script, cleanup_issues, quality=quality)
+                cleanup_ranges = cleanup_context.get("ranges") or []
+                cleanup_scope = (
+                    duration if cleanup_context.get("scope", "").startswith("full_video") else sum(
+                        max(0.0, float(item.get("endSec") or 0) - float(item.get("startSec") or 0))
+                        for item in cleanup_ranges
+                    ) or duration
+                )
+                cleanup_budget = _quality_call_budget(
+                    row, duration, cleanup_scope, final_usage, initial_model
+                )
+                review_metadata["finalLiteProfitGuard"] = cleanup_budget
+                quality["finalLiteProfitGuard"] = cleanup_budget
+                if cleanup_budget["allowed"]:
+                    mark_task_stage(
+                        row["id"], status="running", stage="repairing", progress_percent=84,
+                        message="Turbo 修复后仍有局部质量阻断，正在进行最后一次 Lite 清理",
+                    )
+                    review_metadata.update({
+                        "finalCleanupModel": initial_model,
+                        "attemptCount": review_metadata["attemptCount"] + 1,
+                        "reviewScope": cleanup_context["scope"],
+                        "triggeringIssues": cleanup_issues,
+                    })
+                    try:
+                        post_turbo_lite_used = True
+                        cleanup_script, cleanup_usage = await _run_model_call(
+                            recognize,
+                            path,
+                            row["title"],
+                            duration,
+                            evidence,
+                            initial_model,
+                            review_context=cleanup_context,
+                            prepared_video=prepared_video,
+                        )
+                        final_usage = _merge_usage(final_usage, cleanup_usage)
+                        cleanup_route = {
+                            **route,
+                            "model": initial_model,
+                            "band": "lite_final_cleanup",
+                            "reasons": [*route["reasons"], "turbo_review_failed_lite_cleanup"],
+                        }
+                        cleanup_script = normalize_script(cleanup_script, row["title"])
+                        cleanup_quality, _cleanup_approved, _cleanup_blocking = _evaluate_quality(
+                            cleanup_script, provider, evidence, cleanup_route
+                        )
+                        regression = _review_regression_reason(quality, cleanup_quality)
+                        review_metadata["finalCleanupAccepted"] = regression is None
+                        if regression:
+                            review_metadata["finalCleanupRetainedReason"] = regression
+                            review_metadata["unresolvedIssues"] = cleanup_issues
+                        else:
+                            unresolved = _automated_review_issues(cleanup_quality)
+                            unresolved_ids = {_issue_identity(issue) for issue in unresolved}
+                            review_metadata["resolvedIssues"] = [
+                                issue for issue in cleanup_issues
+                                if _issue_identity(issue) not in unresolved_ids
+                            ]
+                            review_metadata["unresolvedIssues"] = unresolved
+                            if "contentRepair" in quality:
+                                cleanup_quality["contentRepair"] = quality["contentRepair"]
+                            script = cleanup_script
+                            quality = cleanup_quality
+                            final_model = initial_model
+                    except ArkError as cleanup_exc:
+                        final_usage = _merge_usage(final_usage, getattr(cleanup_exc, "usage", {}))
+                        review_metadata["finalCleanupError"] = safe_error_text(cleanup_exc)
+                        logger.warning(
+                            "provider_review_failed provider=%s task_id=%s model=%s error=%s",
+                            provider, row["id"], initial_model, safe_error_text(cleanup_exc),
+                        )
+                else:
+                    review_metadata["finalCleanupSkippedReason"] = "minimum_margin_would_be_breached"
 
             quality["automatedReview"] = review_metadata
             quality["providerUsage"] = final_usage
@@ -1078,12 +1467,13 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
-        # A successful provider response is not automatically a deliverable
-        # screenplay. P0 source-fidelity findings keep the generated script
-        # available for inspection but put the task behind the owner review
-        # gate. P1 editing hints stay visible without blocking delivery.
+        # A successful provider response is not automatically deliverable.
+        # P0 findings fail closed after the bounded automatic funnel: retain
+        # the candidate for audit, but never expose it as a finished result,
+        # never transfer it to manual review, and never issue a quality refund.
+        # P1 editing hints remain visible without blocking delivery.
         approved, blocking = quality_gate(quality)
-        quality["deliveryStatus"] = "approved" if approved else "review_required"
+        quality["deliveryStatus"] = "approved" if approved else "failed_quality_guard"
         quality["blockingIssues"] = blocking
         completed_recheck = has_pending_recheck(task_id)
         if completed_recheck:
@@ -1095,6 +1485,48 @@ async def process_task(task_id: str) -> None:
                 "previousVersionPreserved": True,
                 "userApprovalRequired": True,
             }
+        if not approved and not completed_recheck:
+            quality["automatedResolution"] = {
+                "status": "quality_blocked",
+                "manualReview": False,
+                "qualityRefund": False,
+            }
+            blocked_message = "自动质量门禁未通过，候选稿已留档但不会交付；未转人工、未触发质量退费"
+            update_task(
+                task_id,
+                status="failed",
+                stage="quality_blocked",
+                progress_percent=100,
+                result_json=json.dumps(script, ensure_ascii=False),
+                quality_json=json.dumps(quality, ensure_ascii=False),
+                evidence_json=evidence_json(evidence),
+                provider=usage.get("provider", "ark" if ARK_API_KEYS else "local-fallback"),
+                model=usage.get("model", ARK_MODEL if ARK_API_KEYS else None),
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                api_cost_rmb=usage.get("api_cost_rmb", 0),
+                error=blocked_message,
+                completed_at=now_iso(),
+            )
+            await asyncio.to_thread(discard_local_proxy, task_id)
+            record_task_event(
+                task_id,
+                "quality_blocked",
+                blocked_message,
+                status="failed",
+                stage="quality_blocked",
+                progress_percent=100,
+                duration_ms=elapsed_ms,
+            )
+            logger.warning(
+                "task_quality_blocked task_id=%s provider=%s duration_ms=%.1f blockers=%s",
+                task_id,
+                usage.get("provider", "unknown"),
+                elapsed_ms,
+                len(blocking),
+            )
+            return
         can_deliver = approved and not completed_recheck
         final_status = "done" if can_deliver else "review"
         final_stage = "done" if can_deliver else "review"
@@ -1159,7 +1591,11 @@ async def process_task(task_id: str) -> None:
             record_task_event(task_id, "retry", "处理失败，任务已自动重新排队", status="queued", stage="queued", progress_percent=4)
             logger.warning("task_retry_auto task_id=%s attempt=%s error=%s", task_id, attempts, safe_error_text(exc))
             return
-        message = f"处理失败：{_task_error_message(exc)}"
+        quality_failure = _is_quality_gate_failure(exc)
+        message = (
+            f"自动质量门禁未通过：{_task_error_message(exc)}；候选结果不会交付，未转人工、未触发质量退费"
+            if quality_failure else f"处理失败：{_task_error_message(exc)}"
+        )
         # Return the pre-charged minutes exactly once when a recognition fails.
         if has_pending_recheck(task_id):
             # A failed recheck must not replace or refund the already
@@ -1187,21 +1623,48 @@ async def process_task(task_id: str) -> None:
                 )
                 return
         charged = int(row["credits_used"] or 0)
-        if row["user_id"] and charged > 0:
+        if not quality_failure and row["user_id"] and charged > 0:
             _refund_task_once(task_id, row["user_id"], charged)
+        failure_usage = getattr(exc, "usage", {})
+        failure_quality = getattr(exc, "quality", {})
+        failure_candidate = getattr(exc, "candidate", None)
+        failure_accounting: dict[str, Any] = {}
+        if isinstance(failure_usage, dict) and _usage_has_paid_call(failure_usage):
+            failure_accounting = {
+                "provider": failure_usage.get("provider", "ark" if ARK_API_KEYS else None),
+                "model": failure_usage.get("model"),
+                "input_tokens": failure_usage.get("input_tokens"),
+                "output_tokens": failure_usage.get("output_tokens"),
+                "total_tokens": failure_usage.get("total_tokens"),
+                "api_cost_rmb": failure_usage.get("api_cost_rmb", 0),
+            }
+        if isinstance(failure_quality, dict) and failure_quality:
+            failure_quality["providerUsage"] = failure_usage
+            failure_quality["deliveryStatus"] = "failed_quality_guard" if quality_failure else "failed"
+            if quality_failure:
+                failure_quality["automatedResolution"] = {
+                    "status": "quality_blocked",
+                    "manualReview": False,
+                    "qualityRefund": False,
+                }
+            failure_accounting["quality_json"] = json.dumps(failure_quality, ensure_ascii=False)
+        if isinstance(failure_candidate, dict):
+            failure_accounting["result_json"] = json.dumps(failure_candidate, ensure_ascii=False)
         update_task(
             task_id,
             status="failed",
-            stage="failed",
+            stage="quality_blocked" if quality_failure else "failed",
             progress_percent=100,
             error=message,
+            completed_at=now_iso(),
+            **failure_accounting,
         )
         record_task_event(
             task_id,
-            "failed",
+            "quality_blocked" if quality_failure else "failed",
             message,
             status="failed",
-            stage="failed",
+            stage="quality_blocked" if quality_failure else "failed",
             progress_percent=100,
             duration_ms=(time.perf_counter() - started) * 1000,
         )

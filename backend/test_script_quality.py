@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -825,6 +826,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertTrue(any(issue["tag"] == "独立音频转写缺失" for issue in quality["issues"]))
         self.assertTrue(quality_gate(quality)[0])
 
+    @patch.object(processing, "ARK_ROUTING_MODE", "complexity")
     def test_ark_route_uses_turbo_for_complex_or_evidence_poor_video(self):
         simple = select_ark_route(
             30,
@@ -912,6 +914,265 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         )
         self.assertEqual(short_without_audio["band"], "complex")
 
+    def test_lite_first_keeps_complex_video_on_lite_initially(self):
+        evidence = {
+            "sources": [
+                {"kind": "audio", "status": "unavailable", "items": []},
+                {"kind": "ocr", "status": "unavailable", "items": []},
+                {"kind": "keyframes", "status": "unavailable", "items": []},
+            ]
+        }
+        with (
+            patch.object(processing, "ARK_ROUTING_MODE", "lite_first"),
+            patch.object(processing, "ARK_LITE_MODEL", "lite"),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+        ):
+            route = select_ark_route(210, evidence)
+        self.assertEqual(route["model"], "lite")
+        self.assertEqual(route["band"], "simple")
+        self.assertGreaterEqual(route["score"], 2)
+        self.assertIn("routing_mode=lite_first", route["reasons"])
+
+    @staticmethod
+    def _funnel_evidence():
+        return {
+            "status": "available",
+            "summary": "test",
+            "durationSec": 30,
+            "sources": [
+                {"kind": "audio", "status": "available", "items": [
+                    {"type": "transcript_segment", "text": "你好", "startSec": 1, "endSec": 2}
+                ]},
+                {"kind": "ocr", "status": "available", "items": []},
+                {"kind": "keyframes", "status": "available", "items": [{"type": "keyframe"}]},
+            ],
+        }
+
+    @staticmethod
+    def _funnel_script(*, resolved: bool):
+        dialogue = {
+            "type": "dialogue",
+            "speaker": "甲" if resolved else "未知说话人",
+            "text": "你好",
+            "startSec": 1,
+            "endSec": 2,
+        }
+        if not resolved:
+            dialogue["uncertain"] = True
+        return {
+            "characters": ["甲"],
+            "scenes": [{
+                "heading": "1-1 日 内 客厅",
+                "location": "客厅",
+                "blocks": [
+                    {"type": "action", "text": "甲在客厅等候。", "startSec": 0, "endSec": 30},
+                    dialogue,
+                ],
+            }],
+        }
+
+    def test_lite_first_approved_draft_finishes_after_one_fast_call(self):
+        route = {"provider": "ark", "model": "lite", "mode": "lite_first",
+                 "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
+        row = {"id": "task-fast", "title": "测试", "credits_used": 1}
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(
+                processing,
+                "ark_recognize",
+                return_value=(self._funnel_script(resolved=True), {
+                    "total_tokens": 10, "api_cost_rmb": 0.02,
+                }),
+            ) as recognize,
+        ):
+            _script, quality, usage, _ = asyncio.run(processing._run_recognizer_with_media(
+                row, Path("unused"), 30, self._funnel_evidence(), route, {}, None,
+            ))
+        self.assertEqual(recognize.call_count, 1)
+        self.assertEqual([call.args[4] for call in recognize.call_args_list], ["lite"])
+        self.assertTrue(quality_gate(quality)[0])
+        self.assertEqual(quality["automatedReview"]["attemptCount"], 1)
+        self.assertEqual(usage["model"], "lite")
+
+    def test_lite_first_funnel_uses_two_lite_calls_before_one_turbo(self):
+        route = {"provider": "ark", "model": "lite", "mode": "lite_first",
+                 "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
+        row = {"id": "task-funnel", "title": "测试", "credits_used": 1}
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(processing, "ark_recognize", side_effect=[
+                (self._funnel_script(resolved=False), {"total_tokens": 10, "api_cost_rmb": 0.02}),
+                (self._funnel_script(resolved=False), {"total_tokens": 8, "api_cost_rmb": 0.02}),
+                (self._funnel_script(resolved=True), {"total_tokens": 12, "api_cost_rmb": 0.03}),
+            ]) as recognize,
+        ):
+            _script, quality, usage, _ = asyncio.run(processing._run_recognizer_with_media(
+                row, Path("unused"), 30, self._funnel_evidence(), route, {}, None,
+            ))
+        models = [call.args[4] for call in recognize.call_args_list]
+        self.assertEqual(models, ["lite", "lite", "turbo"])
+        self.assertGreater(models.count("lite"), models.count("turbo"))
+        self.assertTrue(quality_gate(quality)[0])
+        self.assertEqual(usage["model"], "turbo")
+
+    def test_turbo_blocker_gets_one_final_lite_cleanup_without_second_turbo(self):
+        route = {"provider": "ark", "model": "lite", "mode": "lite_first",
+                 "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
+        row = {"id": "task-cleanup", "title": "测试", "credits_used": 1}
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(processing, "ark_recognize", side_effect=[
+                (self._funnel_script(resolved=False), {"total_tokens": 10, "api_cost_rmb": 0.02}),
+                (self._funnel_script(resolved=False), {"total_tokens": 8, "api_cost_rmb": 0.02}),
+                (self._funnel_script(resolved=False), {"total_tokens": 12, "api_cost_rmb": 0.03}),
+                (self._funnel_script(resolved=True), {"total_tokens": 6, "api_cost_rmb": 0.01}),
+            ]) as recognize,
+        ):
+            _script, quality, usage, _ = asyncio.run(processing._run_recognizer_with_media(
+                row, Path("unused"), 30, self._funnel_evidence(), route, {}, None,
+            ))
+        models = [call.args[4] for call in recognize.call_args_list]
+        self.assertEqual(models, ["lite", "lite", "turbo", "lite"])
+        self.assertEqual(models.count("turbo"), 1)
+        self.assertTrue(quality_gate(quality)[0])
+        self.assertEqual(usage["model"], "lite")
+
+    def test_content_repair_never_uses_two_lite_calls_after_turbo(self):
+        route = {"provider": "ark", "model": "lite", "mode": "lite_first",
+                 "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
+        row = {"id": "task-gap-cap", "title": "测试", "credits_used": 10, "attempts": 0}
+        issue = {"severity": "P0", "tag": "missing", "description": "missing",
+                 "startSec": 5, "endSec": 10}
+        gap = [{"startSec": 5, "endSec": 10}]
+        script = self._funnel_script(resolved=True)
+        calls = []
+
+        def quality(remaining):
+            return {
+                "issues": [issue], "blockingIssues": [issue],
+                "severityCounts": {"P0": 1}, "contentGapRanges": remaining,
+                "contentRepair": {
+                    "attemptedRanges": [{"startSec": 5, "endSec": 10}],
+                    "completedRanges": [] if remaining else gap,
+                    "remainingRanges": remaining, "errors": [],
+                },
+            }
+
+        def recognize(*args, **kwargs):
+            calls.append(args[4])
+            return script, {"total_tokens": 10, "api_cost_rmb": 0.01}
+
+        repair_results = iter([
+            (script, quality(gap), {"total_tokens": 5, "api_cost_rmb": 0.01}),
+            (script, quality(gap), {"total_tokens": 5, "api_cost_rmb": 0.01}),
+            (script, quality([]), {"total_tokens": 5, "api_cost_rmb": 0.01}),
+        ])
+
+        async def repair(*args, **kwargs):
+            calls.append(kwargs["model"])
+            return next(repair_results)
+
+        initial_quality = quality(gap)
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(processing, "ark_recognize", side_effect=recognize),
+            patch.object(processing, "repair_content_gaps", side_effect=repair),
+            patch.object(processing, "_evaluate_quality",
+                         return_value=(initial_quality, False, [issue])),
+        ):
+            _script, final_quality, _usage, _ = asyncio.run(
+                processing._run_recognizer_with_media(
+                    row, Path("unused"), 30, self._funnel_evidence(), route, {}, None,
+                )
+            )
+        self.assertEqual(calls, ["lite", "lite", "turbo", "lite"])
+        self.assertEqual(calls.count("turbo"), 1)
+        self.assertFalse(quality_gate(final_quality)[0])
+
+    def test_profit_budget_rejects_turbo_but_allows_lite_at_same_spend(self):
+        row = {"credits_used": 1}
+        usage = {"api_cost_rmb": 0.2118}
+        with (
+            patch.object(processing, "POINTS_PER_MINUTE", 5),
+            patch.object(processing, "POINTS_PER_YUAN", 12.8),
+            patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", 0.2),
+            patch.object(processing, "ARK_TURBO_COST_SAFETY_FACTOR", 1.25),
+        ):
+            turbo = processing._quality_call_budget(row, 60, 60, usage, "turbo")
+            lite = processing._quality_call_budget(row, 60, 60, usage, "lite")
+        self.assertFalse(turbo["allowed"])
+        self.assertTrue(lite["allowed"])
+        for allowed in (item for item in (turbo, lite) if item["allowed"]):
+            self.assertLessEqual(allowed["projectedCostRmb"], allowed["costCeilingRmb"])
+
+    def test_lite_unavailable_does_not_fall_back_to_unprofitable_turbo(self):
+        unavailable = ArkError(
+            "ModelNotOpen model not active", status_code=400, provider_code="ModelNotOpen"
+        )
+        route = {"provider": "ark", "model": "lite", "mode": "lite_first",
+                 "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
+        with (
+            patch.object(processing, "ARK_API_KEYS", ("key",)),
+            patch.object(processing, "ARK_LITE_MODEL", "lite"),
+            patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+            patch.object(processing, "ark_recognize", side_effect=unavailable) as recognize,
+            patch.object(processing, "_quality_call_budget", return_value={"allowed": False}),
+            patch.object(processing, "mark_task_stage"),
+        ):
+            with self.assertRaises(ArkError) as caught:
+                asyncio.run(processing._run_recognizer_with_media(
+                    {"id": "task-budget", "title": "测试", "credits_used": 1},
+                    Path("unused"), 30, self._funnel_evidence(), route, {}, None,
+                ))
+        self.assertEqual(recognize.call_count, 1)
+        self.assertEqual(caught.exception.provider_code, "profit_budget_guard")
+        self.assertTrue(processing._is_non_retryable_provider_error(caught.exception))
+        self.assertFalse(processing._is_quality_gate_failure(caught.exception))
+
+    def test_process_task_quality_block_persists_audit_without_refund_or_review(self):
+        candidate = self._funnel_script(resolved=False)
+        quality = {
+            "issues": [{"severity": "P0", "tag": "台词归属错", "description": "说话人未知"}],
+            "blockingIssues": [{"severity": "P0", "tag": "台词归属错", "description": "说话人未知"}],
+            "severityCounts": {"P0": 1},
+        }
+        usage = {
+            "provider": "ark", "model": "lite", "input_tokens": 10,
+            "output_tokens": 5, "total_tokens": 15, "api_cost_rmb": 0.08,
+        }
+        row = {
+            "id": "task-quality", "title": "测试", "file_name": "test.mp4",
+            "attempts": 0, "user_id": "user", "credits_used": 1,
+        }
+        with (
+            patch.object(processing, "task_row", return_value=row),
+            patch.object(processing, "run_recognizer", return_value=(candidate, quality, usage, {})),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(processing, "record_task_event"),
+            patch.object(processing, "has_pending_recheck", return_value=False),
+            patch.object(processing, "discard_local_proxy"),
+            patch.object(processing, "_refund_task_once") as refund,
+            patch.object(processing, "update_task") as update,
+        ):
+            asyncio.run(processing.process_task("task-quality"))
+        refund.assert_not_called()
+        persisted = update.call_args.kwargs
+        self.assertEqual((persisted["status"], persisted["stage"]), ("failed", "quality_blocked"))
+        self.assertEqual(persisted["api_cost_rmb"], 0.08)
+        self.assertEqual(persisted["total_tokens"], 15)
+        self.assertEqual(json.loads(persisted["result_json"])["characters"], ["甲"])
+        saved_quality = json.loads(persisted["quality_json"])
+        self.assertFalse(saved_quality["automatedResolution"]["manualReview"])
+        self.assertFalse(saved_quality["automatedResolution"]["qualityRefund"])
+
     def test_lite_blocking_result_gets_one_turbo_review_and_can_finish(self):
         evidence = {
             "status": "available",
@@ -990,8 +1251,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                            {"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True}],
             }],
         }
-        # A complex clip starts on Turbo. It still gets exactly one focused
-        # second pass when a real P0 remains; the review is never recursive.
+        # A complex clip starts on Turbo. It never receives another Turbo call
+        # when a real P0 remains; the quality gate fails closed instead.
         row = {"id": "task-2", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 210}
         with (
             patch.object(processing, "recognition_cache", return_value=None),
@@ -1008,14 +1269,11 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(
                 processing,
                 "ark_recognize",
-                side_effect=[
-                    (unresolved, {"total_tokens": 10, "api_cost_rmb": 0}),
-                    (unresolved, {"total_tokens": 12, "api_cost_rmb": 0}),
-                ],
+                return_value=(unresolved, {"total_tokens": 10, "api_cost_rmb": 0}),
             ) as recognize,
         ):
             _script, quality, _usage, _ = asyncio.run(processing.run_recognizer(row))
-        self.assertEqual(recognize.call_count, 2)
+        self.assertEqual(recognize.call_count, 1)
         self.assertFalse(quality_gate(quality)[0])
         self.assertTrue(quality["automatedReview"]["unresolvedIssues"])
 
