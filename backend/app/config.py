@@ -108,9 +108,9 @@ ARK_API_KEYS = tuple(dict.fromkeys(key for key in (ARK_API_KEY, ARK_API_KEY_2, A
 ARK_ACCOUNT_MAX_IN_FLIGHT = max(1, min(24, int(os.getenv("JBB_ARK_ACCOUNT_MAX_IN_FLIGHT", "8"))))
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
-# The staging Ark accounts have the 2.0 Lite service enabled.  The newer 2.1
-# Lite ID exists in the catalog but is not activated for these accounts.
-ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-0-lite-260428").strip()
+# Use the Lite version verified in the model catalogs of the configured Ark
+# accounts. A deployment can still override it when its account catalog differs.
+ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-1-lite-260915").strip()
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
 ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "complexity").strip().lower() or "complexity"
 # Keep the initial pass dense enough for source fidelity. Cost control comes

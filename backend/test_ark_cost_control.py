@@ -142,11 +142,36 @@ class ArkCostControlTests(unittest.TestCase):
               patch.object(providers, "ARK_OUTPUT_TOKEN_PRICE_RMB_PER_MILLION", 0)):
             small = {"usage": {"input_tokens": 10000, "output_tokens": 1000}}
             self.assertEqual(providers.ark_usage(small, "doubao-seed-2-0-lite-260215")["api_cost_rmb"], .0096)
+            self.assertEqual(providers.ark_usage(small, "doubao-seed-2-1-lite-260915")["api_cost_rmb"], .0107)
             self.assertEqual(providers.ark_usage(small, "doubao-seed-2-1-turbo-260628")["api_cost_rmb"], .045)
             large = {"usage": {"input_tokens": 40000, "output_tokens": 1000}}
             self.assertEqual(providers.ark_usage(large, "doubao-seed-2-0-lite-260215")["api_cost_rmb"], .0414)
             self.assertEqual(providers.ark_usage({**small, "cost_rmb": .123}, "unknown")["api_cost_rmb"], .123)
             self.assertEqual(providers.ark_usage(small, "unknown")["cost_source"], "unpriced")
+
+    def test_lite_model_not_open_switches_url_to_another_account_and_audits_slots(self):
+        script, _ = self.fixture()
+        unavailable = ArkError("model is not active", status_code=404, provider_code="ModelNotOpen")
+        completed = {"output_text": json.dumps(script), "usage": {
+            "input_tokens": 100, "output_tokens": 20, "total_tokens": 120,
+        }}
+        prepared = {"api_key": "key-a", "video_url": "https://test/video"}
+        with (
+            patch.object(providers, "ARK_API_KEYS", ("key-a", "key-b")),
+            patch.dict(providers._ark_cooldowns, {}, clear=True),
+            patch.dict(providers._ark_model_cooldowns, {}, clear=True),
+            patch.object(providers, "_ark_response_with_url_retry", side_effect=[unavailable, completed]) as create,
+        ):
+            _, usage = providers.ark_recognize(
+                Path("source.mp4"), "episode", 100,
+                model="doubao-seed-2-1-lite-260915", prepared_video=prepared,
+            )
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(prepared["api_key"], "key-b")
+        self.assertEqual([call["account"] for call in usage["calls"]], ["account-1", "account-2"])
+        self.assertEqual([call["status"] for call in usage["calls"]], ["failed", "success"])
+        self.assertNotIn("key-a", json.dumps(usage))
+        self.assertNotIn("key-b", json.dumps(usage))
 
 
 if __name__ == "__main__":

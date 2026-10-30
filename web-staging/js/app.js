@@ -5,6 +5,7 @@
 (function () {
   const cfg = window.APP_CONFIG;
   const POINTS_PER_MINUTE = 5;
+  const POINTS_PER_YUAN = 12.8;
   const api = window.AppAPI;
   const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -239,6 +240,28 @@
     return `<span class="admin-status ${tone}">${label}</span>${detail ? `<small class="admin-task-counts">${detail}</small>` : ""}`;
   }
 
+  function adminModelUsage(item) {
+    const usage = item.model_usage || {};
+    const line = (key, label) => {
+      const value = usage[key] || {};
+      const calls = Number(value.calls) || 0;
+      const tasks = Number(value.tasks) || 0;
+      const tokens = Number(value.total_tokens) || 0;
+      const cost = Number(value.api_cost_rmb) || 0;
+      const estimate = value.estimated ? "约 " : "";
+      const failures = Number(value.failed_calls) ? ` · 失败 ${Number(value.failed_calls)}` : "";
+      return `<span class="admin-model-line admin-model-${key}"><strong>${label}</strong><small>${calls ? `${tasks} 集 · ${calls} 次${failures}<br>输入 ${Number(value.input_tokens || 0).toLocaleString()} / 输出 ${Number(value.output_tokens || 0).toLocaleString()} / 合计 ${tokens.toLocaleString()} Tokens<br>${estimate}¥ ${cost.toFixed(4)}` : "未调用"}</small></span>`;
+    };
+    return `<div class="admin-model-usage">${line("lite", "Lite")}${line("turbo", "Turbo")}</div>`;
+  }
+
+  function adminTaskBilling(item) {
+    const minutes = Number(item.credits_used) || 0;
+    const points = Number(item.points_used ?? (minutes * POINTS_PER_MINUTE)) || 0;
+    const rmb = Number(item.points_value_rmb ?? (points / POINTS_PER_YUAN)) || 0;
+    return `<span class="admin-task-billing"><strong>${minutes.toFixed(1)} 分钟</strong><small>消耗 ${points.toFixed(1)} 积分 · 折合 ¥ ${rmb.toFixed(2)}</small></span>`;
+  }
+
   function adminDateRangeValid(from, to) {
     if (from && to && from > to) { toast("开始日期不能晚于结束日期", "error"); return false; }
     return true;
@@ -296,11 +319,11 @@
       } else if (tab === "credits") {
         body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>充值与积分流水</h2><p>充值按 1 元 = 12.8 积分入账；退费为积分退回，扣款为积分消费。为用户充值请前往“用户管理”。</p></div><span>${rechargePage.total} 笔流水</span></div><div class="ledger-legend" aria-label="流水类型说明">${["recharge", "refund", "consume", "grant", "adjustment"].map(ledgerBadge).join("")}<span class="ledger-legend-note">＋ 积分增加 / − 积分减少</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" aria-label="搜索用户账号或备注" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户名称、账号或备注" /><select id="adminRechargeType" aria-label="流水类型"><option value="all">全部类型</option>${Object.entries(ledgerTypes).map(([key, value]) => `<option value="${key}" ${state.adminRechargeType === key ? "selected" : ""}>${value.symbol} ${value.label}</option>`).join("")}</select><label class="admin-date-label">开始日期<input id="adminRechargeFrom" aria-label="流水开始日期" title="开始日期" type="date" value="${state.adminRechargeFrom}" /></label><label class="admin-date-label">结束日期<input id="adminRechargeTo" aria-label="流水结束日期" title="结束日期" type="date" value="${state.adminRechargeTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>流水类型</th><th>充值金额（元）</th><th>积分变动</th><th>变动后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(adminLedgerRow).join("") || `<tr><td colspan="7">暂无匹配的流水，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-recharge-page", state.adminRechargePage, rechargePage.total, 10)}</div>`;
       } else if (tab === "tasks" || tab === "usage") {
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按批次汇总；计费时长按各视频分别向上取整，失败退费请查看积分流水。</p></div><span>${tasks.total} 个批次</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" aria-label="搜索任务、用户名称或账号" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务、用户名称或账号" /><select id="adminTaskUser" aria-label="任务所属用户"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${escapeHtml(user.id)}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.name || "未命名用户")} · ${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus" aria-label="任务状态"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>待用户复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><label class="admin-date-label">开始日期<input id="adminTaskFrom" type="date" aria-label="任务开始日期" title="开始日期" value="${state.adminTaskFrom}" /></label><label class="admin-date-label">结束日期<input id="adminTaskTo" type="date" aria-label="任务结束日期" title="结束日期" value="${state.adminTaskTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button><button class="admin-action" data-action="admin-task-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>任务 / 批次</th><th>用户名称 / 账号</th><th>状态</th><th>计费时长</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => {
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按批次汇总；Lite 与 Turbo 的 Tokens 和 API 费用仅管理员可见，费用按模型公开单价估算。</p></div><span>${tasks.total} 个批次</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" aria-label="搜索任务、用户名称或账号" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务、用户名称或账号" /><select id="adminTaskUser" aria-label="任务所属用户"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${escapeHtml(user.id)}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.name || "未命名用户")} · ${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus" aria-label="任务状态"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>待用户复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><label class="admin-date-label">开始日期<input id="adminTaskFrom" type="date" aria-label="任务开始日期" title="开始日期" value="${state.adminTaskFrom}" /></label><label class="admin-date-label">结束日期<input id="adminTaskTo" type="date" aria-label="任务结束日期" title="结束日期" value="${state.adminTaskTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button><button class="admin-action" data-action="admin-task-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>任务 / 批次</th><th>用户名称 / 账号</th><th>状态</th><th>计费时长 / 积分折算</th><th>模型 API 用量 / 费用</th><th>创建时间</th><th>完成时间</th><th>操作</th></tr></thead><tbody>${tasks.items.map(item => {
           const reviewId = (Array.isArray(item.review_task_ids) && item.review_task_ids[0]) || item.id;
           const actions = `<button class="admin-action" data-action="admin-review" data-id="${escapeHtml(reviewId)}">查看详情</button>` + (item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${escapeHtml(item.id)}" title="重试失败任务通常会重新扣费，已有免费复核任务除外">重试</button>` : "");
-          return `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(reviewId)}">${escapeHtml(item.title || item.id)}</button><small>${escapeHtml(item.file_name || "")}</small></td><td>${adminUserIdentity(item)}</td><td>${adminTaskStatus(item)}</td><td>${Number(item.credits_used || 0).toFixed(1)} 分钟</td><td>${formatDate(item.created_at)}</td><td>${actions}</td></tr>`;
-        }).join("") || `<tr><td colspan="6">暂无匹配任务，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-page", state.adminTaskPage, tasks.total, 20)}</div>`;
+          return `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(reviewId)}">${escapeHtml(item.title || item.id)}</button><small>${escapeHtml(item.file_name || "")}</small></td><td>${adminUserIdentity(item)}</td><td>${adminTaskStatus(item)}</td><td>${adminTaskBilling(item)}</td><td>${adminModelUsage(item)}</td><td>${formatDate(item.created_at)}</td><td>${item.completed_at ? formatDate(item.completed_at) : "—"}</td><td>${actions}</td></tr>`;
+        }).join("") || `<tr><td colspan="8">暂无匹配任务，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-page", state.adminTaskPage, tasks.total, 20)}</div>`;
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近视频任务</h2><p>最近创建的 10 条视频任务</p></div><span>点击任务查看详情</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户名称 / 账号</th><th>状态</th><th>计费时长</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)}</button></td><td>${adminUserIdentity(item)}</td><td>${adminTaskStatus(item)}</td><td>${Number(item.credits_used || 0).toFixed(1)} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无视频任务</td></tr>`}</tbody></table></div></div>`;
       }

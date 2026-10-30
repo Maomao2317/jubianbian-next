@@ -1,5 +1,6 @@
 """Read-only admin summaries and name search, using disposable SQLite data."""
 from contextlib import contextmanager
+import json
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -19,7 +20,9 @@ class AdminConsoleTests(unittest.TestCase):
                 batch_title TEXT, status TEXT, stage TEXT, progress_percent REAL,
                 estimated_minutes REAL, credits_used REAL, error TEXT,
                 created_at TEXT, updated_at TEXT, batch_id TEXT, batch_index INTEGER,
-                batch_total INTEGER, api_cost_rmb REAL);
+                batch_total INTEGER, api_cost_rmb REAL, quality_json TEXT, provider TEXT,
+                model TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                total_tokens INTEGER, completed_at TEXT);
             INSERT INTO users VALUES ('u', 'user@example.test', 'Example Name', 128.4, 1);
             INSERT INTO users VALUES ('v', 'other@example.test', NULL, 10.2, 0);
         """)
@@ -27,10 +30,22 @@ class AdminConsoleTests(unittest.TestCase):
             self.connection.execute("""INSERT INTO tasks
                 (id,user_id,title,file_name,batch_title,status,stage,progress_percent,
                  estimated_minutes,credits_used,created_at,updated_at,batch_id,
-                 batch_index,batch_total,api_cost_rmb)
+                 batch_index,batch_total,api_cost_rmb,completed_at)
                 VALUES (?, 'u', 'Episode', 'episode.mp4', 'Batch', ?, ?, 50,
                         2, 2, '2026-10-27T01:00:00+00:00', '2026-10-27T01:00:00+00:00',
-                        'batch', ?, 5, 0.15)""", (str(index), status, status, index))
+                        'batch', ?, 5, 0.15, ?)""", (
+                            str(index), status, status, index,
+                            "2026-10-27T02:00:00+00:00" if status in {"done", "review", "failed"} else None,
+                        ))
+        calls = {"providerUsage": {"calls": [
+            {"provider": "ark", "model": "doubao-seed-2-1-lite-260915", "account": "account-1",
+             "status": "success", "input_tokens": 100, "output_tokens": 20, "total_tokens": 120,
+             "api_cost_rmb": 0.000134, "cost_source": "public_price_estimate"},
+            {"provider": "ark", "model": "doubao-seed-2-1-turbo-260628", "account": "account-2",
+             "status": "success", "input_tokens": 50, "output_tokens": 10, "total_tokens": 60,
+             "api_cost_rmb": 0.0003, "cost_source": "public_price_estimate"},
+        ]}}
+        self.connection.execute("UPDATE tasks SET quality_json = ? WHERE id = '0'", (json.dumps(calls),))
 
         @contextmanager
         def db():
@@ -72,8 +87,18 @@ class AdminConsoleTests(unittest.TestCase):
             for key in ("done_count", "review_count", "failed_count", "running_count", "queued_count"):
                 self.assertEqual(row[key], 1)
             self.assertEqual(row["credits_used"], 10)
+            self.assertEqual(row["points_used"], 50)
+            self.assertEqual(row["points_value_rmb"], 3.91)
+            self.assertEqual(row["model_usage"]["lite"]["total_tokens"], 120)
+            self.assertEqual(row["model_usage"]["turbo"]["total_tokens"], 60)
+            self.assertEqual(row["model_usage"]["lite"]["accounts"], ["account-1"])
+            self.assertIsNone(row["completed_at"])
         self.assertEqual(self.connection.total_changes, before)
         self.assertEqual(routes.admin_tasks(None, keyword="' OR 1=1 --", limit=20, offset=0)["total"], 0)
+
+    def test_completed_batch_reports_last_completion_time(self):
+        value = routes.admin_tasks(None, status="done", limit=20, offset=0)
+        self.assertEqual(value["items"][0]["completed_at"], "2026-10-27T02:00:00+00:00")
 
     def test_admin_authorization_precedes_summary_and_search(self):
         with patch.object(routes, "_require_admin", side_effect=HTTPException(status_code=403)):

@@ -139,8 +139,11 @@ class UserReviewTests(unittest.TestCase):
         issue = {"severity": "P0", "tag": "疑似漏台词片段", "description": "独立 ASR OCR 模型覆盖率 0%",
                  "startSec": 32.1, "endSec": 38, "scene": 1, "block": 2}
         with auth_store.db() as c:
-            c.execute("UPDATE tasks SET quality_json=?, provider='ark', model='internal-model' WHERE id='one'",
-                      (json.dumps({"issues": [issue], "blockingIssues": [issue], "evidenceSources": {"ASR": "vendor"}}),))
+            c.execute("""UPDATE tasks SET quality_json=?, provider='ark', model='internal-model',
+                       input_tokens=100, output_tokens=20, total_tokens=120, api_cost_rmb=0.2 WHERE id='one'""",
+                      (json.dumps({"issues": [issue], "blockingIssues": [issue], "evidenceSources": {"ASR": "vendor"},
+                                   "providerUsage": {"calls": [{"model": "secret-lite", "account": "account-1",
+                                                                  "total_tokens": 120, "api_cost_rmb": 0.2}]}}),))
         task_store.record_task_event("one", "review_required", "独立 OCR ASR 模型覆盖率 0%", status="review", stage="review")
         detail = routes.task_detail(None, "one")
         self.assertEqual(detail["status"], "review")
@@ -150,7 +153,7 @@ class UserReviewTests(unittest.TestCase):
         self.assertIn("对白可能有遗漏", detail["quality"]["issues"][0]["description"])
         for data in (detail, routes.list_tasks(None), routes.task_event_list(None, "one", 100)):
             text = json.dumps(data, ensure_ascii=False)
-            for internal in ("ASR", "OCR", "internal-model", "覆盖率", "P0", "vendor"):
+            for internal in ("ASR", "OCR", "internal-model", "secret-lite", "account-1", "api_cost_rmb", "total_tokens", "覆盖率", "P0", "vendor"):
                 self.assertNotIn(internal, text)
         with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
             admin = routes.admin_task_detail(None, "one")

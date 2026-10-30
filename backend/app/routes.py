@@ -615,6 +615,87 @@ def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge
     return [dict(row) for row in rows]
 
 
+def _admin_model_usage(task_rows: list[Any]) -> dict[str, dict[str, Any]]:
+    """Aggregate Ark call details without exposing provider credentials."""
+    buckets: dict[str, dict[str, Any]] = {
+        name: {
+            "calls": 0,
+            "failed_calls": 0,
+            "tasks": set(),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "api_cost_rmb": 0.0,
+            "accounts": set(),
+            "estimated": False,
+        }
+        for name in ("lite", "turbo")
+    }
+
+    def family(model: Any) -> str | None:
+        value = str(model or "").casefold()
+        return "lite" if "lite" in value else "turbo" if "turbo" in value else None
+
+    def add_call(task_id: str, call: dict[str, Any]) -> bool:
+        name = family(call.get("model"))
+        if not name:
+            return False
+        bucket = buckets[name]
+        bucket["calls"] += 1
+        bucket["failed_calls"] += int(call.get("status") == "failed")
+        bucket["tasks"].add(task_id)
+        account = str(call.get("account") or "")
+        if re.fullmatch(r"account-[a-zA-Z0-9-]+", account):
+            bucket["accounts"].add(account)
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            value = call.get(key)
+            if isinstance(value, (int, float)):
+                bucket[key] += int(value)
+        cost = call.get("api_cost_rmb")
+        if isinstance(cost, (int, float)):
+            bucket["api_cost_rmb"] += float(cost)
+        bucket["estimated"] = bucket["estimated"] or call.get("cost_source") not in {None, "provider"}
+        return True
+
+    for task in task_rows:
+        task_id = str(task["id"])
+        calls: list[dict[str, Any]] = []
+        try:
+            quality = json.loads(task["quality_json"] or "{}")
+            provider_usage = quality.get("providerUsage") if isinstance(quality, dict) else None
+            raw_calls = provider_usage.get("calls") if isinstance(provider_usage, dict) else None
+            calls = [call for call in (raw_calls or []) if isinstance(call, dict)]
+        except (TypeError, ValueError):
+            calls = []
+        recorded = False
+        for call in calls:
+            recorded = add_call(task_id, call) or recorded
+        if recorded:
+            continue
+        # Older completed tasks predate per-call audit data. Their final model
+        # and persisted totals remain the best safe fallback.
+        fallback = {
+            "model": task["model"],
+            "input_tokens": task["input_tokens"],
+            "output_tokens": task["output_tokens"],
+            "total_tokens": task["total_tokens"],
+            "api_cost_rmb": task["api_cost_rmb"],
+            "cost_source": "legacy_task_total",
+            "status": "success",
+        }
+        add_call(task_id, fallback)
+
+    result: dict[str, dict[str, Any]] = {}
+    for name, bucket in buckets.items():
+        result[name] = {
+            **bucket,
+            "tasks": len(bucket["tasks"]),
+            "accounts": sorted(bucket["accounts"]),
+            "api_cost_rmb": round(bucket["api_cost_rmb"], 6),
+        }
+    return result
+
+
 def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_id: str = "", date_from: str = "", date_to: str = "", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     _require_admin(request)
     clauses: list[str] = []
@@ -654,6 +735,8 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             MAX(t.error) AS error,
             MAX(t.created_at) AS created_at,
             MAX(t.updated_at) AS updated_at,
+            CASE WHEN SUM(CASE WHEN t.completed_at IS NULL THEN 1 ELSE 0 END) = 0
+                 THEN MAX(t.completed_at) END AS completed_at,
             MAX(t.batch_id) AS batch_id,
             MAX(t.batch_index) AS batch_index,
             MAX(t.batch_total) AS batch_total,
@@ -679,6 +762,19 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             f"SELECT * FROM ({grouped_select}) grouped ORDER BY created_at DESC, group_id DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
+        group_ids = [row["group_id"] for row in rows]
+        usage_rows: dict[str, list[Any]] = {group_id: [] for group_id in group_ids}
+        if group_ids:
+            placeholders = ",".join("?" for _ in group_ids)
+            all_usage_rows = connection.execute(
+                f"""SELECT COALESCE(batch_id, id) AS group_id, id, quality_json, provider,
+                           model, input_tokens, output_tokens, total_tokens, api_cost_rmb
+                    FROM tasks
+                    WHERE COALESCE(batch_id, id) IN ({placeholders})""",
+                group_ids,
+            ).fetchall()
+            for usage_row in all_usage_rows:
+                usage_rows[usage_row["group_id"]].append(usage_row)
     grouped: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -695,6 +791,10 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             item["batch_title"] = default_batch_title(item["created_at"])
             if not item.get("title") or is_default_batch_title(item.get("title")):
                 item["title"] = item["batch_title"]
+        billed_minutes = float(item.get("credits_used") or 0)
+        item["points_used"] = round(billed_minutes * POINTS_PER_MINUTE, 1)
+        item["points_value_rmb"] = round(item["points_used"] / POINTS_PER_YUAN, 2)
+        item["model_usage"] = _admin_model_usage(usage_rows.get(row["group_id"], []))
         grouped.append(item)
     return {"items": grouped, "total": int(total), "limit": limit, "offset": offset}
 

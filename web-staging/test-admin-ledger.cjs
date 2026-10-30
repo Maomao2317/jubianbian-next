@@ -18,7 +18,12 @@ const api = {
   getAdminUsers: async query => { userCalls.push(query); return { total: 1, items: [user] }; },
   getAdminTasks: async query => { taskCalls.push(query); return { total: 1, items: [{ ...user,
     title: "测试批次", status: "failed", task_count: 3, failed_count: 1, running_count: 1, queued_count: 1,
-    file_name: "3 集", credits_used: 4, created_at: "2026-10-27" }] }; },
+    file_name: "3 集", credits_used: 4, points_used: 20, points_value_rmb: 1.56,
+    created_at: "2026-10-27", completed_at: "2026-10-28",
+    model_usage: {
+      lite: { tasks: 2, calls: 2, input_tokens: 1000, output_tokens: 234, total_tokens: 1234, api_cost_rmb: 0.0042, estimated: true },
+      turbo: { tasks: 1, calls: 1, input_tokens: 500, output_tokens: 100, total_tokens: 600, api_cost_rmb: 0.003 },
+    } }] }; },
   getAdminRecharges: async query => { calls.push(query); return { total: 1, items: [
     { entry_type: "consume", points_amount: -10, balance_after: 90, reason: "test", created_at: "2026-10-27" },
   ] }; },
@@ -75,6 +80,10 @@ const click = async action => {
     assert.match(html, /测试用户&lt;名称&gt; · user@example.test/);
     assert.match(html, /1 个批次.*部分失败.*进行中 1 · 排队 1 · 失败 1/s);
     assert.match(html, /计费时长/);
+    assert.match(html, /4\.0 分钟.*消耗 20\.0 积分 · 折合 ¥ 1\.56/s);
+    assert.match(html, /模型 API 用量 \/ 费用.*完成时间/s);
+    assert.match(html, /Lite.*2 集 · 2 次.*合计 1,234 Tokens.*约 ¥ 0\.0042.*Turbo.*1 集 · 1 次.*¥ 0\.0030/s);
+    assert.match(html, /2026-10-28/);
     assert.doesNotMatch(html, /测试用户<名称>/);
   }
   ui.state.adminTaskPage = 9;

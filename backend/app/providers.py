@@ -92,6 +92,7 @@ def ark_fallback_message(error: ArkError) -> str:
 _ark_pool_lock = threading.Lock()
 _ark_pool_index = 0
 _ark_cooldowns: dict[str, float] = {}
+_ark_model_cooldowns: dict[tuple[str, str], float] = {}
 _ark_key_semaphore_lock = threading.Lock()
 _ark_key_generation_semaphores: dict[str, threading.BoundedSemaphore] = {}
 _ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
@@ -103,15 +104,20 @@ _ark_upload_body_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT
 _ark_proxy_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_PROXY_MAX_IN_FLIGHT)
 
 
+def ark_account_slot(api_key: str) -> str:
+    """Return a stable, non-secret account label for logs and usage records."""
+    try:
+        return f"account-{ARK_API_KEYS.index(api_key) + 1}"
+    except ValueError:
+        return "account-" + hashlib.sha256(api_key.encode()).hexdigest()[:12]
+
+
 def _ark_quota_scope(api_key: str | None = None) -> str:
     """Return a non-secret quota identity, optionally isolated per account."""
     scope = ARK_QUOTA_SCOPE.casefold()
     account = "shared"
     if api_key and scope in {"per-key", "per_key", "per-account", "per_account"}:
-        try:
-            account = f"account-{ARK_API_KEYS.index(api_key) + 1}"
-        except ValueError:
-            account = "account-" + hashlib.sha256(api_key.encode()).hexdigest()[:12]
+        account = ark_account_slot(api_key)
     return hashlib.sha256(f"{ARK_BASE_URL}|{scope}|{account}".encode()).hexdigest()
 
 
@@ -128,6 +134,35 @@ def _cool_down_ark_account(api_key: str, seconds: float) -> None:
     with _ark_pool_lock:
         _ark_cooldowns[api_key] = max(_ark_cooldowns.get(api_key, 0), time.monotonic() + seconds)
     provider_budget.cooldown(_ark_quota_scope(api_key), seconds)
+
+
+def _cool_down_ark_model(api_key: str, model: str, seconds: float = 300) -> None:
+    """Temporarily stop routing one model to one account after ModelNotOpen."""
+    until = time.monotonic() + max(1.0, min(900.0, float(seconds)))
+    with _ark_pool_lock:
+        key = (api_key, model.casefold())
+        _ark_model_cooldowns[key] = max(_ark_model_cooldowns.get(key, 0), until)
+
+
+def _ark_model_on_cooldown(api_key: str, model: str) -> bool:
+    with _ark_pool_lock:
+        return _ark_model_cooldowns.get((api_key, model.casefold()), 0) > time.monotonic()
+
+
+def ark_model_account_key(model: str, *, exclude: set[str] | None = None) -> str | None:
+    """Pick a ready account for a model without ever returning a credential label."""
+    global _ark_pool_index
+    excluded = exclude or set()
+    now = time.monotonic()
+    with _ark_pool_lock:
+        for _ in range(len(ARK_API_KEYS)):
+            key = ARK_API_KEYS[_ark_pool_index % len(ARK_API_KEYS)]
+            _ark_pool_index = (_ark_pool_index + 1) % len(ARK_API_KEYS)
+            if key in excluded:
+                continue
+            if _ark_cooldowns.get(key, 0) <= now and _ark_model_cooldowns.get((key, model.casefold()), 0) <= now:
+                return key
+    return None
 
 
 def ark_account_key() -> str:
@@ -1169,6 +1204,9 @@ def ark_usage(payload: Any, model: str = "") -> dict[str, Any]:
             if re.fullmatch(r"doubao-seed-2-1-turbo(?:-\d+)?", model):
                 input_price, output_price = 3.0, 15.0
                 cost_source = "public_price_estimate"
+            elif re.fullmatch(r"doubao-seed-2-1-lite(?:-\d+)?", model):
+                input_price, output_price = 0.8, 2.7
+                cost_source = "public_price_estimate"
             elif re.fullmatch(r"doubao-seed-2-0-lite(?:-\d+)?", model) and (input_tokens or 0) <= 128000:
                 input_price, output_price = (0.6, 3.6) if (input_tokens or 0) <= 32000 else (0.9, 5.4)
                 cost_source = "public_price_estimate"
@@ -1180,6 +1218,31 @@ def ark_usage(payload: Any, model: str = "") -> dict[str, Any]:
             "api_cost_rmb": round(cost or 0, 6), "cost_source": cost_source}
 
 
+def _is_ark_model_unavailable(error: ArkError) -> bool:
+    text = f"{error.provider_code} {error}".casefold()
+    return error.status_code in {400, 404} and any(
+        marker in text
+        for marker in ("modelnotopen", "model_not_open", "not active", "not found", "未激活", "未找到")
+    )
+
+
+def _ark_failed_usage(error: ArkError, model: str, api_key: str) -> dict[str, Any]:
+    payload = getattr(error, "usage_payload", None)
+    usage = ark_usage(payload, model) if payload else {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "api_cost_rmb": 0,
+        "cost_source": "unpriced",
+    }
+    return {
+        **usage,
+        "status": "failed",
+        "account": ark_account_slot(api_key),
+        "error_code": str(error.provider_code or error.status_code or "provider_error")[:80],
+    }
+
+
 def _is_video_url_error(error: ArkError) -> bool:
     """Fall back only when the provider cannot ingest the URL, not the model."""
     if is_account_balance_error(error):
@@ -1187,7 +1250,7 @@ def _is_video_url_error(error: ArkError) -> bool:
     message = f"{error.provider_code} {error}".casefold()
     return error.status_code in {400, 403, 404, 422} and any(
         marker in message for marker in ("video_url", "download", "fetch", "url", "media", "视频下载", "视频地址")
-    ) and not any(marker in message for marker in ("modelnotopen", "model_not_open", "not active"))
+    ) and not _is_ark_model_unavailable(error)
 
 
 def _ark_response_with_url_retry(payload: dict[str, Any], api_key: str, prepared: dict[str, Any]) -> Any:
@@ -1661,6 +1724,14 @@ def ark_recognize(
     video_url = str(prepared.get("video_url") or "")
     if not api_key or not (file_id or video_url):
         raise ArkError("方舟视频准备结果不完整")
+    # A shared URL is account-independent. If this account recently reported
+    # that the selected model is not open, switch before spending a request.
+    # Files are account-owned, so they must stay on the uploading account.
+    if video_url and _ark_model_on_cooldown(api_key, selected_model):
+        replacement = ark_model_account_key(selected_model, exclude={api_key})
+        if replacement:
+            api_key = replacement
+            prepared["api_key"] = replacement
     fps = ARK_REVIEW_VIDEO_FPS if (review_context or {}).get("clipTimeline") else ark_sampling_fps(duration_sec)
     video_input: dict[str, Any] = (
         {"type": "input_video", "video_url": video_url, "fps": fps}
@@ -1692,37 +1763,58 @@ def ark_recognize(
     payload: Any = None
     response_usages: list[dict[str, Any]] = []
     for attempt in range(1, ARK_RESPONSE_CREATE_ATTEMPTS + 1):
+        attempt_usage_recorded = False
         try:
             try:
                 payload = _ark_response_with_url_retry(response_payload, api_key, prepared)
             except ArkError as exc:
-                if not video_url or not _is_video_url_error(exc):
+                if video_url and _is_ark_model_unavailable(exc):
+                    _cool_down_ark_model(api_key, selected_model)
+                    replacement = ark_model_account_key(selected_model, exclude={api_key})
+                    if replacement:
+                        response_usages.append(_ark_failed_usage(exc, selected_model, api_key))
+                        logger.warning(
+                            "provider_step provider=ark operation=model_account_switch file=%s model=%s from_account=%s to_account=%s",
+                            path.name, selected_model, ark_account_slot(api_key), ark_account_slot(replacement),
+                        )
+                        api_key = replacement
+                        prepared["api_key"] = replacement
+                        payload = _ark_response_with_url_retry(response_payload, api_key, prepared)
+                    else:
+                        raise
+                elif not video_url or not _is_video_url_error(exc):
                     raise
-                logger.warning(
-                    "provider_step provider=ark operation=object_url_fallback file=%s status_code=%s code=%s error=%s",
-                    path.name, exc.status_code, exc.provider_code, safe_error_text(exc),
-                )
-                options = {"force_files": True}
-                if (review_context or {}).get("clipTimeline"):
-                    options["sampling_fps"] = fps
-                if prepared.get("_cache") is not None:
-                    options["cache"] = prepared["_cache"]
-                    prepared["_cache"].save("delivery_route", {"mode": "files", "reason": "url_ingestion_failed"})
-                if prepared.get("_progress_callback") is not None:
-                    options["progress_callback"] = prepared["_progress_callback"]
-                fallback = ark_prepare_video(path, duration_sec, **options)
-                # Share the uploaded file with the subsequent quality review.
-                # No second URL failure/upload is needed for the same episode.
-                audit = {key: prepared[key] for key in ("_audit_cache", "_audit_kind") if key in prepared}
-                prepared.clear()
-                prepared.update(fallback)
-                prepared.update(audit)
-                api_key = str(fallback["api_key"])
-                video_url = ""
-                response_payload["input"][0]["content"][0] = {"type": "input_video", "file_id": fallback["file_id"]}
-                _report_media_progress(prepared.get("_progress_callback"), "vision", None)
-                payload = ark_stream_response(response_payload, api_key)
-            response_usages.append(ark_usage(payload, selected_model))
+                else:
+                    logger.warning(
+                        "provider_step provider=ark operation=object_url_fallback file=%s status_code=%s code=%s error=%s",
+                        path.name, exc.status_code, exc.provider_code, safe_error_text(exc),
+                    )
+                    options = {"force_files": True}
+                    if (review_context or {}).get("clipTimeline"):
+                        options["sampling_fps"] = fps
+                    if prepared.get("_cache") is not None:
+                        options["cache"] = prepared["_cache"]
+                        prepared["_cache"].save("delivery_route", {"mode": "files", "reason": "url_ingestion_failed"})
+                    if prepared.get("_progress_callback") is not None:
+                        options["progress_callback"] = prepared["_progress_callback"]
+                    fallback = ark_prepare_video(path, duration_sec, **options)
+                    # Share the uploaded file with the subsequent quality review.
+                    # No second URL failure/upload is needed for the same episode.
+                    audit = {key: prepared[key] for key in ("_audit_cache", "_audit_kind") if key in prepared}
+                    prepared.clear()
+                    prepared.update(fallback)
+                    prepared.update(audit)
+                    api_key = str(fallback["api_key"])
+                    video_url = ""
+                    response_payload["input"][0]["content"][0] = {"type": "input_video", "file_id": fallback["file_id"]}
+                    _report_media_progress(prepared.get("_progress_callback"), "vision", None)
+                    payload = ark_stream_response(response_payload, api_key)
+            response_usages.append({
+                **ark_usage(payload, selected_model),
+                "status": "success",
+                "account": ark_account_slot(api_key),
+            })
+            attempt_usage_recorded = True
             raw_script = (
                 _apply_ark_review(payload, review_context, duration_sec)
                 if patch_review else _parse_ark_script(payload)
@@ -1734,8 +1826,13 @@ def ark_recognize(
                 raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
             break
         except ArkError as exc:
-            if getattr(exc, "usage_payload", None):
-                response_usages.append(ark_usage(exc.usage_payload, selected_model))
+            if _is_ark_model_unavailable(exc):
+                _cool_down_ark_model(api_key, selected_model)
+            if attempt_usage_recorded:
+                response_usages[-1]["status"] = "failed"
+                response_usages[-1]["error_code"] = str(exc.provider_code or exc.status_code or "invalid_output")[:80]
+            else:
+                response_usages.append(_ark_failed_usage(exc, selected_model, api_key))
             exc.usage = _ark_call_usage(response_usages, selected_model, audit_kind, duration_sec, fps)
             if (patch_review and exc.provider_code == "output_limit"
                     and response_payload["max_output_tokens"] < ARK_MAX_OUTPUT_TOKENS
@@ -1796,7 +1893,7 @@ def _ark_call_usage(records, model, stage, duration, fps):
         values = [record[key] for record in records if isinstance(record.get(key), (int, float))]
         result[key] = round(sum(values), 6) if values else None
     stage = "repair" if stage.startswith("segment_") else stage
-    result["calls"] = [{**record, "model": model, "stage": stage,
+    result["calls"] = [{**record, "provider": "ark", "model": model, "stage": stage,
                         "video_duration_sec": duration, "video_fps": fps} for record in records]
     return result
 
