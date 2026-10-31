@@ -156,5 +156,7 @@ volumes:
   jbb-runtime-limits:
     name: jubianbian-runtime-limits
   jbb-data:
+    name: jubianbian_jbb-data-seoul-20261019r2
+    external: true
   caddy-data:
   caddy-config:
