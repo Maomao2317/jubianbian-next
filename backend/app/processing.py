@@ -1467,13 +1467,9 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
-        # A successful provider response is not automatically deliverable.
-        # P0 findings fail closed after the bounded automatic funnel: retain
-        # the candidate for audit, but never expose it as a finished result,
-        # never transfer it to manual review, and never issue a quality refund.
-        # P1 editing hints remain visible without blocking delivery.
+        # Keep P0 findings visible and send unresolved candidates for owner review.
         approved, blocking = quality_gate(quality)
-        quality["deliveryStatus"] = "approved" if approved else "failed_quality_guard"
+        quality["deliveryStatus"] = "approved" if approved else "review_required"
         quality["blockingIssues"] = blocking
         completed_recheck = has_pending_recheck(task_id)
         if completed_recheck:
@@ -1485,48 +1481,6 @@ async def process_task(task_id: str) -> None:
                 "previousVersionPreserved": True,
                 "userApprovalRequired": True,
             }
-        if not approved and not completed_recheck:
-            quality["automatedResolution"] = {
-                "status": "quality_blocked",
-                "manualReview": False,
-                "qualityRefund": False,
-            }
-            blocked_message = "自动质量门禁未通过，候选稿已留档但不会交付；未转人工、未触发质量退费"
-            update_task(
-                task_id,
-                status="failed",
-                stage="quality_blocked",
-                progress_percent=100,
-                result_json=json.dumps(script, ensure_ascii=False),
-                quality_json=json.dumps(quality, ensure_ascii=False),
-                evidence_json=evidence_json(evidence),
-                provider=usage.get("provider", "ark" if ARK_API_KEYS else "local-fallback"),
-                model=usage.get("model", ARK_MODEL if ARK_API_KEYS else None),
-                input_tokens=usage.get("input_tokens"),
-                output_tokens=usage.get("output_tokens"),
-                total_tokens=usage.get("total_tokens"),
-                api_cost_rmb=usage.get("api_cost_rmb", 0),
-                error=blocked_message,
-                completed_at=now_iso(),
-            )
-            await asyncio.to_thread(discard_local_proxy, task_id)
-            record_task_event(
-                task_id,
-                "quality_blocked",
-                blocked_message,
-                status="failed",
-                stage="quality_blocked",
-                progress_percent=100,
-                duration_ms=elapsed_ms,
-            )
-            logger.warning(
-                "task_quality_blocked task_id=%s provider=%s duration_ms=%.1f blockers=%s",
-                task_id,
-                usage.get("provider", "unknown"),
-                elapsed_ms,
-                len(blocking),
-            )
-            return
         can_deliver = approved and not completed_recheck
         final_status = "done" if can_deliver else "review"
         final_stage = "done" if can_deliver else "review"
@@ -1585,16 +1539,23 @@ async def process_task(task_id: str) -> None:
             len(script.get("scenes") or []),
         )
     except Exception as exc:  # pragma: no cover - defensive boundary for background work
+        failure_usage = getattr(exc, "usage", {})
+        failure_quality = getattr(exc, "quality", {})
+        failure_candidate = getattr(exc, "candidate", None)
+        quality_failure = _is_quality_gate_failure(exc)
+        review_required = quality_failure and isinstance(failure_candidate, dict)
         attempts = int(row["attempts"] or 0) + 1
-        if attempts <= 2 and not _is_non_retryable_provider_error(exc):
+        if not quality_failure and attempts <= 2 and not _is_non_retryable_provider_error(exc):
             update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试：{_task_error_message(exc)}")
             record_task_event(task_id, "retry", "处理失败，任务已自动重新排队", status="queued", stage="queued", progress_percent=4)
             logger.warning("task_retry_auto task_id=%s attempt=%s error=%s", task_id, attempts, safe_error_text(exc))
             return
-        quality_failure = _is_quality_gate_failure(exc)
         message = (
-            f"自动质量门禁未通过：{_task_error_message(exc)}；候选结果不会交付，未转人工、未触发质量退费"
-            if quality_failure else f"处理失败：{_task_error_message(exc)}"
+            f"自动质量检查未通过，候选稿已保存并进入待复核：{_task_error_message(exc)}"
+            if review_required else (
+                f"自动质量门禁未通过：{_task_error_message(exc)}；没有可供复核的候选稿"
+                if quality_failure else f"处理失败：{_task_error_message(exc)}"
+            )
         )
         # Return the pre-charged minutes exactly once when a recognition fails.
         if has_pending_recheck(task_id):
@@ -1625,9 +1586,6 @@ async def process_task(task_id: str) -> None:
         charged = int(row["credits_used"] or 0)
         if not quality_failure and row["user_id"] and charged > 0:
             _refund_task_once(task_id, row["user_id"], charged)
-        failure_usage = getattr(exc, "usage", {})
-        failure_quality = getattr(exc, "quality", {})
-        failure_candidate = getattr(exc, "candidate", None)
         failure_accounting: dict[str, Any] = {}
         if isinstance(failure_usage, dict) and _usage_has_paid_call(failure_usage):
             failure_accounting = {
@@ -1640,11 +1598,13 @@ async def process_task(task_id: str) -> None:
             }
         if isinstance(failure_quality, dict) and failure_quality:
             failure_quality["providerUsage"] = failure_usage
-            failure_quality["deliveryStatus"] = "failed_quality_guard" if quality_failure else "failed"
+            failure_quality["deliveryStatus"] = (
+                "review_required" if review_required else "failed_quality_guard" if quality_failure else "failed"
+            )
             if quality_failure:
                 failure_quality["automatedResolution"] = {
-                    "status": "quality_blocked",
-                    "manualReview": False,
+                    "status": "review_required" if review_required else "quality_blocked",
+                    "manualReview": review_required,
                     "qualityRefund": False,
                 }
             failure_accounting["quality_json"] = json.dumps(failure_quality, ensure_ascii=False)
@@ -1652,19 +1612,19 @@ async def process_task(task_id: str) -> None:
             failure_accounting["result_json"] = json.dumps(failure_candidate, ensure_ascii=False)
         update_task(
             task_id,
-            status="failed",
-            stage="quality_blocked" if quality_failure else "failed",
+            status="review" if review_required else "failed",
+            stage="review" if review_required else "quality_blocked" if quality_failure else "failed",
             progress_percent=100,
-            error=message,
+            error=None if review_required else message,
             completed_at=now_iso(),
             **failure_accounting,
         )
         record_task_event(
             task_id,
-            "quality_blocked" if quality_failure else "failed",
+            "review_required" if review_required else "quality_blocked" if quality_failure else "failed",
             message,
-            status="failed",
-            stage="quality_blocked" if quality_failure else "failed",
+            status="review" if review_required else "failed",
+            stage="review" if review_required else "quality_blocked" if quality_failure else "failed",
             progress_percent=100,
             duration_ms=(time.perf_counter() - started) * 1000,
         )
@@ -1678,4 +1638,13 @@ async def process_task(task_id: str) -> None:
                     task_id,
                     safe_error_text(continuity_error),
                 )
-        logger.error("task_failed task_id=%s duration_ms=%.1f error=%s", task_id, (time.perf_counter() - started) * 1000, message)
+        if review_required:
+            logger.info("task_review_required task_id=%s duration_ms=%.1f blockers=%s", task_id,
+                        (time.perf_counter() - started) * 1000,
+                        len((failure_quality or {}).get("blockingIssues", [])))
+        elif quality_failure:
+            logger.warning("task_quality_blocked task_id=%s duration_ms=%.1f error=%s", task_id,
+                           (time.perf_counter() - started) * 1000, message)
+        else:
+            logger.error("task_failed task_id=%s duration_ms=%.1f error=%s", task_id,
+                         (time.perf_counter() - started) * 1000, message)

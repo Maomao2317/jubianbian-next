@@ -1137,7 +1137,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertTrue(processing._is_non_retryable_provider_error(caught.exception))
         self.assertFalse(processing._is_quality_gate_failure(caught.exception))
 
-    def test_process_task_quality_block_persists_audit_without_refund_or_review(self):
+    def test_process_task_quality_block_enters_review_without_refund(self):
         candidate = self._funnel_script(resolved=False)
         quality = {
             "issues": [{"severity": "P0", "tag": "台词归属错", "description": "说话人未知"}],
@@ -1156,7 +1156,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(processing, "task_row", return_value=row),
             patch.object(processing, "run_recognizer", return_value=(candidate, quality, usage, {})),
             patch.object(processing, "mark_task_stage"),
-            patch.object(processing, "record_task_event"),
+            patch.object(processing, "record_task_event") as record_event,
             patch.object(processing, "has_pending_recheck", return_value=False),
             patch.object(processing, "discard_local_proxy"),
             patch.object(processing, "_refund_task_once") as refund,
@@ -1165,13 +1165,47 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             asyncio.run(processing.process_task("task-quality"))
         refund.assert_not_called()
         persisted = update.call_args.kwargs
-        self.assertEqual((persisted["status"], persisted["stage"]), ("failed", "quality_blocked"))
+        self.assertEqual((persisted["status"], persisted["stage"]), ("review", "review"))
         self.assertEqual(persisted["api_cost_rmb"], 0.08)
         self.assertEqual(persisted["total_tokens"], 15)
         self.assertEqual(json.loads(persisted["result_json"])["characters"], ["甲"])
         saved_quality = json.loads(persisted["quality_json"])
-        self.assertFalse(saved_quality["automatedResolution"]["manualReview"])
-        self.assertFalse(saved_quality["automatedResolution"]["qualityRefund"])
+        self.assertEqual(saved_quality["deliveryStatus"], "review_required")
+        self.assertEqual(saved_quality["blockingIssues"][0]["severity"], "P0")
+        self.assertEqual(record_event.call_args.args[1], "review_required")
+        self.assertEqual(record_event.call_args.kwargs["status"], "review")
+
+    def test_incomplete_quality_repair_with_candidate_enters_review(self):
+        candidate = self._funnel_script(resolved=False)
+        quality = {
+            "blockingIssues": [{"severity": "P0", "tag": "missing", "description": "gap remains"}],
+        }
+        failure = processing._quality_failure(
+            "missing content remains", "content_repair_incomplete",
+            {"provider": "ark", "model": "lite", "total_tokens": 12, "api_cost_rmb": 0.04},
+            quality, candidate,
+        )
+        row = {
+            "id": "task-incomplete", "title": "测试", "file_name": "test.mp4",
+            "attempts": 0, "user_id": "user", "credits_used": 1,
+        }
+        with (
+            patch.object(processing, "task_row", return_value=row),
+            patch.object(processing, "run_recognizer", side_effect=failure),
+            patch.object(processing, "mark_task_stage"),
+            patch.object(processing, "record_task_event") as record_event,
+            patch.object(processing, "has_pending_recheck", return_value=False),
+            patch.object(processing, "_refund_task_once") as refund,
+            patch.object(processing, "update_task") as update,
+        ):
+            asyncio.run(processing.process_task("task-incomplete"))
+        refund.assert_not_called()
+        persisted = update.call_args.kwargs
+        self.assertEqual((persisted["status"], persisted["stage"]), ("review", "review"))
+        self.assertIsNone(persisted["error"])
+        self.assertEqual(json.loads(persisted["result_json"])["scenes"][0]["blocks"][0]["type"], "action")
+        self.assertTrue(json.loads(persisted["quality_json"])["automatedResolution"]["manualReview"])
+        self.assertEqual(record_event.call_args.args[1], "review_required")
 
     def test_lite_blocking_result_gets_one_turbo_review_and_can_finish(self):
         evidence = {
