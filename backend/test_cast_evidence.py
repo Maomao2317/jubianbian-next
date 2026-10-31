@@ -13,6 +13,44 @@ def episode(name, **profile):
 
 
 class CastEvidenceTests(unittest.TestCase):
+    def test_direct_name_evidence_promotes_descriptive_label(self):
+        raw = episode(
+            "白发蛇尾男性",
+            aliases=["寒澈", "白蟒兽人"],
+            nameEvidence="顾薇在开头对白中直接称呼其为寒澈。",
+        )
+        script = normalize_script(raw, "第48集")
+        profile = script["characterProfiles"][0]
+        self.assertEqual(profile["name"], "寒澈")
+        self.assertIn("白发蛇尾男性", profile["aliases"])
+        self.assertEqual(script["characters"], ["寒澈"])
+        self.assertEqual(script["scenes"][0]["blocks"][0]["speaker"], "寒澈")
+
+    def test_direct_name_evidence_without_alias_promotes_animated_or_live_role(self):
+        raw = episode(
+            "短发女孩",
+            nameEvidence="台词称呼其为女儿，并称其为婉理。",
+        )
+        script = normalize_script(raw, "第38集")
+        self.assertEqual(script["characterProfiles"][0]["name"], "婉理")
+        self.assertEqual(script["scenes"][0]["blocks"][0]["speaker"], "婉理")
+
+    def test_name_card_role_prefix_does_not_hide_name(self):
+        raw = episode("黑发黑衣女士", nameEvidence="姓名条显示女主 林长风。")
+        script = normalize_script(raw, "第2集")
+        self.assertEqual(script["characterProfiles"][0]["name"], "林长风")
+
+    def test_batch_promotes_evidence_before_continuity_matching(self):
+        first = episode(
+            "白发蛇尾男性",
+            aliases=["寒澈"],
+            identityEvidence="顾薇在对白中直接称呼其为寒澈。",
+        )
+        later = episode("寒澈")
+        apply_batch_character_continuity([first, later])
+        self.assertEqual(first["characters"], ["寒澈"])
+        self.assertEqual(later["characters"], ["寒澈"])
+
     def test_later_direct_name_evidence_backfills_earlier_honorific(self):
         scripts = [episode("林长风", aliases=["男主"], nameEvidence="姓名条显示男主 林长风"),
                    episode("林先生"), episode("男主"),

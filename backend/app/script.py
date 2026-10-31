@@ -2500,6 +2500,10 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
         "characterProfiles": used_profiles,
         "scenes": scenes,
     }
+    # Providers sometimes attach a direct naming proof to a descriptive cast
+    # label. Promote that proof before the result is exposed or stored so the
+    # same rule also repairs older tasks when they are read back.
+    _promote_evidenced_profile_names(result)
     suppress_redundant_subtitles(result)
     return result
 
@@ -2509,6 +2513,35 @@ _GENERIC_CHARACTER_LABELS = {
     "主角", "配角", "路人", "群众", "工作人员", "全体", "os", "vo",
     "内心独白",
 }
+
+# A provider may correctly record the source's naming evidence while still
+# leaving a descriptive label (for example ``白发蛇尾男性``) in ``name``.
+# Treat only explicit naming language as a safe promotion signal.  Appearance,
+# clothing, relationships, and plot context remain identity evidence, not a
+# license to invent or merge names.  The rules deliberately cover human,
+# animated, animal, system, and other non-human characters alike.
+_NAME_EVIDENCE_UNCERTAIN_RE = re.compile(r"待核|待确认|疑似|猜测|猜想|可能|暂定|未确认|不确定|无法确认")
+_EXPLICIT_NAME_RE = re.compile(
+    r"(?:直接称呼(?:其|他|她|该角色)?为|称呼(?:其|他|她|该角色)?为|"
+    r"称(?:其|他|她|该角色)?为|被称为|名(?:字)?叫|名字是|名为|叫做|叫作|"
+    r"喊出|呼喊|自称|自报(?:身份)?为|姓名条(?:显示|标注|写着)?|姓名(?:显示|是|为)|"
+    r"名字(?:显示|是|为)|字幕(?:显示|标注|写着))"
+    r"\s*(?:(?:男主|女主|主角|配角|父亲|母亲|妈妈|爸爸|儿子|女儿|哥哥|姐姐|弟弟|妹妹)\s*)?"
+    r"\s*[“\"「『【]?(?P<name>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·]{1,7})"
+)
+_NAME_EVIDENCE_STOPWORDS = {
+    "姓名", "名字", "名称", "人物", "角色", "未知", "不明", "说话人", "男主", "女主", "主角",
+    "配角", "路人", "群众", "男子", "女性", "男性", "男人", "女人", "男孩", "女孩", "男生", "女生",
+    "少女", "少年", "女士", "先生", "小姐", "夫人", "老公", "老婆", "爸爸", "妈妈", "父亲", "母亲",
+    "儿子", "女儿", "哥哥", "姐姐", "弟弟", "妹妹", "叔叔", "阿姨", "爷爷", "奶奶", "下属", "助理",
+    "秘书", "保安", "系统", "旁白", "内心独白", "白发", "黑发", "灰发", "短发", "长发",
+}
+_DESCRIPTIVE_NAME_RE = re.compile(
+    r"(?:男子|女子|男性|女性|男人|女人|男孩|女孩|男生|女生|少女|少年|女士|先生|小姐|老人|老妇|"
+    r"大叔|阿姨|小伙|路人|保安|助理|秘书|下属|母亲|父亲|妈妈|爸爸|儿子|女儿|黑发|白发|灰发|"
+    r"短发|长发|黑衣|白衣|灰衣|红衣|蓝衣|穿.*(?:衣|服|袍|裙|装)|戴.*(?:帽|眼镜)"
+    r")"
+)
 
 
 def _character_key(value: Any) -> str:
@@ -2521,6 +2554,124 @@ def _character_key(value: Any) -> str:
 
 def _is_generic_character(value: Any) -> bool:
     return _character_key(value) in {_character_key(item) for item in _GENERIC_CHARACTER_LABELS}
+
+
+def _looks_like_explicit_name(value: Any) -> bool:
+    """Return whether a label can safely serve as a named identity.
+
+    This is intentionally broader than a Chinese two-to-four-character name:
+    fantasy names, nicknames, animated creatures, and Latin-character names
+    are all valid when the video explicitly names them.  Generic role and
+    visual labels are excluded so the promotion cannot turn ``母亲`` or
+    ``黑发男子`` into a false canonical name.
+    """
+    text = character_label(value).strip(" \t\r\n，。！？；：、:;.!?()（）[]【】{}“”\"'「」『』")
+    if not text or text.casefold() in {item.casefold() for item in _NAME_EVIDENCE_STOPWORDS}:
+        return False
+    if _is_generic_character(text) or _DESCRIPTIVE_NAME_RE.search(text):
+        return False
+    if len(text) < 2 or len(text) > 8 or text.isdigit():
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·_-]{1,7}", text):
+        return False
+    return True
+
+
+def _name_is_supported(evidence: str, candidate: str) -> bool:
+    """Check that a candidate is used in a non-uncertain naming statement."""
+    if not evidence or not candidate:
+        return False
+    for match in re.finditer(re.escape(candidate), evidence, flags=re.IGNORECASE):
+        start = max(0, match.start() - 14)
+        end = min(len(evidence), match.end() + 14)
+        if not _NAME_EVIDENCE_UNCERTAIN_RE.search(evidence[start:end]):
+            return True
+    return False
+
+
+def _explicit_name_candidates(profile: dict[str, Any]) -> set[str]:
+    """Extract names explicitly supported by one profile's evidence fields."""
+    if not isinstance(profile, dict):
+        return set()
+    evidence = "。".join(
+        str(profile.get(key) or "").strip()
+        for key in ("nameEvidence", "identityEvidence")
+        if str(profile.get(key) or "").strip()
+    )
+    candidates: set[str] = set()
+    for match in _EXPLICIT_NAME_RE.finditer(evidence):
+        candidate = character_label(match.group("name"))
+        candidate = re.sub(r"^(?:其|他|她|该角色|这个角色)(?:为|是|叫)?", "", candidate)
+        if _looks_like_explicit_name(candidate) and _name_is_supported(evidence, candidate):
+            candidates.add(candidate)
+    for alias in profile.get("aliases") or []:
+        alias = character_label(alias)
+        if _looks_like_explicit_name(alias) and _name_is_supported(evidence, alias):
+            candidates.add(alias)
+    return candidates
+
+
+def _promote_evidenced_profile_names(script: dict[str, Any]) -> int:
+    """Promote explicit names over descriptive labels within one result.
+
+    The provider may output a correct ``nameEvidence``/``aliases`` pair but
+    keep the profile name as an appearance label.  A unique, non-uncertain
+    naming claim is stronger than that label and can safely rewrite only the
+    structured cast/speaker fields.  If two profiles claim the same name, the
+    ambiguity is preserved for review instead of merged automatically.
+    """
+    if not isinstance(script, dict):
+        return 0
+    claims: list[tuple[str, str]] = []
+    for profile in script.get("characterProfiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        label = character_label(profile.get("name"))
+        if not label or _looks_like_explicit_name(label):
+            continue
+        candidates = _explicit_name_candidates(profile)
+        if len(candidates) == 1:
+            claims.append((label, next(iter(candidates))))
+    if not claims:
+        return 0
+    by_candidate: dict[str, set[str]] = {}
+    for label, candidate in claims:
+        by_candidate.setdefault(_character_key(candidate), set()).add(label)
+    mapping = {
+        label: candidate
+        for label, candidate in claims
+        if len(by_candidate.get(_character_key(candidate), set())) == 1
+    }
+    if not mapping:
+        return 0
+    _replace_cast_labels(script, mapping)
+    return len(mapping)
+
+
+def _evidenced_name_drift_issues(script: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flag a descriptive label that still conflicts with direct name proof."""
+    if not isinstance(script, dict):
+        return []
+    issues: list[dict[str, Any]] = []
+    for profile in script.get("characterProfiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        label = character_label(profile.get("name"))
+        candidates = _explicit_name_candidates(profile)
+        if not label or len(candidates) != 1:
+            continue
+        candidate = next(iter(candidates))
+        if label == candidate or _looks_like_explicit_name(label):
+            continue
+        issues.append({
+            "tag": "人物身份连续性",
+            "severity": "P0",
+            "description": (
+                f"人物标签“{label}”的姓名证据明确指向“{candidate}”，但规范姓名仍未统一。"
+                "应以原视频中的直接称呼、姓名条或自报身份为准；无法确认时保留稳定称呼并人工复核。"
+            ),
+        })
+    return issues
 
 
 def _script_character_names(script: dict[str, Any], *, include_generic: bool = False) -> list[str]:
@@ -2647,8 +2798,11 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
     labels. All block text remains verbatim; only cast/speaker labels use the
     canonical names. Profiles retain identity aliases as internal metadata.
     """
-    if not isinstance(scripts, list) or len(scripts) < 2:
+    if not isinstance(scripts, list):
         return 0
+    promoted = sum(_promote_evidenced_profile_names(script) for script in scripts)
+    if len(scripts) < 2:
+        return promoted
     backfilled = _backfill_evidenced_cast_aliases(scripts)
     first = scripts[0] if isinstance(scripts[0], dict) else None
     if not first:
@@ -2857,7 +3011,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
             return contained[0]
         return None
 
-    total_changes = backfilled
+    total_changes = promoted + backfilled
     for script in scripts[1:]:
         if not isinstance(script, dict):
             continue
@@ -3276,6 +3430,7 @@ def script_quality(
                 and not any(str(profile.get(key) or "").strip()
                             for key in ("nameEvidence", "identityEvidence", "appearance", "clothing"))):
             add_issue("人物姓名缺少依据", "P0", f"{name}仅有姓名标签，没有姓名来源或人物身份资料，需回看姓名条、称呼或签名确认，不能猜名。")
+    issues.extend(_evidenced_name_drift_issues(script))
     issues.extend(_batch_character_drift_issues(script, evidence))
     content_duration = (evidence or {}).get("durationSec")
     content_gap_ranges = content_gaps(script, content_duration) if isinstance(content_duration, (int, float)) else []
