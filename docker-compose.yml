@@ -116,13 +116,8 @@ services:
       JBB_ARK_INPUT_TOKEN_RESERVE: ${JBB_ARK_INPUT_TOKEN_RESERVE:-65536}
       VOLCENGINE_ACCESS_KEY: ${VOLCENGINE_ACCESS_KEY:-}
       VOLCENGINE_SECRET_KEY: ${VOLCENGINE_SECRET_KEY:-}
-      TENCENTCLOUD_SECRET_ID: ${TENCENTCLOUD_SECRET_ID:-}
-      TENCENTCLOUD_SECRET_KEY: ${TENCENTCLOUD_SECRET_KEY:-}
-      TENCENTCLOUD_REGION: ${TENCENTCLOUD_REGION:-ap-guangzhou}
-      TENCENTCLOUD_SES_ENDPOINT: ${TENCENTCLOUD_SES_ENDPOINT:-ses.tencentcloudapi.com}
-      TENCENTCLOUD_SES_FROM_EMAIL: ${TENCENTCLOUD_SES_FROM_EMAIL:-}
-      TENCENTCLOUD_SES_FROM_NAME: ${TENCENTCLOUD_SES_FROM_NAME:-剧编编}
-      TENCENTCLOUD_SES_TEMPLATE_ID: ${TENCENTCLOUD_SES_TEMPLATE_ID:-0}
+      # Tencent SES settings come from env_file. Empty interpolation defaults
+      # here would mask the private values when --env-file is omitted.
       # Never expose a verification code from a deployed container. Local
       # development can run uvicorn with JBB_AUTH_ALLOW_DEV_CODE=1 instead.
       JBB_AUTH_ALLOW_DEV_CODE: "0"
