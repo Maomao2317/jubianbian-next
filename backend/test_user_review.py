@@ -91,6 +91,46 @@ class UserReviewTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 asyncio.run(routes.approve_task(None, "one"))
 
+    def test_explicit_content_gap_blocks_owner_batch_but_keeps_admin_override(self):
+        issue = {"severity": "P0", "tag": "正文时间缺段", "description": "0 到 50 秒缺少正文"}
+        quality = {
+            "deliveryStatus": "review_required",
+            "contentGapRanges": [{"startSec": 0, "endSec": 50}],
+            "contentRepair": {"remainingRanges": [{"startSec": 0, "endSec": 50}]},
+            "blockingIssues": [issue],
+            "issues": [issue],
+        }
+        with auth_store.db() as c:
+            c.execute("UPDATE tasks SET quality_json=? WHERE id='two'", (json.dumps(quality),))
+
+        with self.assertRaises(HTTPException) as caught:
+            self.approve(["one", "two"])
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("严重内容缺失", caught.exception.detail)
+        self.assertEqual(self.row("one")["status"], "review")
+        self.assertEqual(self.row("two")["status"], "review")
+        self.assertEqual(task_store.task_events("one"), [])
+
+        with (patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}),
+              patch.object(routes, "_admin_audit")):
+            result = asyncio.run(routes.admin_approve_task(None, "two"))
+        self.assertEqual(result["status"], "done")
+
+    def test_p0_source_dialogue_loss_cannot_be_owner_approved(self):
+        issue = {"severity": "P0", "tag": "疑似漏台词片段", "description": "独立语音证据未进入成稿"}
+        quality = {
+            "deliveryStatus": "review_required",
+            "contentGapRanges": [],
+            "blockingIssues": [issue],
+            "issues": [issue],
+        }
+        with auth_store.db() as c:
+            c.execute("UPDATE tasks SET quality_json=? WHERE id='one'", (json.dumps(quality),))
+        with self.assertRaises(HTTPException) as caught:
+            self.approve(["one"])
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(self.row("one")["status"], "review")
+
     def test_empty_heading_and_hidden_body_block_batch_atomically(self):
         for blocks in ([], [{"type": "screen_text", "text": "第2集"}],
                        [{"type": "action", "text": "开门", "suppressInOutput": True}]):
@@ -166,7 +206,9 @@ class UserReviewTests(unittest.TestCase):
             self.assertIn("独立 OCR", admin["events"][0]["message"])
         with self.assertRaises(HTTPException):
             routes.download_task(None, "one", "md")
-        self.approve(["one"])
+        with (patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}),
+              patch.object(routes, "_admin_audit")):
+            asyncio.run(routes.admin_approve_task(None, "one"))
         self.assertIn("我们出发吧", routes.download_task(None, "one", "md").body.decode())
 
     def test_quality_blocked_candidate_is_admin_only(self):

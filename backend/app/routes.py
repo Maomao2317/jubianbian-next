@@ -1046,6 +1046,29 @@ def task_detail(request: Request, task_id: str) -> dict[str, Any]:
     return user_task(task)
 
 
+def _requires_admin_content_approval(quality: dict[str, Any]) -> bool:
+    """Keep explicit or severe source-content loss out of owner approval."""
+    if quality.get("contentGapRanges"):
+        return True
+    repair = quality.get("contentRepair")
+    if isinstance(repair, dict) and repair.get("remainingRanges"):
+        return True
+    issues = [
+        issue
+        for key in ("blockingIssues", "issues")
+        for issue in (quality.get(key) if isinstance(quality.get(key), list) else [])
+        if isinstance(issue, dict)
+    ]
+    return any(
+        issue.get("tag") == "正文时间缺段"
+        or (
+            issue.get("tag") == "疑似漏台词片段"
+            and str(issue.get("severity") or "").upper() == "P0"
+        )
+        for issue in issues
+    )
+
+
 def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
     """Confirm owned drafts atomically, retaining findings and empty-body guards."""
     ids = list(dict.fromkeys(task_ids))
@@ -1071,6 +1094,11 @@ def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
                 continue
             if row["status"] != "review":
                 raise HTTPException(status_code=409, detail="只有待复核的剧本可以确认，请刷新任务状态")
+            if _requires_admin_content_approval(quality):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{row['title']}仍有严重内容缺失，需管理员重新识别或人工复核；本次未确认任何任务",
+                )
             quality.update(deliveryStatus="approved", approvedAt=approved_at,
                            approvedBy=user_id, approvalRole="user")
             if isinstance(quality.get("recheck"), dict):

@@ -967,13 +967,30 @@ async def _run_recognizer_with_media(
                 elif not turbo_upgrade_used:
                     repair_models = [turbo_model]
                 else:
-                    repair_models = []
+                    # A Turbo draft can still omit a well-localised range. Give
+                    # that range one quality-first Turbo repair when the margin
+                    # guard admits it, then retain Lite as the cheaper fallback.
+                    lite_model = ARK_LITE_MODEL.strip()
+                    repair_models = [turbo_model]
+                    if lite_model and not _is_turbo_model(lite_model):
+                        repair_models.append(lite_model)
                 repair_metadata: dict[str, Any] | None = None
                 profit_guards: list[dict[str, Any]] = []
                 for repair_index, repair_model in enumerate(repair_models):
                     if not quality.get("contentGapRanges"):
                         break
-                    if not is_glm and _is_turbo_model(repair_model) and turbo_upgrade_used:
+                    post_turbo_gap_repair = (
+                        not is_glm
+                        and repair_index == 0
+                        and _is_turbo_model(initial_model)
+                        and repair_model == turbo_model
+                    )
+                    if (
+                        not is_glm
+                        and _is_turbo_model(repair_model)
+                        and turbo_upgrade_used
+                        and not post_turbo_gap_repair
+                    ):
                         continue
                     gap_ranges = quality.get("contentGapRanges") or []
                     repair_scope = (

@@ -246,6 +246,57 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
         self.assertEqual(usage["total_tokens"], 15)
 
+    async def test_turbo_draft_with_gap_gets_one_budgeted_turbo_range_repair(self):
+        original = script(action(50, 60, "只识别到结尾。"))
+
+        def recognize_range(_path, _title, _duration, _evidence, _model, window, **kwargs):
+            start, end = window["startSec"], window["endSec"]
+            return script(action(0, end - start, "补全前段。")), {"total_tokens": 5}, start, end - start
+
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_LITE_MODEL", "lite"),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "ark_recognize", return_value=(original, {"total_tokens": 10})) as whole,
+              patch.object(processing, "ark_recognize_range", side_effect=recognize_range) as ranges):
+            result, quality, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集"}, Path("unused"), 60, {"durationSec": 60},
+                {"model": "turbo", "mode": "complexity", "band": "complex", "score": 2, "reasons": []}, {}, None)
+
+        whole.assert_called_once()
+        ranges.assert_called_once()
+        self.assertEqual(ranges.call_args.args[4], "turbo")
+        self.assertEqual(content_gaps(result, 60), [])
+        self.assertEqual(usage["total_tokens"], 15)
+        self.assertEqual([guard["tier"] for guard in quality["profitGuards"]], ["turbo"])
+
+    async def test_unprofitable_post_turbo_repair_falls_back_to_lite(self):
+        original = script(action(50, 60, "only recognized the ending"))
+
+        def recognize_range(_path, _title, _duration, _evidence, _model, window, **kwargs):
+            start, end = window["startSec"], window["endSec"]
+            return script(action(0, end - start, "restored opening")), {"total_tokens": 5}, start, end - start
+
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_LITE_MODEL", "lite"),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "ark_recognize", return_value=(
+                  original, {"total_tokens": 10, "api_cost_rmb": 0.2}
+              )),
+              patch.object(processing, "ark_recognize_range", side_effect=recognize_range) as ranges):
+            result, quality, _, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "episode"}, Path("unused"), 60, {"durationSec": 60},
+                {"model": "turbo", "mode": "complexity", "band": "complex", "score": 2, "reasons": []}, {}, None)
+
+        ranges.assert_called_once()
+        self.assertEqual(ranges.call_args.args[4], "lite")
+        self.assertEqual(content_gaps(result, 60), [])
+        self.assertEqual(
+            [(guard["tier"], guard["allowed"]) for guard in quality["profitGuards"]],
+            [("turbo", False), ("lite", True)],
+        )
+
     async def test_balance_failure_stops_calls_and_keeps_completed_clip(self):
         original = script(action(110, 120, "保留原稿。"))
         before = deepcopy(original)
