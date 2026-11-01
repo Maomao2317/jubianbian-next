@@ -807,8 +807,27 @@ def _ark_upload_body_capacity(upload_path: Path, progress_callback: MediaProgres
 def ark_wait_for_file(file_id: str, api_key: str | None = None) -> None:
     deadline = time.monotonic() + ARK_FILE_POLL_TIMEOUT_SECONDS
     encoded_id = quote(file_id, safe="")
+    transient_attempt = 0
     while True:
-        payload = ark_http("GET", f"/files/{encoded_id}", api_key=api_key)
+        try:
+            payload = ark_http("GET", f"/files/{encoded_id}", api_key=api_key)
+        except ArkError as exc:
+            retryable = (
+                exc.provider_code == "transient_network"
+                or exc.status_code in {408, 425, 429, 500, 502, 503, 504}
+            )
+            if not retryable or time.monotonic() >= deadline:
+                raise
+            transient_attempt += 1
+            logger.warning(
+                "provider_step provider=ark operation=file_poll_retry file_id=%s attempt=%s status_code=%s error=%s",
+                file_id,
+                transient_attempt,
+                exc.status_code,
+                safe_error_text(exc),
+            )
+            time.sleep(min(ARK_FILE_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+            continue
         status = str(payload.get("status") or payload.get("state") or "").lower() if isinstance(payload, dict) else ""
         if not status or status in {"active", "ready", "uploaded", "succeeded", "completed"}:
             return

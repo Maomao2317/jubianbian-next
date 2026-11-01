@@ -952,7 +952,13 @@ async def _run_recognizer_with_media(
 
             turbo_model = GLM_MODEL if is_glm else (ARK_TURBO_MODEL.strip() or ARK_MODEL)
             has_content_gaps = bool(quality.get("contentGapRanges"))
-            if has_content_gaps and turbo_model and route.get("mode") not in {"lite", "lite_only"}:
+            lite_fallback_to_turbo = (
+                not is_glm
+                and route.get("band") == "turbo_fallback"
+                and _is_turbo_model(initial_model)
+            )
+            explicit_lite_route = route.get("mode") in {"lite", "lite_only"}
+            if has_content_gaps and turbo_model and (not explicit_lite_route or lite_fallback_to_turbo):
                 row_keys = row.keys() if hasattr(row, "keys") else ()
                 task_attempt = int(row["attempts"] or 0) if "attempts" in row_keys else 0
                 if is_glm:
@@ -972,7 +978,11 @@ async def _run_recognizer_with_media(
                     # guard admits it, then retain Lite as the cheaper fallback.
                     lite_model = ARK_LITE_MODEL.strip()
                     repair_models = [turbo_model]
-                    if lite_model and not _is_turbo_model(lite_model):
+                    if (
+                        not lite_fallback_to_turbo
+                        and lite_model
+                        and not _is_turbo_model(lite_model)
+                    ):
                         repair_models.append(lite_model)
                 repair_metadata: dict[str, Any] | None = None
                 profit_guards: list[dict[str, Any]] = []

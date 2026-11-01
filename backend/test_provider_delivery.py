@@ -88,6 +88,35 @@ class ProviderDeliveryTests(unittest.TestCase):
         wait.assert_called_once_with("file-id", "key")
         self.assertEqual(result, {"api_key": "key", "file_id": "file-id"})
 
+    def test_file_preparation_retries_transient_poll_without_reupload(self):
+        reset = ArkError("Connection reset by peer", provider_code="transient_network")
+        with (
+            patch.object(providers, "ARK_FILE_POLL_SECONDS", 0.5),
+            patch.object(providers, "ARK_FILE_POLL_TIMEOUT_SECONDS", 30),
+            patch.object(providers, "ark_http", side_effect=[
+                reset, {"status": "processing"}, {"status": "ready"},
+            ]) as request,
+            patch.object(providers.time, "sleep") as delay,
+        ):
+            providers.ark_wait_for_file("file-id", "key")
+
+        self.assertEqual(request.call_count, 3)
+        request.assert_called_with("GET", "/files/file-id", api_key="key")
+        self.assertEqual(delay.call_count, 2)
+
+    def test_file_preparation_does_not_retry_terminal_provider_error(self):
+        failure = ArkError("invalid file", status_code=400, provider_code="InvalidParameter")
+        with (
+            patch.object(providers, "ark_http", side_effect=failure) as request,
+            patch.object(providers.time, "sleep") as delay,
+        ):
+            with self.assertRaises(ArkError) as caught:
+                providers.ark_wait_for_file("file-id", "key")
+
+        self.assertIs(caught.exception, failure)
+        request.assert_called_once_with("GET", "/files/file-id", api_key="key")
+        delay.assert_not_called()
+
     def test_direct_input_retains_sampling_short_words_and_emotion(self):
         with (
             patch.object(providers, "ARK_VIDEO_FPS", 1),

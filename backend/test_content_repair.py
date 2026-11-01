@@ -191,6 +191,62 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(quality["contentGapRanges"])
                 self.assertFalse(quality_gate(quality)[0])
 
+    async def test_lite_only_model_unavailable_fallback_repairs_gap_with_turbo(self):
+        unavailable = ArkError("ModelNotOpen", status_code=400, provider_code="ModelNotOpen")
+        original = script(action(50, 60, "只识别到结尾。"))
+
+        def recognize_range(_path, _title, _duration, _evidence, _model, window, **kwargs):
+            start, end = window["startSec"], window["endSec"]
+            return script(action(0, end - start, "补全前段。")), {"total_tokens": 5}, start, end - start
+
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_LITE_MODEL", "lite"),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "ark_recognize", side_effect=[
+                  unavailable, (original, {"total_tokens": 10}),
+              ]) as whole,
+              patch.object(processing, "ark_recognize_range", side_effect=recognize_range) as ranges):
+            result, quality, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集"}, Path("unused"), 60, {"durationSec": 60},
+                {"model": "lite", "mode": "lite_only", "band": "simple", "score": 0, "reasons": []},
+                {}, None,
+            )
+
+        self.assertEqual([call.args[4] for call in whole.call_args_list], ["lite", "turbo"])
+        ranges.assert_called_once()
+        self.assertEqual(ranges.call_args.args[4], "turbo")
+        self.assertEqual(content_gaps(result, 60), [])
+        self.assertEqual(quality["modelRoute"], "turbo_fallback")
+        self.assertEqual(usage["total_tokens"], 15)
+
+    async def test_lite_fallback_profit_guard_does_not_retry_unavailable_lite(self):
+        unavailable = ArkError("ModelNotOpen", status_code=400, provider_code="ModelNotOpen")
+        original = script(action(50, 60, "只识别到结尾。"))
+        allowed = {"allowed": True, "tier": "turbo"}
+        rejected = {"allowed": False, "tier": "turbo"}
+
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_LITE_MODEL", "lite"),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "_quality_call_budget", side_effect=[allowed, rejected]) as budget,
+              patch.object(processing, "ark_recognize", side_effect=[
+                  unavailable, (original, {"total_tokens": 10}),
+              ]) as whole,
+              patch.object(processing, "ark_recognize_range") as ranges):
+            with self.assertRaises(ArkError) as caught:
+                await processing._run_recognizer_with_media(
+                    {"id": "task", "title": "第11集"}, Path("unused"), 60, {"durationSec": 60},
+                    {"model": "lite", "mode": "lite_only", "band": "simple", "score": 0, "reasons": []},
+                    {}, None,
+                )
+
+        self.assertEqual(caught.exception.provider_code, "content_repair_incomplete")
+        self.assertEqual(whole.call_count, 2)
+        self.assertEqual(budget.call_count, 2)
+        ranges.assert_not_called()
+
     async def test_complete_draft_keeps_the_existing_review_path(self):
         original = script(action(0, 120))
         with (patch.object(processing, "mark_task_stage"),
