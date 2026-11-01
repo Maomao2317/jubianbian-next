@@ -82,7 +82,8 @@ def main():
     before = environment(previous)
     assert before['JBB_ENVIRONMENT'] == site and before['JBB_AUTH_ALLOW_DEV_CODE'] == '0'
     # Verify every tracked application source against the pushed revision.
-    files = git('ls-tree', '-r', '--name-only', commit, '--', 'backend/app', 'web-staging').decode().splitlines()
+    files = [p for p in git('ls-tree', '-r', '--name-only', '-z', commit, '--',
+                           'backend/app', 'web-staging').decode().split('\0') if p]
     expected = {p: hashlib.sha256(git('show', commit+':'+p).replace(b'\r\n', b'\n')).hexdigest()
                 for p in files}
     code = ('import sys,json,hashlib; from pathlib import Path; data=json.load(sys.stdin); '
