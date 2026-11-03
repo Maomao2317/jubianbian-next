@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from app import routes, task_store
 
 
@@ -23,25 +25,16 @@ class FakeRequest:
 
 
 class ParallelUploadFlowTests(unittest.TestCase):
-    def test_repeated_admin_approval_is_idempotent(self):
-        approved_row = {
-            "id": "review-1",
-            "status": "done",
-            "quality_json": json.dumps(
-                {
-                    "deliveryStatus": "approved",
-                    "approvedAt": "2026-10-12T01:02:03+00:00",
-                }
-            ),
-        }
+    def test_admin_approval_is_rejected(self):
         with (
             patch.object(routes, "_require_admin", return_value={"id": "admin-1", "role": "admin"}),
-            patch.object(routes, "task_row", return_value=approved_row),
+            patch.object(routes, "task_row", return_value={"id": "review-1"}),
         ):
-            result = asyncio.run(routes.admin_approve_task(FakeRequest(), "review-1"))
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(routes.admin_approve_task(FakeRequest(), "review-1"))
 
-        self.assertEqual(result["status"], "done")
-        self.assertTrue(result["alreadyApproved"])
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(caught.exception.detail, "待复核剧本必须由所属用户自行确认，管理员不能代为通过")
 
     def test_review_tasks_have_their_own_owner_filter(self):
         database = "file:jbb-running-filter?mode=memory&cache=shared"

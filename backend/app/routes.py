@@ -842,58 +842,11 @@ def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:
 
 
 async def admin_approve_task(request: Request, task_id: str) -> dict[str, Any]:
-    """Approve a quality-gated screenplay for download."""
-    admin = _require_admin(request)
-    row = task_row(task_id)
-    if not row:
+    """Keep final screenplay approval with the task owner."""
+    _require_admin(request)
+    if not task_row(task_id):
         raise HTTPException(status_code=404, detail="任务不存在")
-    # Approval requests can be repeated when a browser retries a slow POST or
-    # when an administrator double-clicks.  Treat an already-approved row as
-    # success so the UI cannot turn a successful first click into a confusing
-    # conflict message on the second request.
-    existing_quality: dict[str, Any] = {}
-    if row["quality_json"]:
-        try:
-            parsed_quality = json.loads(row["quality_json"])
-            if isinstance(parsed_quality, dict):
-                existing_quality = parsed_quality
-        except (TypeError, ValueError):
-            pass
-    if (
-        row["status"] == "done"
-        and existing_quality.get("deliveryStatus") == "approved"
-        and existing_quality.get("approvedAt")
-    ):
-        return {
-            "id": task_id,
-            "status": "done",
-            "alreadyApproved": True,
-            "message": "管理员复核已通过",
-        }
-    if row["status"] != "review":
-        raise HTTPException(status_code=409, detail="只有管理员复核中的任务可以确认通过")
-    try:
-        candidate = json.loads(row["result_json"] or "{}")
-    except (TypeError, ValueError):
-        candidate = None
-    if not has_screenplay_body(candidate):
-        raise HTTPException(status_code=409, detail="剧本正文为空，不能确认通过，请重新识别")
-    approved_at = now_iso()
-    quality = existing_quality
-    quality["deliveryStatus"] = "approved"
-    quality["approvedAt"] = approved_at
-    with db() as connection:
-        changed = connection.execute(
-            "UPDATE tasks SET status = 'done', stage = 'done', progress_percent = 100, completed_at = COALESCE(completed_at, ?), error = NULL, quality_json = ? WHERE id = ? AND status = 'review'",
-            (approved_at, json.dumps(quality, ensure_ascii=False), task_id),
-        ).rowcount
-        if changed == 1:
-            mark_recheck_resolved(connection, task_id, "approved")
-    if changed != 1:
-        raise HTTPException(status_code=409, detail="任务已被其他管理员处理")
-    record_task_event(task_id, "admin_approved", "管理员复核通过，剧本可以下载", status="done", stage="done", progress_percent=100)
-    _admin_audit(admin["id"], "task_approve", "task", task_id)
-    return {"id": task_id, "status": "done", "message": "管理员复核通过"}
+    raise HTTPException(status_code=409, detail="待复核剧本必须由所属用户自行确认，管理员不能代为通过")
 
 
 async def admin_retry_task(request: Request, task_id: str, background: BackgroundTasks) -> dict[str, Any]:
@@ -1046,29 +999,6 @@ def task_detail(request: Request, task_id: str) -> dict[str, Any]:
     return user_task(task)
 
 
-def _requires_admin_content_approval(quality: dict[str, Any]) -> bool:
-    """Keep explicit or severe source-content loss out of owner approval."""
-    if quality.get("contentGapRanges"):
-        return True
-    repair = quality.get("contentRepair")
-    if isinstance(repair, dict) and repair.get("remainingRanges"):
-        return True
-    issues = [
-        issue
-        for key in ("blockingIssues", "issues")
-        for issue in (quality.get(key) if isinstance(quality.get(key), list) else [])
-        if isinstance(issue, dict)
-    ]
-    return any(
-        issue.get("tag") == "正文时间缺段"
-        or (
-            issue.get("tag") == "疑似漏台词片段"
-            and str(issue.get("severity") or "").upper() == "P0"
-        )
-        for issue in issues
-    )
-
-
 def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
     """Confirm owned drafts atomically, retaining findings and empty-body guards."""
     ids = list(dict.fromkeys(task_ids))
@@ -1094,11 +1024,6 @@ def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
                 continue
             if row["status"] != "review":
                 raise HTTPException(status_code=409, detail="只有待复核的剧本可以确认，请刷新任务状态")
-            if _requires_admin_content_approval(quality):
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"{row['title']}仍有严重内容缺失，需管理员重新识别或人工复核；本次未确认任何任务",
-                )
             quality.update(deliveryStatus="approved", approvedAt=approved_at,
                            approvedBy=user_id, approvalRole="user")
             if isinstance(quality.get("recheck"), dict):

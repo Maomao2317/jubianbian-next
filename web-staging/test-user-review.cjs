@@ -81,6 +81,8 @@ const click = async (action, id) => {
   ui.state.tasks = group.tasks;
   await click("review-batch", "batch");
   assert.match(node("#modalRoot").innerHTML, /确认通过并开放下载（2集）/, node("#toast").textContent);
+  assert.match(node("#modalRoot").innerHTML, /系统已完成自动质检和必要的修复/);
+  assert.match(node("#modalRoot").innerHTML, /无需管理员审批/);
   assert.deepEqual(calls, []); // Opening the preview never approves anything.
   await click("confirm-user-review");
   assert.deepEqual(calls[0], ["batch", "one", "two"]);

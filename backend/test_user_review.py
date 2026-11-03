@@ -91,7 +91,7 @@ class UserReviewTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 asyncio.run(routes.approve_task(None, "one"))
 
-    def test_explicit_content_gap_blocks_owner_batch_but_keeps_admin_override(self):
+    def test_owner_can_approve_explicit_content_gap_after_automatic_repair(self):
         issue = {"severity": "P0", "tag": "正文时间缺段", "description": "0 到 50 秒缺少正文"}
         quality = {
             "deliveryStatus": "review_required",
@@ -103,20 +103,15 @@ class UserReviewTests(unittest.TestCase):
         with auth_store.db() as c:
             c.execute("UPDATE tasks SET quality_json=? WHERE id='two'", (json.dumps(quality),))
 
-        with self.assertRaises(HTTPException) as caught:
-            self.approve(["one", "two"])
-        self.assertEqual(caught.exception.status_code, 409)
-        self.assertIn("严重内容缺失", caught.exception.detail)
-        self.assertEqual(self.row("one")["status"], "review")
-        self.assertEqual(self.row("two")["status"], "review")
-        self.assertEqual(task_store.task_events("one"), [])
+        result = self.approve(["one", "two"])
+        self.assertEqual(result["approvedCount"], 2)
+        self.assertEqual(self.row("one")["status"], "done")
+        self.assertEqual(self.row("two")["status"], "done")
+        saved_quality = json.loads(self.row("two")["quality_json"])
+        self.assertEqual(saved_quality["blockingIssues"], [issue])
+        self.assertEqual((saved_quality["approvedBy"], saved_quality["approvalRole"]), ("owner", "user"))
 
-        with (patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}),
-              patch.object(routes, "_admin_audit")):
-            result = asyncio.run(routes.admin_approve_task(None, "two"))
-        self.assertEqual(result["status"], "done")
-
-    def test_p0_source_dialogue_loss_cannot_be_owner_approved(self):
+    def test_owner_can_approve_p0_source_dialogue_warning(self):
         issue = {"severity": "P0", "tag": "疑似漏台词片段", "description": "独立语音证据未进入成稿"}
         quality = {
             "deliveryStatus": "review_required",
@@ -126,9 +121,17 @@ class UserReviewTests(unittest.TestCase):
         }
         with auth_store.db() as c:
             c.execute("UPDATE tasks SET quality_json=? WHERE id='one'", (json.dumps(quality),))
-        with self.assertRaises(HTTPException) as caught:
-            self.approve(["one"])
+        self.assertEqual(self.approve(["one"])["approvedCount"], 1)
+        self.assertEqual(self.row("one")["status"], "done")
+        saved_quality = json.loads(self.row("one")["quality_json"])
+        self.assertEqual(saved_quality["blockingIssues"], [issue])
+
+    def test_admin_cannot_confirm_an_owner_review(self):
+        with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(routes.admin_approve_task(None, "one"))
         self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(caught.exception.detail, "待复核剧本必须由所属用户自行确认，管理员不能代为通过")
         self.assertEqual(self.row("one")["status"], "review")
 
     def test_empty_heading_and_hidden_body_block_batch_atomically(self):
@@ -206,9 +209,7 @@ class UserReviewTests(unittest.TestCase):
             self.assertIn("独立 OCR", admin["events"][0]["message"])
         with self.assertRaises(HTTPException):
             routes.download_task(None, "one", "md")
-        with (patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}),
-              patch.object(routes, "_admin_audit")):
-            asyncio.run(routes.admin_approve_task(None, "one"))
+        asyncio.run(routes.approve_task(None, "one"))
         self.assertIn("我们出发吧", routes.download_task(None, "one", "md").body.decode())
 
     def test_quality_blocked_candidate_is_admin_only(self):
