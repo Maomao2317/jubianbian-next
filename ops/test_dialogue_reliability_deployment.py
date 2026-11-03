@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+import types
 import unittest
 
 spec = importlib.util.spec_from_file_location(
@@ -44,6 +45,15 @@ class DialoguePromotionTests(unittest.TestCase):
     def test_smoke_transform_refuses_unexpected_source(self):
         with self.assertRaises(AssertionError):
             promotion.transform_smoke('print("unexpected")')
+
+    def test_driver_invocation_does_not_require_driver_sys_attribute(self):
+        original_argv = sys.argv
+        observed = []
+        driver = types.SimpleNamespace(main=lambda: observed.append(tuple(sys.argv)))
+        argv = [promotion.DRIVER, 'production', '--commit', promotion.RUNTIME_COMMIT]
+        promotion.run_driver(driver, argv)
+        self.assertEqual(observed, [tuple(argv)])
+        self.assertIs(sys.argv, original_argv)
 
 
 if __name__ == '__main__':

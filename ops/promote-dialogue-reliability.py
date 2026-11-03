@@ -140,6 +140,15 @@ def ensure_work_artifacts(root, prepared_path, staging_path):
             shutil.copy2(source, target)
 
 
+def run_driver(driver, argv):
+    previous = sys.argv
+    try:
+        sys.argv = argv
+        driver.main()
+    finally:
+        sys.argv = previous
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tool-commit', required=True)
@@ -225,8 +234,7 @@ def main():
         return new_release if path == old_release else path
 
     driver.Path = mapped_path
-    driver.sys.argv = [DRIVER, 'production', '--commit', RUNTIME_COMMIT]
-    driver.main()
+    run_driver(driver, [DRIVER, 'production', '--commit', RUNTIME_COMMIT])
 
 
 if __name__ == '__main__':
