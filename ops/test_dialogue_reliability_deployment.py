@@ -55,6 +55,29 @@ class DialoguePromotionTests(unittest.TestCase):
         self.assertEqual(observed, [tuple(argv)])
         self.assertIs(sys.argv, original_argv)
 
+    def test_prior_release_upload_budget_check_is_replaced_precisely(self):
+        calls = []
+        routing = types.SimpleNamespace(
+            output=lambda args, **kwargs: calls.append((args, kwargs)) or b'verified')
+        promotion.replace_unrelated_upload_budget_check(routing)
+        old_check = (
+            "from app import config; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; "
+            "assert config.ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS == 900; "
+            "print('UPLOAD_BUDGETS_VERIFIED')"
+        )
+        command = ['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', 'app',
+                   'python', '-c', old_check]
+        self.assertEqual(routing.output(command, timeout=5), b'verified')
+        rewritten, kwargs = calls.pop()
+        self.assertEqual(rewritten[:-1], command[:-1])
+        self.assertIn('RUNTIME_CONFIGURATION_VERIFIED', rewritten[-1])
+        self.assertNotIn('UPLOAD_BUDGETS_VERIFIED', rewritten[-1])
+        self.assertEqual(kwargs, {'timeout': 5})
+
+        normal = ['docker', 'exec', 'app', 'python', '-c', 'print(1)']
+        routing.output(normal)
+        self.assertEqual(calls.pop()[0], normal)
+
 
 if __name__ == '__main__':
     unittest.main()
