@@ -48,18 +48,16 @@ class DialoguePromotionTests(unittest.TestCase):
 
     def test_driver_invocation_does_not_require_driver_sys_attribute(self):
         original_argv = sys.argv
+        original_check_output = promotion.subprocess.check_output
         observed = []
         driver = types.SimpleNamespace(main=lambda: observed.append(tuple(sys.argv)))
         argv = [promotion.DRIVER, 'production', '--commit', promotion.RUNTIME_COMMIT]
         promotion.run_driver(driver, argv)
         self.assertEqual(observed, [tuple(argv)])
         self.assertIs(sys.argv, original_argv)
+        self.assertIs(promotion.subprocess.check_output, original_check_output)
 
     def test_prior_release_upload_budget_check_is_replaced_precisely(self):
-        calls = []
-        routing = types.SimpleNamespace(
-            output=lambda args, **kwargs: calls.append((args, kwargs)) or b'verified')
-        promotion.replace_unrelated_upload_budget_check(routing)
         old_check = (
             "from app import config; assert config.MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS == 900; "
             "assert config.ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS == 900; "
@@ -67,16 +65,13 @@ class DialoguePromotionTests(unittest.TestCase):
         )
         command = ['docker', 'exec', '-e', 'PYTHONPATH=/app/backend', 'app',
                    'python', '-c', old_check]
-        self.assertEqual(routing.output(command, timeout=5), b'verified')
-        rewritten, kwargs = calls.pop()
+        rewritten = promotion.rewrite_unrelated_upload_budget_check(command)
         self.assertEqual(rewritten[:-1], command[:-1])
         self.assertIn('RUNTIME_CONFIGURATION_VERIFIED', rewritten[-1])
         self.assertNotIn('UPLOAD_BUDGETS_VERIFIED', rewritten[-1])
-        self.assertEqual(kwargs, {'timeout': 5})
 
         normal = ['docker', 'exec', 'app', 'python', '-c', 'print(1)']
-        routing.output(normal)
-        self.assertEqual(calls.pop()[0], normal)
+        self.assertIs(promotion.rewrite_unrelated_upload_budget_check(normal), normal)
 
 
 if __name__ == '__main__':

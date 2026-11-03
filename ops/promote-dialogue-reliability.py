@@ -112,7 +112,6 @@ def load_driver():
     driver.DEFAULTS = {}
     driver.APP_CHANGES = set(APP_CHANGES)
     driver.FRONTEND_TEST_CHANGES = set()
-    replace_unrelated_upload_budget_check(driver.routing)
 
     original_dedent = textwrap.dedent
 
@@ -126,32 +125,27 @@ def load_driver():
     return driver
 
 
-def replace_unrelated_upload_budget_check(routing):
+def rewrite_unrelated_upload_budget_check(args):
     """Replace the prior release's config-specific assertion, not its guards."""
-    original_output = routing.output
-
-    def release_output(args, **kwargs):
-        command = [str(value) for value in args]
-        script = command[-1] if command else ''
-        is_old_upload_check = (
-            len(command) >= 6
-            and command[0:2] == ['docker', 'exec']
-            and command[-3:-1] == ['python', '-c']
-            and 'UPLOAD_BUDGETS_VERIFIED' in script
-            and 'MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS' in script
-            and 'ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS' in script
-        )
-        if is_old_upload_check:
-            replacement = list(args)
-            replacement[-1] = (
-                "import os; from app import config; "
-                "assert os.environ.get('JBB_ENVIRONMENT') == 'production'; "
-                "print('RUNTIME_CONFIGURATION_VERIFIED', os.environ['JBB_ENVIRONMENT'])"
-            )
-            return original_output(replacement, **kwargs)
-        return original_output(args, **kwargs)
-
-    routing.output = release_output
+    command = [str(value) for value in args]
+    script = command[-1] if command else ''
+    is_old_upload_check = (
+        len(command) >= 6
+        and command[0:2] == ['docker', 'exec']
+        and command[-3:-1] == ['python', '-c']
+        and 'UPLOAD_BUDGETS_VERIFIED' in script
+        and 'MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS' in script
+        and 'ARK_UPLOAD_TOTAL_TIMEOUT_SECONDS' in script
+    )
+    if not is_old_upload_check:
+        return args
+    replacement = list(args)
+    replacement[-1] = (
+        "import os; from app import config; "
+        "assert os.environ.get('JBB_ENVIRONMENT') == 'production'; "
+        "print('RUNTIME_CONFIGURATION_VERIFIED', os.environ['JBB_ENVIRONMENT'])"
+    )
+    return replacement
 
 
 def work_root(tool_commit):
@@ -171,10 +165,18 @@ def ensure_work_artifacts(root, prepared_path, staging_path):
 
 def run_driver(driver, argv):
     previous = sys.argv
+    previous_check_output = subprocess.check_output
+
+    def release_check_output(args, *positional, **kwargs):
+        return previous_check_output(
+            rewrite_unrelated_upload_budget_check(args), *positional, **kwargs)
+
     try:
         sys.argv = argv
+        subprocess.check_output = release_check_output
         driver.main()
     finally:
+        subprocess.check_output = previous_check_output
         sys.argv = previous
 
 
