@@ -43,8 +43,10 @@ ISSUE_TEXT = {
 
 STAGE_MESSAGES = {
     "uploading": "等待视频上传", "queued": "等待处理", "probing": "正在读取视频信息",
+    "source_download_wait": "等待读取原视频", "source_download": "正在读取原视频",
     "compression_queued": "等待视频准备", "compressing": "正在准备视频",
-    "video_upload": "正在提交视频", "video_upload_retry": "正在重新提交视频",
+    "video_upload": "正在提交视频", "video_upload_wait": "等待提交视频",
+    "video_upload_retry": "正在重新提交视频", "video_upload_capacity_timeout": "提交通道繁忙，正在自动恢复",
     "video_read_retry": "正在重新读取视频", "video_preparing": "正在准备视频",
     "evidence_wait": "正在核对台词和画面文字", "transcribing": "正在整理台词",
     "vision": "正在整理人物和画面内容", "repairing": "正在核对并补全内容",
@@ -76,19 +78,22 @@ def user_issue(issue: Any) -> dict[str, str]:
 def user_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for event in events:
+        raw_status = event.get("status")
+        status = "failed" if raw_status == "quality_blocked" else raw_status
+        status = status if status in {"queued", "running", "review", "done", "failed"} else "running"
         stage = event.get("stage")
         if stage == "quality_blocked":
             stage = "failed"
-        stage = stage if stage in STAGE_MESSAGES else "reviewing"
+        if stage not in STAGE_MESSAGES:
+            stage = {"queued": "queued", "review": "review", "done": "done", "failed": "failed"}.get(status, "reviewing")
         message = STAGE_MESSAGES[stage]
         if event.get("type") == "user_approved":
             message = "已确认查看检查提示，剧本可下载"
         elif event.get("type") in {"admin_recheck_failed_restored", "admin_recheck_restored"}:
             message = "已恢复上次完成的剧本"
-        status = "failed" if event.get("status") == "quality_blocked" else event.get("status")
         result.append({"type": "stage", "status": status,
                        "stage": stage, "message": message,
-                       **{key: event.get(key) for key in ("progressPercent", "durationMs", "createdAt")}})
+                       **{key: event.get(key) for key in ("progressPercent", "createdAt")}})
     return result
 
 
@@ -109,12 +114,18 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
               "durationSec", "estimatedMinutes", "creditsUsed", "progressPercent", "stageProgressPercent",
               "createdAt", "updatedAt", "completedAt", "batchId", "batchTitle", "batchIndex", "batchTotal"}
     result = {key: value for key, value in task.items() if key in fields}
+    status = task.get("status")
+    result["status"] = status if status in {"queued", "running", "review", "done", "failed"} else "running"
     quality_blocked = task.get("status") == "failed" and task.get("stage") == "quality_blocked"
     if quality_blocked:
         # This is an internal gate/audit state. Customers only need the public
         # failure state; revealing the gate name would expose implementation
         # details that are intentionally confined to the admin console.
         result["stage"] = "failed"
+    elif task.get("stage") not in STAGE_MESSAGES:
+        result["stage"] = {"queued": "queued", "review": "review", "done": "done", "failed": "failed"}.get(
+            result["status"], "reviewing"
+        )
     quality = task.get("quality") if isinstance(task.get("quality"), dict) else {}
     issues = []
     raw_issues = [issue for key in ("blockingIssues", "issues")

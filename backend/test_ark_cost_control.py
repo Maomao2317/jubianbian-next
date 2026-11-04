@@ -180,6 +180,67 @@ class ArkCostControlTests(unittest.TestCase):
         self.assertNotIn("key-a", json.dumps(usage))
         self.assertNotIn("key-b", json.dumps(usage))
 
+    def test_model_not_open_walks_every_url_account_until_success(self):
+        script, _ = self.fixture()
+        errors = [
+            ArkError("model is not active", status_code=404, provider_code="ModelNotOpen"),
+            ArkError("model is not active", status_code=404, provider_code="ModelNotOpen"),
+        ]
+        completed = {"output_text": json.dumps(script), "usage": {"total_tokens": 120}}
+        prepared = {"api_key": "key-a", "video_url": "https://test/video"}
+        with (
+            patch.object(providers, "ARK_API_KEYS", ("key-a", "key-b", "key-c")),
+            patch.object(providers, "_ark_pool_index", 0),
+            patch.dict(providers._ark_cooldowns, {}, clear=True),
+            patch.dict(providers._ark_model_cooldowns, {}, clear=True),
+            patch.object(providers, "_ark_response_with_url_retry",
+                         side_effect=[*errors, completed]) as create,
+        ):
+            _, usage = providers.ark_recognize(
+                Path("source.mp4"), "episode", 100,
+                model="doubao-seed-2-1-lite-260915", prepared_video=prepared,
+            )
+        self.assertEqual(create.call_count, 3)
+        self.assertEqual(prepared["api_key"], "key-c")
+        self.assertEqual([call["account"] for call in usage["calls"]],
+                         ["account-1", "account-2", "account-3"])
+        self.assertEqual([call["status"] for call in usage["calls"]],
+                         ["failed", "failed", "success"])
+
+    def test_all_model_accounts_unavailable_is_bounded_and_audited(self):
+        unavailable = lambda: ArkError("model is not active", status_code=404, provider_code="ModelNotOpen")
+        prepared = {"api_key": "key-a", "video_url": "https://test/video"}
+        with (
+            patch.object(providers, "ARK_API_KEYS", ("key-a", "key-b", "key-c")),
+            patch.object(providers, "_ark_pool_index", 0),
+            patch.dict(providers._ark_cooldowns, {}, clear=True),
+            patch.dict(providers._ark_model_cooldowns, {}, clear=True),
+            patch.object(providers, "_ark_response_with_url_retry",
+                         side_effect=[unavailable(), unavailable(), unavailable()]) as create,
+        ):
+            with self.assertRaises(ArkError) as caught:
+                providers.ark_recognize(
+                    Path("source.mp4"), "episode", 100,
+                    model="doubao-seed-2-1-lite-260915", prepared_video=prepared,
+                )
+        self.assertEqual(create.call_count, 3)
+        self.assertEqual([call["account"] for call in caught.exception.usage["calls"]],
+                         ["account-1", "account-2", "account-3"])
+        self.assertTrue(all(call["status"] == "failed" for call in caught.exception.usage["calls"]))
+
+    def test_unavailable_model_pair_is_skipped_until_process_restart(self):
+        with (
+            patch.object(providers, "ARK_API_KEYS", ("key-a", "key-b", "key-c")),
+            patch.object(providers, "_ark_pool_index", 0),
+            patch.dict(providers._ark_cooldowns, {}, clear=True),
+            patch.dict(providers._ark_model_cooldowns, {}, clear=True),
+        ):
+            providers._cool_down_ark_model("key-a", "lite")
+            providers._cool_down_ark_model("key-b", "lite")
+            self.assertEqual(providers.ark_model_account_key("lite"), "key-c")
+            self.assertTrue(providers._ark_model_on_cooldown("key-a", "lite"))
+            self.assertEqual(providers._ark_model_cooldowns[("key-a", "lite")], float("inf"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -778,17 +778,29 @@
     </div>`;
   }
 
-  function renderTaskTimeline(task) {
+  function renderTaskTimeline(task, adminMode = false) {
     const events = Array.isArray(task.events) ? task.events : [];
     if (!events.length) return "";
     return `<section class="task-timeline">
       <div class="timeline-head"><span class="aside-label">任务状态记录</span><span>${events.length} 条事件</span></div>
       <div class="timeline-list">${events.map((event) => {
-        const label = event.status === "review" || event.type === "review_required"
+        const publicStage = event.stage && cfg.stageText[event.stage] ? event.stage : "reviewing";
+        const publicStatus = event.status && cfg.statusText[event.status] ? event.status : "running";
+        const needsReview = event.status === "review" || event.type === "review_required" || publicStage === "review";
+        const label = needsReview
           ? "待用户复核"
-          : event.stage ? (cfg.stageText[event.stage] || event.stage) : (cfg.statusText[event.status] || event.type);
-        const duration = Number.isFinite(Number(event.durationMs)) ? ` · ${Math.round(Number(event.durationMs))} ms` : "";
-        return `<div class="timeline-item"><i></i><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(event.message || "状态更新")}${duration}</span><small>${formatDate(event.createdAt)}</small></div></div>`;
+          : (["done", "failed"].includes(publicStatus)
+            ? cfg.statusText[publicStatus]
+            : (cfg.stageText[publicStage] || cfg.statusText[publicStatus] || "状态更新"));
+        let publicMessage = `任务进度已更新：${label}`;
+        if (needsReview) publicMessage = "内容检查已完成，请查看提示并手动确认复核";
+        else if (publicStatus === "done" || publicStage === "done") publicMessage = "处理完成，剧本可下载";
+        else if (publicStatus === "failed" || publicStage === "failed") publicMessage = "本次处理未完成，请查看任务详情";
+        if (event.type === "user_approved") publicMessage = "已确认查看检查提示，剧本可下载";
+        else if (["admin_recheck_failed_restored", "admin_recheck_restored"].includes(event.type)) publicMessage = "已恢复上次完成的剧本";
+        const message = adminMode ? (event.message || "状态更新") : publicMessage;
+        const duration = adminMode && Number.isFinite(Number(event.durationMs)) ? ` · ${Math.round(Number(event.durationMs))} ms` : "";
+        return `<div class="timeline-item"><i></i><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(message)}${duration}</span><small>${formatDate(event.createdAt)}</small></div></div>`;
       }).join("")}</div>
     </section>`;
   }
@@ -1383,7 +1395,7 @@
         const restoreButton = task.recheck && task.recheck.pending ? `<button class="secondary-btn" type="button" data-action="admin-review-restore" data-id="${task.id}">恢复上次已完成版本</button>` : "";
         const episodes = Array.isArray(task.episodes) ? task.episodes : [];
         const episodeLinks = episodes.length > 1 ? `<nav class="review-episodes" aria-label="选择剧集">${episodes.map(episode => `<button class="${episode.id === task.id ? "primary-btn" : "secondary-btn"}" data-action="admin-review" data-id="${episode.id}" ${episode.id === task.id ? "disabled" : ""}>${escapeHtml(episode.fileName || episode.title)} · ${escapeHtml(cfg.statusText[episode.status] || episode.status)}</button>`).join("")}</nav>` : "";
-        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="adminTaskDetailTitle"><div class="modal-head"><h2 id="adminTaskDetailTitle">任务详情</h2><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${episodeLinks}<div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong>${statusBadge(task)}<span>${escapeHtml(task.fileName || "")}</span></div><p class="quality-note">时长 ${formatDuration(task.durationSec)} · 消耗 ${Number(task.creditsUsed ?? task.estimatedMinutes ?? 0).toFixed(1)} 分钟 · 进度 ${Number(task.progressPercent) || 0}% · 创建 ${formatDate(task.createdAt)}</p>${task.error ? `<p class="quality-note quality-warning">${escapeHtml(task.error)}</p>` : ""}${task.status === "review" ? `<p class="quality-note quality-warning">等待用户自行复核确认，确认后用户即可下载。</p>` : ""}${reviewIssuesMarkup(task)}<p class="quality-note">${escapeHtml(evidenceLabel)}</p><div class="admin-review-script">${task.result ? scriptPreview(task.result) : "<p>暂无剧本正文。</p>"}</div>${renderTaskTimeline(task)}<div class="modal-actions">${restoreButton}<button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
+        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="adminTaskDetailTitle"><div class="modal-head"><h2 id="adminTaskDetailTitle">任务详情</h2><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${episodeLinks}<div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong>${statusBadge(task)}<span>${escapeHtml(task.fileName || "")}</span></div><p class="quality-note">时长 ${formatDuration(task.durationSec)} · 消耗 ${Number(task.creditsUsed ?? task.estimatedMinutes ?? 0).toFixed(1)} 分钟 · 进度 ${Number(task.progressPercent) || 0}% · 创建 ${formatDate(task.createdAt)}</p>${task.error ? `<p class="quality-note quality-warning">${escapeHtml(task.error)}</p>` : ""}${task.status === "review" ? `<p class="quality-note quality-warning">等待用户自行复核确认，确认后用户即可下载。</p>` : ""}${reviewIssuesMarkup(task)}<p class="quality-note">${escapeHtml(evidenceLabel)}</p><div class="admin-review-script">${task.result ? scriptPreview(task.result) : "<p>暂无剧本正文。</p>"}</div>${renderTaskTimeline(task, true)}<div class="modal-actions">${restoreButton}<button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
       } catch (error) { toast(error.message || "任务详情加载失败", "error"); }
       finally {
         if (actionElement.isConnected) {

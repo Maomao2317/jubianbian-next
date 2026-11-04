@@ -12,8 +12,10 @@ const node = selector => {
 const calls = [];
 const prompts = [];
 let mobile = false;
+const leakedMessage = "处理失败：Lite 模型当前不可用，Turbo 回退会低于最低毛利率，已停止额外调用。";
 const script = { title: "第1集", scenes: [{ heading: "客厅", blocks: [{ type: "dialogue", speaker: "林长风", text: "我们出发吧。" }] }] };
 const task = { id: "one", status: "review", stage: "review", title: "第1集", fileName: "1.mp4", batchId: "batch", createdAt: new Date().toISOString(), result: script,
+  events: [{ type: "review_required", status: "review", stage: "review", message: leakedMessage, durationMs: 1125125, createdAt: new Date().toISOString() }],
   quality: { issues: [{ severity: "重点核对", description: "00:32–00:38：这段画面中的字幕或文字可能有遗漏，建议回看原视频核对。" }] } };
 const api = {
   getTask: async id => ({ ...task, id }),
@@ -72,6 +74,8 @@ const click = async (action, id) => {
   assert.match(node("#main").innerHTML, /我们出发吧/);
   assert.match(node("#main").innerHTML, /重点核对.*00:32–00:38/);
   assert.doesNotMatch(node("#main").innerHTML, /ASR|OCR|覆盖率|P0/);
+  assert.doesNotMatch(node("#main").innerHTML, /Lite|Turbo|毛利率|1125125|durationMs/);
+  assert.match(node("#main").innerHTML, /内容检查已完成，请查看提示并手动确认复核/);
   assert.deepEqual(Array.from(context.window.APP_CONFIG.statusFilters, item => item.id), ["all", "queued", "running", "done"]);
   assert.match(node("#main").innerHTML, /确认复核并开放下载/);
   assert.doesNotMatch(node("#main").innerHTML, /data-action="download"/);
@@ -95,6 +99,8 @@ const click = async (action, id) => {
   assert.match(node("#modalRoot").innerHTML, /我们出发吧/);
   assert.match(node("#modalRoot").innerHTML, /选择剧集/);
   assert.match(node("#modalRoot").innerHTML, /P0.*独立 OCR 覆盖率 0%/);
+  assert.match(node("#modalRoot").innerHTML, /Lite 模型当前不可用/);
+  assert.match(node("#modalRoot").innerHTML, /1125125 ms/);
   assert.match(node("#modalRoot").innerHTML, /消耗 0.0 分钟/);
   assert.doesNotMatch(node("#modalRoot").innerHTML, /data-action="admin-approve"|免费重试|免费重新复核/);
   assert.doesNotMatch(source, /admin-done-recheck|admin-review-retry/);

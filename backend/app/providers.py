@@ -136,9 +136,14 @@ def _cool_down_ark_account(api_key: str, seconds: float) -> None:
     provider_budget.cooldown(_ark_quota_scope(api_key), seconds)
 
 
-def _cool_down_ark_model(api_key: str, model: str, seconds: float = 300) -> None:
-    """Temporarily stop routing one model to one account after ModelNotOpen."""
-    until = time.monotonic() + max(1.0, min(900.0, float(seconds)))
+def _cool_down_ark_model(api_key: str, model: str, seconds: float | None = None) -> None:
+    """Stop routing an unavailable model/account pair for this process.
+
+    ``ModelNotOpen`` is an entitlement result rather than a transient quota
+    failure.  A deployment restart deliberately clears this memory so an
+    account that was enabled later can rejoin the pool without persisted state.
+    """
+    until = math.inf if seconds is None else time.monotonic() + max(1.0, min(900.0, float(seconds)))
     with _ark_pool_lock:
         key = (api_key, model.casefold())
         _ark_model_cooldowns[key] = max(_ark_model_cooldowns.get(key, 0), until)
@@ -1784,26 +1789,28 @@ def ark_recognize(
     for attempt in range(1, ARK_RESPONSE_CREATE_ATTEMPTS + 1):
         attempt_usage_recorded = False
         try:
-            try:
-                payload = _ark_response_with_url_retry(response_payload, api_key, prepared)
-            except ArkError as exc:
-                if video_url and _is_ark_model_unavailable(exc):
-                    _cool_down_ark_model(api_key, selected_model)
-                    replacement = ark_model_account_key(selected_model, exclude={api_key})
-                    if replacement:
-                        response_usages.append(_ark_failed_usage(exc, selected_model, api_key))
-                        logger.warning(
-                            "provider_step provider=ark operation=model_account_switch file=%s model=%s from_account=%s to_account=%s",
-                            path.name, selected_model, ark_account_slot(api_key), ark_account_slot(replacement),
-                        )
-                        api_key = replacement
-                        prepared["api_key"] = replacement
-                        payload = _ark_response_with_url_retry(response_payload, api_key, prepared)
-                    else:
+            tried_model_accounts: set[str] = set()
+            while True:
+                try:
+                    payload = _ark_response_with_url_retry(response_payload, api_key, prepared)
+                    break
+                except ArkError as exc:
+                    if video_url and _is_ark_model_unavailable(exc):
+                        _cool_down_ark_model(api_key, selected_model)
+                        tried_model_accounts.add(api_key)
+                        replacement = ark_model_account_key(selected_model, exclude=tried_model_accounts)
+                        if replacement:
+                            response_usages.append(_ark_failed_usage(exc, selected_model, api_key))
+                            logger.warning(
+                                "provider_step provider=ark operation=model_account_switch file=%s model=%s from_account=%s to_account=%s",
+                                path.name, selected_model, ark_account_slot(api_key), ark_account_slot(replacement),
+                            )
+                            api_key = replacement
+                            prepared["api_key"] = replacement
+                            continue
                         raise
-                elif not video_url or not _is_video_url_error(exc):
-                    raise
-                else:
+                    if not video_url or not _is_video_url_error(exc):
+                        raise
                     logger.warning(
                         "provider_step provider=ark operation=object_url_fallback file=%s status_code=%s code=%s error=%s",
                         path.name, exc.status_code, exc.provider_code, safe_error_text(exc),
@@ -1828,6 +1835,7 @@ def ark_recognize(
                     response_payload["input"][0]["content"][0] = {"type": "input_video", "file_id": fallback["file_id"]}
                     _report_media_progress(prepared.get("_progress_callback"), "vision", None)
                     payload = ark_stream_response(response_payload, api_key)
+                    break
             response_usages.append({
                 **ark_usage(payload, selected_model),
                 "status": "success",

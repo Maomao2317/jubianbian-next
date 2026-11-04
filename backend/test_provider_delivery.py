@@ -157,13 +157,18 @@ class ProviderDeliveryTests(unittest.TestCase):
 
     def test_model_error_does_not_trigger_another_upload(self):
         with (
+            patch.object(providers, "ARK_API_KEYS", ("key", "key-b", "key-c")),
+            patch.dict(providers._ark_model_cooldowns, {}, clear=True),
             patch.object(providers, "ark_prepare_video") as upload,
-            patch.object(providers, "ark_stream_response", side_effect=ArkError("ModelNotOpen", status_code=400)),
+            patch.object(providers, "ark_stream_response",
+                         side_effect=ArkError("ModelNotOpen", status_code=400)) as create,
         ):
             with self.assertRaises(ArkError):
                 providers.ark_recognize(Path("source.mp4"), "第2集", 131,
-                    prepared_video={"api_key": "key", "video_url": "https://cos.test/video"})
+                    prepared_video={"api_key": "key", "file_id": "file"})
         upload.assert_not_called()
+        create.assert_called_once()
+        self.assertEqual(create.call_args.args[1], "key")
 
     def test_temporary_url_timeout_refreshes_link_and_review_reuses_it_without_upload(self):
         callback = Mock()

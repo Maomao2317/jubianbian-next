@@ -187,7 +187,9 @@ class UserReviewTests(unittest.TestCase):
                       (json.dumps({"issues": [issue], "blockingIssues": [issue], "evidenceSources": {"ASR": "vendor"},
                                    "providerUsage": {"calls": [{"model": "secret-lite", "account": "account-1",
                                                                   "total_tokens": 120, "api_cost_rmb": 0.2}]}}),))
-        task_store.record_task_event("one", "review_required", "独立 OCR ASR 模型覆盖率 0%", status="review", stage="review")
+        leaked_message = "处理失败：Lite 模型当前不可用，Turbo 回退会低于最低毛利率，已停止额外调用。"
+        task_store.record_task_event("one", "review_required", leaked_message, status="review", stage="review",
+                                     duration_ms=1125125)
         detail = routes.task_detail(None, "one")
         self.assertEqual(detail["status"], "review")
         self.assertEqual(len(detail["quality"]["issues"]), 1)
@@ -200,13 +202,15 @@ class UserReviewTests(unittest.TestCase):
                 "ASR", "OCR", "internal-model", "secret-lite", "account-1",
                 "api_cost_rmb", "apiCostRmb", "total_tokens", "gross_profit_rmb",
                 "gross_margin", "Lite", "Turbo", "覆盖率", "P0", "vendor",
+                leaked_message, "durationMs", "1125125",
             ):
                 self.assertNotIn(internal, text)
         with patch.object(routes, "current_user", return_value={"id": "admin", "role": "admin"}):
             admin = routes.admin_task_detail(None, "one")
             self.assertEqual(admin["quality"]["issues"], [issue])
             self.assertEqual(admin["model"], "internal-model")
-            self.assertIn("独立 OCR", admin["events"][0]["message"])
+            self.assertEqual(admin["events"][0]["message"], leaked_message)
+            self.assertEqual(admin["events"][0]["durationMs"], 1125125)
         with self.assertRaises(HTTPException):
             routes.download_task(None, "one", "md")
         asyncio.run(routes.approve_task(None, "one"))
@@ -239,7 +243,7 @@ class UserReviewTests(unittest.TestCase):
         self.assertTrue(admin["result"])
 
     def test_unknown_issue_never_echoes_raw_text_and_body_is_preserved(self):
-        from app.user_view import user_issue, user_result
+        from app.user_view import user_events, user_issue, user_result, user_task
         self.assertNotIn("OCR", str(user_issue({"tag": "new-OCR-provider", "description": "secret-model"})))
         self.assertIn("尚未完成核对", user_issue({"tag": "独立音频转写缺失"})["description"])
         script = {**self.script, "model": "secret", "evidence": {"OCR": "secret"}}
@@ -248,6 +252,16 @@ class UserReviewTests(unittest.TestCase):
         self.assertEqual(public["scenes"][0]["blocks"][0]["text"], "我们出发吧。")
         self.assertNotIn("secret", str(public))
         self.assertNotIn("ASR", str(public))
+        internal_event = {"type": "provider_fallback", "status": "profit_budget_guard",
+                          "stage": "model_account_switch", "message": "account-2 Turbo cost margin",
+                          "durationMs": 999999, "createdAt": "now"}
+        sanitized = user_events([internal_event])[0]
+        self.assertEqual((sanitized["type"], sanitized["status"], sanitized["stage"]),
+                         ("stage", "running", "reviewing"))
+        self.assertNotIn("durationMs", sanitized)
+        self.assertNotIn("Turbo", str(sanitized))
+        task = user_task({"id": "internal", "status": "running", "stage": "model_account_switch"})
+        self.assertEqual((task["status"], task["stage"]), ("running", "reviewing"))
 
     def test_admin_minutes_use_net_consumption_without_converting_balance(self):
         with auth_store.db() as c:
