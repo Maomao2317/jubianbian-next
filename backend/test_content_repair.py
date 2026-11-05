@@ -353,6 +353,83 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
             [("turbo", False), ("lite", True)],
         )
 
+    async def test_complexity_lite_draft_retries_partial_lite_repair_after_turbo_budget_rejection(self):
+        original = script(action(50, 60, "only recognized the ending"))
+        calls = 0
+
+        def recognize_range(_path, _title, _duration, _evidence, _model, window, **kwargs):
+            nonlocal calls
+            calls += 1
+            start, end = window["startSec"], window["endSec"]
+            restored = 10 if calls == 1 else end - start
+            return script(action(0, restored, f"repair {calls}")), {"total_tokens": 5}, start, end - start
+
+        rejected = {"allowed": False, "tier": "turbo"}
+        allowed = {"allowed": True, "tier": "lite"}
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_LITE_MODEL", "lite"),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "_quality_call_budget",
+                           side_effect=[rejected, allowed, allowed]) as budget,
+              patch.object(processing, "_needs_automated_content_review", return_value=False),
+              patch.object(processing, "ark_recognize",
+                           return_value=(original, {"total_tokens": 10, "api_cost_rmb": 0.2})),
+              patch.object(processing, "ark_recognize_range", side_effect=recognize_range) as ranges):
+            result, quality, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "episode"}, Path("unused"), 60, {"durationSec": 60},
+                {"model": "lite", "mode": "complexity", "band": "simple",
+                 "score": 0, "reasons": []}, {}, None,
+            )
+
+        self.assertEqual([call.args[4] for call in ranges.call_args_list], ["lite", "lite"])
+        self.assertEqual([call.kwargs["repair_attempt"] for call in ranges.call_args_list], [1, 2])
+        self.assertEqual(budget.call_count, 3)
+        self.assertEqual(content_gaps(result, 60), [])
+        self.assertEqual(usage["total_tokens"], 20)
+        self.assertEqual(
+            [(guard["tier"], guard["allowed"]) for guard in quality["profitGuards"]],
+            [("turbo", False), ("lite", True), ("lite", True)],
+        )
+
+    async def test_turbo_draft_retries_partial_lite_fallback_once(self):
+        original = script(action(50, 60, "only recognized the ending"))
+        calls = 0
+
+        def recognize_range(_path, _title, _duration, _evidence, _model, window, **kwargs):
+            nonlocal calls
+            calls += 1
+            start, end = window["startSec"], window["endSec"]
+            restored = 10 if calls == 1 else end - start
+            return script(action(0, restored, f"repair {calls}")), {"total_tokens": 5}, start, end - start
+
+        rejected = {"allowed": False, "tier": "turbo"}
+        allowed = {"allowed": True, "tier": "lite"}
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_LITE_MODEL", "lite"),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "_quality_call_budget",
+                           side_effect=[rejected, allowed, allowed]),
+              patch.object(processing, "_needs_automated_content_review", return_value=False),
+              patch.object(processing, "ark_recognize",
+                           return_value=(original, {"total_tokens": 10, "api_cost_rmb": 0.2})),
+              patch.object(processing, "ark_recognize_range", side_effect=recognize_range) as ranges):
+            result, quality, usage, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "episode"}, Path("unused"), 60, {"durationSec": 60},
+                {"model": "turbo", "mode": "complexity", "band": "complex",
+                 "score": 2, "reasons": []}, {}, None,
+            )
+
+        self.assertEqual([call.args[4] for call in ranges.call_args_list], ["lite", "lite"])
+        self.assertEqual([call.kwargs["repair_attempt"] for call in ranges.call_args_list], [1, 2])
+        self.assertEqual(content_gaps(result, 60), [])
+        self.assertEqual(usage["total_tokens"], 20)
+        self.assertEqual(
+            [(guard["tier"], guard["allowed"]) for guard in quality["profitGuards"]],
+            [("turbo", False), ("lite", True), ("lite", True)],
+        )
+
     async def test_balance_failure_stops_calls_and_keeps_completed_clip(self):
         original = script(action(110, 120, "保留原稿。"))
         before = deepcopy(original)

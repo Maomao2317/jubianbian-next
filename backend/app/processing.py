@@ -949,6 +949,7 @@ async def _run_recognizer_with_media(
             }
             turbo_upgrade_used = not is_glm and _is_turbo_model(initial_model)
             post_turbo_lite_used = False
+            post_turbo_lite_repair_attempts = 0
 
             turbo_model = GLM_MODEL if is_glm else (ARK_TURBO_MODEL.strip() or ARK_MODEL)
             has_content_gaps = bool(quality.get("contentGapRanges"))
@@ -972,10 +973,20 @@ async def _run_recognizer_with_media(
                         repair_models.extend((turbo_model, initial_model))
                 elif not turbo_upgrade_used:
                     repair_models = [turbo_model]
+                    lite_model = ARK_LITE_MODEL.strip()
+                    if lite_model and not _is_turbo_model(lite_model):
+                        # A rejected or incomplete Turbo repair must still
+                        # leave two bounded Lite attempts for the remaining
+                        # physical range. Each attempt gets a fresh budget
+                        # check below, so this cannot become an open retry loop.
+                        repair_models.extend(
+                            (lite_model, lite_model) if lite_model != turbo_model else (lite_model,)
+                        )
                 else:
                     # A Turbo draft can still omit a well-localised range. Give
                     # that range one quality-first Turbo repair when the margin
-                    # guard admits it, then retain Lite as the cheaper fallback.
+                    # guard admits it, then retain two bounded Lite attempts for
+                    # partial output or a transient range failure.
                     lite_model = ARK_LITE_MODEL.strip()
                     repair_models = [turbo_model]
                     if (
@@ -983,7 +994,7 @@ async def _run_recognizer_with_media(
                         and lite_model
                         and not _is_turbo_model(lite_model)
                     ):
-                        repair_models.append(lite_model)
+                        repair_models.extend((lite_model, lite_model))
                 repair_metadata: dict[str, Any] | None = None
                 profit_guards: list[dict[str, Any]] = []
                 for repair_index, repair_model in enumerate(repair_models):
@@ -1021,10 +1032,12 @@ async def _run_recognizer_with_media(
                                 continue
                             break
                     if not is_glm and turbo_upgrade_used and not _is_turbo_model(repair_model):
-                        if post_turbo_lite_used:
+                        if post_turbo_lite_repair_attempts >= 2:
                             break
-                        # Count the attempt before entering provider code. A
-                        # failed call must not open a second post-Turbo slot.
+                        # Count attempts before entering provider code. One
+                        # retry is permitted, including after a failed or
+                        # partial first Lite repair, but never a third call.
+                        post_turbo_lite_repair_attempts += 1
                         post_turbo_lite_used = True
                     if not is_glm and _is_turbo_model(repair_model):
                         # Turbo is also attempt-limited, including provider
