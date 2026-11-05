@@ -367,6 +367,7 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         rejected = {"allowed": False, "tier": "turbo"}
         allowed = {"allowed": True, "tier": "lite"}
         with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "VIDEO_PROVIDER", "ark"),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
               patch.object(processing, "ARK_LITE_MODEL", "lite"),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -406,6 +407,7 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         rejected = {"allowed": False, "tier": "turbo"}
         allowed = {"allowed": True, "tier": "lite"}
         with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "VIDEO_PROVIDER", "ark"),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
               patch.object(processing, "ARK_LITE_MODEL", "lite"),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
