@@ -53,8 +53,9 @@ async function uploadBatch(count, behavior = {}) {
 
 async function metadata() {
   let active = 0, peak = 0, reads = 0, revoked = 0;
+  const listeners = {};
   const context = vm.createContext({
-    window: { APP_CONFIG: {}, AppAPI: {}, addEventListener() {} },
+    window: { APP_CONFIG: {}, AppAPI: {}, addEventListener(name, listener) { listeners[name] = listener; } },
     document: { addEventListener() {}, createElement() {
       return {
         removeAttribute() {}, load() {},
@@ -68,7 +69,7 @@ async function metadata() {
     URL: { createObjectURL(file) { return file; }, revokeObjectURL() { revoked++; } },
     setTimeout(fn, ms) { return setTimeout(fn, ms === 30000 ? 100 : ms); }, clearTimeout, console,
   });
-  vm.runInContext(appSource.replace("  boot();", "  window.testUI = { readVideoDuration, readVideoDurations };"), context);
+  vm.runInContext(appSource.replace("  boot();", "  window.testUI = { readVideoDuration, readVideoDurations, state, protectActiveUpload };"), context);
   const files = Array.from({ length: 999 }, (_, index) => ({ name: `${index}.mp4`, duration: index + 1 }));
   const ui = context.window.testUI;
   const durations = await ui.readVideoDurations(files);
@@ -87,6 +88,14 @@ async function metadata() {
   stalled.timeout = false;
   assert.equal(await ui.readVideoDuration(stalled), 10, "metadata timeout must clear cache and release its object URL");
   assert.equal(revoked, reads);
+  let prevented = false;
+  const navigation = { preventDefault() { prevented = true; }, returnValue: null };
+  listeners.beforeunload(navigation);
+  assert.equal(prevented, false);
+  ui.state.upload.active = true;
+  assert.equal(ui.protectActiveUpload(navigation), "");
+  assert.equal(prevented, true);
+  assert.equal(navigation.returnValue, "");
 }
 
 (async () => {

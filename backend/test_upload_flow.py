@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from app import routes, task_store
+from app import routes, task_store, worker
 
 
 class FakeRequest:
@@ -25,6 +25,60 @@ class FakeRequest:
 
 
 class ParallelUploadFlowTests(unittest.TestCase):
+    def test_worker_reconciles_completed_object_after_lost_callback(self):
+        database = "file:jbb-upload-reconcile?mode=memory&cache=shared"
+
+        def open_db():
+            connection = sqlite3.connect(database, uri=True)
+            connection.row_factory = sqlite3.Row
+            return connection
+
+        keeper = open_db()
+        try:
+            with keeper as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY, stored_path TEXT NOT NULL, file_size INTEGER,
+                        status TEXT, stage TEXT, progress_percent INTEGER, error TEXT,
+                        created_at TEXT, updated_at TEXT
+                    );
+                    CREATE TABLE task_events (
+                        id INTEGER PRIMARY KEY, task_id TEXT, event_type TEXT, status TEXT,
+                        stage TEXT, progress_percent INTEGER, message TEXT, duration_ms REAL,
+                        created_at TEXT
+                    );
+                    INSERT INTO tasks VALUES
+                        ('complete', 's3://bucket/complete.mp4', 10, 'queued', 'uploading', 1, NULL,
+                         '2026-11-05T00:00:00+00:00', '2026-11-05T00:00:00+00:00'),
+                        ('missing', 's3://bucket/missing.mp4', 10, 'queued', 'uploading', 1, NULL,
+                         '2026-11-05T00:00:00+00:00', '2026-11-05T00:00:00+00:00');
+                    """
+                )
+
+            def object_info(uri):
+                return {"size": 10} if uri.endswith("complete.mp4") else None
+
+            with patch.object(worker, "db", open_db), patch.object(worker, "media_info", side_effect=object_info):
+                recovered = asyncio.run(worker._reconcile_completed_uploads())
+
+            self.assertEqual(recovered, 1)
+            with open_db() as connection:
+                complete = connection.execute(
+                    "SELECT status, stage, progress_percent FROM tasks WHERE id = 'complete'"
+                ).fetchone()
+                missing = connection.execute(
+                    "SELECT status, stage, progress_percent FROM tasks WHERE id = 'missing'"
+                ).fetchone()
+                events = connection.execute(
+                    "SELECT event_type FROM task_events WHERE task_id = 'complete'"
+                ).fetchall()
+            self.assertEqual(tuple(complete), ("queued", "queued", 4))
+            self.assertEqual(tuple(missing), ("queued", "uploading", 1))
+            self.assertEqual([row["event_type"] for row in events], ["upload_reconciled"])
+        finally:
+            keeper.close()
+
     def test_admin_approval_is_rejected(self):
         with (
             patch.object(routes, "_require_admin", return_value={"id": "admin-1", "role": "admin"}),

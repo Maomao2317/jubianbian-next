@@ -844,6 +844,24 @@
     return Number(state.upload.estimatedMinutes || 0);
   }
 
+  function closeModal() {
+    if (state.upload.active) {
+      toast("视频正在上传，请等待上传完成", "warning");
+      return false;
+    }
+    $("#modalRoot").innerHTML = "";
+    return true;
+  }
+
+  function protectActiveUpload(event) {
+    if (!state.upload.active) return undefined;
+    event.preventDefault();
+    event.returnValue = "";
+    return "";
+  }
+
+  window.addEventListener("beforeunload", protectActiveUpload);
+
   function selectedFilesMarkup(upload) {
     return `<div class="selected-files-list"><div class="selected-files-head"><strong>已选择 ${upload.files.length} 个视频</strong><span>将分别创建任务</span></div>${upload.files.map((file, index) => `<div class="selected-file-row"><span>${index + 1}</span><strong>${escapeHtml(file.name)}</strong><small>${formatSize(file.size)}</small><button type="button" data-action="remove-file" data-index="${index}">移除</button></div>`).join("")}</div>`;
   }
@@ -1465,7 +1483,7 @@
     }
     if (action === "logout") { await logout(); return; }
     if (action === "create") { if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; } if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; } openCreateModal(); }
-    if (action === "close-modal") $("#modalRoot").innerHTML = "";
+    if (action === "close-modal") closeModal();
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
     if (action === "recharge") openRechargeModal();
@@ -1503,6 +1521,7 @@
       } catch (error) { toast(error.message || "下载失败", "error"); }
     }
     if (action === "remove-file") {
+      if (state.upload.active) { toast("视频正在上传，请等待上传完成", "warning"); return; }
       const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
       const index = Number(actionElement.dataset.index);
       if (Number.isInteger(index) && state.upload.files.length > 1) {
@@ -1518,6 +1537,7 @@
       const files = state.upload.files || (state.upload.file ? [state.upload.file] : []);
       const title = $("#taskTitle") ? $("#taskTitle").value.trim() : "";
       if (!files.length || !state.upload.durationSec) return;
+      state.upload.active = true;
       actionElement.disabled = true;
       actionElement.textContent = "正在创建...";
       try {
@@ -1548,6 +1568,8 @@
         actionElement.disabled = false;
         actionElement.textContent = "开始识别";
         toast(error.message || "创建失败", "error");
+      } finally {
+        state.upload.active = false;
       }
     }
   });
@@ -1565,15 +1587,18 @@
   });
 
   document.addEventListener("change", (event) => {
-    if (event.target.id === "fileInput") setUploadFiles(event.target.files);
+    if (event.target.id !== "fileInput") return;
+    if (state.upload.active) { toast("视频正在上传，请等待上传完成", "warning"); return; }
+    setUploadFiles(event.target.files);
   });
 
   document.addEventListener("click", (event) => {
     if (event.target.closest("#dropzone") && !event.target.closest("[data-action]")) {
+      if (state.upload.active) { toast("视频正在上传，请等待上传完成", "warning"); return; }
       const input = $("#fileInput");
       if (input && event.target.id !== "fileInput") input.click();
     }
-    if (event.target.id === "modalMask") $("#modalRoot").innerHTML = "";
+    if (event.target.id === "modalMask") closeModal();
   });
 
   document.addEventListener("dragover", (event) => {

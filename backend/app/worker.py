@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import sqlite3
 
 from .auth_store import db, now_iso
 from .config import UPLOAD_RESERVATION_TTL_SECONDS, WORKER_CONCURRENCY
 from .logging_setup import logger, safe_error_text
 from .processing import _refund_task_once, process_task
 from .rechecks import restore_recheck_snapshot_with_connection
-from .storage import delete_media
-from .task_store import record_task_event, reconcile_batch_character_continuity
+from .storage import delete_media, media_info
+from .task_store import record_task_event, record_task_events, reconcile_batch_character_continuity
 
 
 def _claim_next_task(connection, active_users: Counter, last_user: str | None):
@@ -50,14 +51,64 @@ def _claim_next_task(connection, active_users: Counter, last_user: str | None):
     return (row["id"], user) if claimed == 1 else None
 
 
+async def _accept_completed_upload(row) -> bool:
+    """Queue an object upload whose browser-side completion call was lost."""
+    info = await asyncio.to_thread(media_info, row["stored_path"])
+    if not info or int(info.get("size") or 0) != int(row["file_size"] or 0):
+        return False
+    with db() as connection:
+        claimed = connection.execute(
+            """UPDATE tasks SET stage = 'queued', progress_percent = 4, error = NULL,
+               updated_at = ? WHERE id = ? AND status = 'queued' AND stage = 'uploading'
+               AND updated_at = ?""",
+            (now_iso(), row["id"], row["updated_at"]),
+        ).rowcount
+        if claimed:
+            record_task_events(connection, [{
+                "task_id": row["id"],
+                "event_type": "upload_reconciled",
+                "message": "检测到视频已完整上传，任务已自动进入识别队列",
+                "status": "queued",
+                "stage": "queued",
+                "progress_percent": 4,
+            }])
+    return claimed == 1
+
+
+async def _reconcile_completed_uploads() -> int:
+    with db() as connection:
+        try:
+            rows = connection.execute(
+                """SELECT id, stored_path, file_size, updated_at FROM tasks
+                   WHERE status = 'queued' AND stage = 'uploading' AND stored_path LIKE 's3://%'
+                   ORDER BY created_at DESC LIMIT 200"""
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            # A few maintenance/test databases intentionally expose only the
+            # queue columns. They have no object uploads to reconcile.
+            if "no such column" in str(exc).lower():
+                return 0
+            raise
+    semaphore = asyncio.Semaphore(8)
+
+    async def reconcile(row) -> bool:
+        async with semaphore:
+            return await _accept_completed_upload(row)
+
+    return sum(await asyncio.gather(*(reconcile(row) for row in rows))) if rows else 0
+
+
 async def _expire_incomplete_uploads() -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=UPLOAD_RESERVATION_TTL_SECONDS)).isoformat()
     with db() as connection:
         rows = connection.execute(
-            "SELECT id, user_id, stored_path, credits_used, batch_id FROM tasks WHERE status = 'queued' AND stage = 'uploading' AND created_at < ?",
+            """SELECT id, user_id, stored_path, file_size, credits_used, batch_id, updated_at
+               FROM tasks WHERE status = 'queued' AND stage = 'uploading' AND created_at < ?""",
             (cutoff,),
         ).fetchall()
     for row in rows:
+        if await _accept_completed_upload(row):
+            continue
         completed = now_iso()
         with db() as connection:
             claimed = connection.execute(
@@ -203,6 +254,9 @@ async def run_worker() -> None:
         if now - last_upload_cleanup >= 60:
             last_upload_cleanup = now
             try:
+                recovered = await _reconcile_completed_uploads()
+                if recovered:
+                    logger.info("worker_upload_reconciled count=%s", recovered)
                 await _expire_incomplete_uploads()
             except Exception:
                 logger.exception("worker_upload_cleanup_failed retry_in=60")
