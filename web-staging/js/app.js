@@ -10,6 +10,9 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   let rechargeReturnFocus = null;
   let rechargeReturnOffer = "";
+  let pricingReturnFocus = null;
+  let pricingScrollTop = 0;
+  let rechargeReturnToPricing = false;
 
   const state = {
     view: "list",
@@ -179,7 +182,7 @@
             <strong>${credits}</strong><span>积分</span>
           </button>
           ${state.profile && state.profile.role === "admin" ? `<a class="text-btn admin-link" href="#/admin"><img class="nav-icon admin-nav-logo" src="${cfg.brand.adminLogo || cfg.brand.logo}" alt="" />管理后台</a>` : ""}
-          <button class="text-btn recharge-btn" type="button" data-action="show-pricing"><span class="nav-icon">＋</span>充值套餐</button>
+          <button class="text-btn recharge-btn" type="button" data-action="show-pricing" aria-haspopup="dialog"><span class="nav-icon" aria-hidden="true">＋</span>充值套餐</button>
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
       </div>`;
@@ -543,7 +546,6 @@
       searchFocused: Boolean(active),
       selectionStart: active?.selectionStart,
       selectionEnd: active?.selectionEnd,
-      pricingFocusId: document.activeElement?.closest?.(".recharge-showcase") ? document.activeElement.id : "",
     };
   }
 
@@ -563,7 +565,6 @@
         search?.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
       }
     }
-    if (snapshot.pricingFocusId) document.getElementById(snapshot.pricingFocusId)?.focus({ preventScroll: true });
   }
 
   function setListLoading(loading) {
@@ -628,7 +629,6 @@
           </div>
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
-        ${rechargePostersMarkup()}
         <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
           <p class="mobile-upload-note">手机端可查看已有任务。上传视频和新建任务请使用电脑端。</p>
           <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
@@ -856,12 +856,25 @@
       return false;
     }
     const rechargeOpen = Boolean($(".recharge-modal"));
+    const pricingOpen = Boolean($("#pricingDialog"));
+    const returnToPricing = rechargeOpen && rechargeReturnToPricing;
     $("#modalRoot").innerHTML = "";
-    if (rechargeOpen) {
-      const target = rechargeReturnFocus?.isConnected ? rechargeReturnFocus : rechargeReturnOffer ? $(`[data-offer="${rechargeReturnOffer}"]`) : $('[data-action="show-pricing"]');
+    if (returnToPricing) {
+      rechargeReturnToPricing = false;
+      showRechargePricing({ restore: true, returnOffer: rechargeReturnOffer });
+      rechargeReturnFocus = null;
+      rechargeReturnOffer = "";
+      return true;
+    }
+    if (rechargeOpen || pricingOpen) {
+      const previous = pricingOpen ? pricingReturnFocus : rechargeReturnFocus;
+      const target = previous?.isConnected ? previous : $('[data-action="show-pricing"]');
       target?.focus?.({ preventScroll: true });
       rechargeReturnFocus = null;
       rechargeReturnOffer = "";
+      pricingReturnFocus = null;
+      pricingScrollTop = 0;
+      rechargeReturnToPricing = false;
     }
     return true;
   }
@@ -1203,22 +1216,29 @@
     document.querySelectorAll('[data-action="pricing-switch"]').forEach((button) => { button.setAttribute("aria-pressed", String(button.dataset.tier === tier)); });
   }
 
-  function showRechargePricing() {
-    const showcase = $("#rechargeShowcase");
-    if (!showcase) {
-      go("tasks");
-      return;
+  function showRechargePricing({ restore = false, returnOffer = "" } = {}) {
+    if (state.upload.active || $("#pricingDialog")) return;
+    if (!restore) {
+      pricingReturnFocus = document.activeElement;
+      pricingScrollTop = 0;
     }
-    showcase.scrollIntoView({ behavior: "smooth", block: "start" });
-    $(`#pricing-switch-${state.rechargeTier}`)?.focus({ preventScroll: true });
+    $("#modalRoot").innerHTML = `<dialog class="pricing-drawer" id="pricingDialog" aria-labelledby="rechargeTitle"><div class="pricing-topbar"><span>充值套餐</span><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭充值套餐">×</button></div><div class="pricing-body">${rechargePostersMarkup()}</div></dialog>`;
+    $("#pricingDialog").showModal();
+    $(".pricing-body").scrollTop = pricingScrollTop;
+    const target = returnOffer ? $(`[data-offer="${returnOffer}"]`) : $(`#pricing-switch-${state.rechargeTier}`);
+    target?.focus({ preventScroll: true });
   }
 
   function openRechargeModal(offerId) {
+    if (state.upload.active) return;
+    rechargeReturnToPricing = Boolean($("#pricingDialog"));
+    if (rechargeReturnToPricing) pricingScrollTop = $(".pricing-body").scrollTop;
     rechargeReturnFocus = document.activeElement;
     rechargeReturnOffer = offerId || "";
     const offer = Object.values(cfg.rechargeOffers).flat().find((item) => item.id === offerId);
     const edition = offer?.id.startsWith("enterprise-") ? "企业版" : "个人版";
-    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal recharge-modal" role="dialog" aria-modal="true" aria-labelledby="rechargeModalTitle"><div class="modal-head"><div><span class="modal-kicker">微信专属客服</span><h2 id="rechargeModalTitle">扫码联系，开通创作之旅</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${offer ? `<div class="recharge-selection"><span>${edition} · ${offer.name}</span><strong>¥${offer.price.toLocaleString("en-US")} <small>/ ${offer.credits.toLocaleString("en-US")} 积分</small></strong></div>` : ""}<div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码，扫一扫添加客服" /><p>使用微信扫一扫，添加客服后告知所选套餐</p><small>手机端可保存二维码后，在微信中识别</small></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">我知道了</button></div></div></div>`;
+    $("#modalRoot").innerHTML = `<dialog class="modal recharge-modal" id="rechargeDialog" aria-labelledby="rechargeModalTitle"><div class="modal-head"><div><span class="modal-kicker">微信专属客服</span><h2 id="rechargeModalTitle">扫码联系，开通创作之旅</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${offer ? `<div class="recharge-selection"><span>${edition} · ${offer.name}</span><strong>¥${offer.price.toLocaleString("en-US")} <small>/ ${offer.credits.toLocaleString("en-US")} 积分</small></strong></div>` : ""}<div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码，扫一扫添加客服" /><p>使用微信扫一扫，添加客服后告知所选套餐</p></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">${rechargeReturnToPricing ? "返回充值套餐" : "我知道了"}</button></div></dialog>`;
+    $("#rechargeDialog").showModal();
     $('.recharge-modal [data-action="close-modal"]')?.focus();
   }
 
@@ -1667,6 +1687,10 @@
       if (input && event.target.id !== "fileInput") input.click();
     }
     if (event.target.id === "modalMask") closeModal();
+    if (event.target.matches?.("dialog.pricing-drawer, dialog.recharge-modal")) {
+      const rect = event.target.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeModal();
+    }
   });
 
   document.addEventListener("dragover", (event) => {
@@ -1680,16 +1704,8 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    const rechargeModal = $(".recharge-modal");
-    if (rechargeModal) {
-      if (event.key === "Escape") { closeModal(); return; }
-      if (event.key === "Tab") {
-        const buttons = [...rechargeModal.querySelectorAll("button")];
-        const first = buttons[0];
-        const last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-      }
+    if ($("#pricingDialog, #rechargeDialog")) {
+      if (event.key === "Escape") { event.preventDefault(); closeModal(); }
       return;
     }
     if (event.key === "Escape" && $("#modalRoot").innerHTML) $("#modalRoot").innerHTML = "";
