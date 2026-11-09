@@ -105,6 +105,20 @@ window.APP_CONFIG = {
     rounding: "ceil",
   },
 
+  // Display-only contact offers. Account credits are still managed by the server.
+  rechargeOffers: {
+    personal: [
+      { id: "personal-basic", name: "基础包", credits: 500, price: 39 },
+      { id: "personal-value", name: "划算包", credits: 1620, price: 129, badge: "进阶之选" },
+      { id: "personal-premium", name: "尊享包", credits: 4720, price: 369 },
+    ],
+    enterprise: [
+      { id: "enterprise-1000", name: "企业充值", credits: 15500, price: 1000 },
+      { id: "enterprise-3000", name: "企业充值", credits: 45600, price: 3000 },
+      { id: "enterprise-5000", name: "企业充值", credits: 75800, price: 5000 },
+    ],
+  },
+
   api: {
     useMock: false,
     // 生产环境同源走 /api；直接双击 index.html 时指向本机后端，避免 file:// 请求落回本地文件系统。
