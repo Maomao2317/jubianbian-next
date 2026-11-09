@@ -1183,12 +1183,12 @@
       const enterprise = tier === "enterprise";
       const cards = cfg.rechargeOffers[tier].map((offer) => `
         <article class="recharge-offer ${offer.badge ? "is-featured" : ""}">
-          <div class="offer-heading"><h4>${offer.name}</h4>${offer.badge ? `<span class="offer-badge">${offer.badge}</span>` : ""}${enterprise ? `<span class="offer-discount">${offer.promotionLabel || "基础兑换价 8 折"}</span>` : ""}</div>
-          <div class="offer-credits"><strong>${offer.credits.toLocaleString("en-US")}</strong><span>积分</span></div>
+          <div class="offer-heading"><h4>${offer.name}</h4>${offer.badge ? `<span class="offer-badge">${offer.badge}</span>` : ""}${offer.bonusYuan ? `<span class="offer-discount">加赠${offer.bonusYuan.toLocaleString("en-US")}元</span>` : ""}</div>
+          <div class="offer-credits"><strong>${offer.credits.toLocaleString("en-US")}</strong><span>总积分</span></div>
           <div class="offer-price"><span>¥</span><strong>${offer.price.toLocaleString("en-US")}</strong></div>
           <div class="offer-benefits">
             <p>${enterprise ? "充值权益" : "额外赠送 · 国内版权益"}</p>
-            <ul>${(enterprise ? [offer.promotionBenefit || "到账数量已包含八折优惠", "可用于站内各项积分付费功能"] : ["短剧成片下载群", "短剧拆剧数据库", "短剧拆片下载库"]).map((text) => `<li>${text}</li>`).join("")}</ul>
+            <ul>${[...(offer.bonusYuan ? [`总积分已包含${offer.bonusYuan.toLocaleString("en-US")}元加赠`] : []), ...(enterprise ? ["可用于站内各项积分付费功能"] : ["短剧成片下载群", "短剧拆剧数据库", "短剧拆片下载库"])].map((text) => `<li>${text}</li>`).join("")}</ul>
           </div>
           <button class="offer-contact" id="contact-${offer.id}" type="button" data-action="recharge" data-offer="${offer.id}" aria-label="联系客服开通${enterprise ? "企业版" : "个人版"}${offer.name}，${offer.price}元${offer.credits}积分">联系客服开通 <span aria-hidden="true">↗</span></button>
         </article>`).join("");
@@ -1237,7 +1237,7 @@
     rechargeReturnOffer = offerId || "";
     const offer = Object.values(cfg.rechargeOffers).flat().find((item) => item.id === offerId);
     const edition = offer?.id.startsWith("enterprise-") ? "企业版" : "个人版";
-    $("#modalRoot").innerHTML = `<dialog class="modal recharge-modal" id="rechargeDialog" aria-labelledby="rechargeModalTitle"><div class="modal-head"><div><span class="modal-kicker">微信专属客服</span><h2 id="rechargeModalTitle">扫码联系，开通创作之旅</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${offer ? `<div class="recharge-selection"><span>${edition} · ${offer.name}</span><strong>¥${offer.price.toLocaleString("en-US")} <small>/ ${offer.credits.toLocaleString("en-US")} 积分</small></strong></div>` : ""}<div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码，扫一扫添加客服" /><p>使用微信扫一扫，添加客服后告知所选套餐</p></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">${rechargeReturnToPricing ? "返回充值套餐" : "我知道了"}</button></div></dialog>`;
+    $("#modalRoot").innerHTML = `<dialog class="modal recharge-modal" id="rechargeDialog" aria-labelledby="rechargeModalTitle"><div class="modal-head"><div><span class="modal-kicker">微信专属客服</span><h2 id="rechargeModalTitle">扫码联系，开通创作之旅</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${offer ? `<div class="recharge-selection"><span>${edition} · ${offer.name}${offer.bonusYuan ? ` · 加赠${offer.bonusYuan.toLocaleString("en-US")}元` : ""}</span><strong>¥${offer.price.toLocaleString("en-US")} <small>/ ${offer.credits.toLocaleString("en-US")} 总积分</small></strong></div>` : ""}<div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码，扫一扫添加客服" /><p>使用微信扫一扫，添加客服后告知所选套餐</p></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">${rechargeReturnToPricing ? "返回充值套餐" : "我知道了"}</button></div></dialog>`;
     $("#rechargeDialog").showModal();
     $('.recharge-modal [data-action="close-modal"]')?.focus();
   }
