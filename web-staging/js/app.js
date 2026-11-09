@@ -620,7 +620,9 @@
           ${state.keyword || state.status !== "all" ? "" : `<button class="primary-btn" type="button" data-action="create">新建任务</button>`}
         </div>`;
     $("#main").innerHTML = `
-      <section class="page">
+      <section class="page tasks-page">
+        <div class="workspace-layout">
+        <div class="workspace-main">
         <div class="page-heading">
           <div>
             <div class="eyebrow">创作工作台</div>
@@ -643,6 +645,22 @@
           </div>
           <div class="task-list">${rows}</div>
           <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, page - 1)}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, page + 1)}" ${page >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
+        </div>
+        </div>
+        <aside class="workspace-activity" aria-label="充值活动">
+          <div class="activity-heading"><span>为创作加点动力</span><small>积分充值</small></div>
+          ${["personal", "enterprise"].map((tier) => {
+            const enterprise = tier === "enterprise";
+            const entry = cfg.rechargeOffers[tier][0];
+            return `<article class="activity-card ${enterprise ? "activity-enterprise" : "activity-personal"}">
+              <div class="activity-edition">${enterprise ? "FOR TEAMS" : "FOR CREATORS"}<span>${enterprise ? "企业版" : "个人版"}</span></div>
+              <h2>${enterprise ? "团队创作<br>从容开场。" : "好故事，<br>即刻开场。"}</h2>
+              <p>${enterprise ? "为持续创作，备足每一份灵感。" : "从第一份剧本，到下一部好作品。"}</p>
+              <div class="activity-price"><strong><small>¥</small>${entry.price.toLocaleString("en-US")}</strong><span>起 / ${entry.credits.toLocaleString("en-US")} 总积分</span></div>
+              <button type="button" data-action="show-pricing" data-tier="${tier}" aria-haspopup="dialog">查看${enterprise ? "企业" : "个人"}套餐 <span aria-hidden="true">↗</span></button>
+            </article>`;
+          }).join("")}
+        </aside>
         </div>
       </section>`;
     const batchActions = document.querySelector(".batch-download-actions");
@@ -1573,7 +1591,10 @@
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
     if (action === "pricing-switch") switchRechargeTier(actionElement.dataset.tier);
-    if (action === "show-pricing") showRechargePricing();
+    if (action === "show-pricing") {
+      if (actionElement.dataset.tier) switchRechargeTier(actionElement.dataset.tier);
+      showRechargePricing();
+    }
     if (action === "recharge") openRechargeModal(actionElement.dataset.offer);
     if (action === "open-task") go("task/" + id);
     if (action === "toggle-menu") {
