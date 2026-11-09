@@ -1214,14 +1214,15 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 
 /* Keep the existing left alignment free for the future menu. */
 .tasks-page { width: auto; margin-left: max(24px, calc((100% - 1120px) / 2)); margin-right: 32px; padding-top: 38px; }
-.workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) 260px; align-items: start; gap: 28px; }
-.workspace-main { min-width: 0; }
-.tasks-page .page-heading { min-height: 96px; margin-bottom: 24px; align-items: center; }
+.workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: stretch; gap: 24px 28px; }
+.workspace-main { display: contents; }
+.tasks-page .page-heading { grid-column: 1; grid-row: 1; min-width: 0; min-height: 96px; margin-bottom: 0; align-items: center; }
 .tasks-page .eyebrow { font-size: 11px; letter-spacing: 1.4px; }
 .tasks-page .page-heading h1 { font-size: 29px; font-weight: 750; line-height: 1.4; letter-spacing: -.6px; }
 .tasks-page .page-heading p { font-size: 13px; line-height: 1.8; }
 .tasks-page .create-btn { flex-shrink: 0; min-height: 42px; }
-.tasks-page .workspace-panel { border-radius: 12px; box-shadow: 0 6px 24px #20283905; }
+.tasks-page .workspace-panel { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; min-width: 0; border-radius: 12px; box-shadow: 0 6px 24px #20283905; }
+.tasks-page .task-list { flex: 1; }
 .tasks-page .toolbar { flex-wrap: wrap; gap: 10px; padding: 16px 18px; }
 .tasks-page .search-wrap { width: clamp(200px, 24vw, 280px); }
 .tasks-page .filters { flex-wrap: wrap; gap: 3px; }
@@ -1244,16 +1245,20 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .tasks-page .task-meta { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .tasks-page .task-meta span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .tasks-page .user-pagination { gap: 12px; padding: 16px 18px; border-radius: 0 0 12px 12px; font-size: 11px; }
-.workspace-activity { display: grid; gap: 16px; }
+.workspace-guide { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 13px; align-self: center; padding: 16px 18px; border: 1px solid #e5ddc8; border-radius: 12px; background: linear-gradient(120deg, #fffdf7, #efe8d8); }
+.workspace-guide-icon { display: grid; place-items: center; flex: 0 0 36px; height: 40px; border: 1px solid #c7a652; border-radius: 10px; color: #aa8227; background: #ffffff80; font-size: 13px; transform: rotate(-8deg); }
+.workspace-guide strong { color: #51452d; font-size: 14px; font-weight: 650; letter-spacing: .3px; }
+.workspace-guide p { margin: 6px 0 0; color: #95866a; font-size: 10px; line-height: 1.6; }
+.workspace-activity { grid-column: 2; grid-row: 2; display: grid; grid-template-rows: auto repeat(2, minmax(320px, 1fr)); align-self: stretch; gap: 16px; }
 .activity-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; color: #655d4c; font-size: 12px; font-weight: 650; }
 .activity-heading small { color: #9b907b; font-size: 10px; font-weight: 400; }
-.activity-card { position: relative; overflow: hidden; padding: 23px 22px 20px; border: 1px solid #334054; border-radius: 14px; color: #fff; background: radial-gradient(ellipse at 100% 0%, #38465c88, transparent 70%), #17202f; }
+.activity-card { position: relative; display: flex; flex-direction: column; overflow: hidden; padding: 26px 24px 22px; border: 1px solid #334054; border-radius: 14px; color: #fff; background: radial-gradient(ellipse at 100% 0%, #38465c88, transparent 70%), #17202f; }
 .activity-card::after { content: ""; position: absolute; top: 68px; right: -18px; width: 100px; height: 100px; border: 1px solid #e5c98224; border-radius: 24px; transform: rotate(-25deg); pointer-events: none; }
 .activity-edition { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #dfc385; font-size: 9px; letter-spacing: 1.2px; }
 .activity-edition span { font-size: 11px; letter-spacing: 0; }
-.activity-card h2 { position: relative; margin: 19px 0 10px; font-size: 26px; font-weight: 600; line-height: 1.5; letter-spacing: -.5px; }
-.activity-card p { margin: 0; color: #b7bec8; font-size: 11px; line-height: 1.8; }
-.activity-price { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-top: 20px; }
+.activity-card h2 { position: relative; margin: 22px 0 12px; font-size: 30px; font-weight: 600; line-height: 1.5; letter-spacing: -.5px; }
+.activity-card p { margin: 0 0 22px; color: #b7bec8; font-size: 12px; line-height: 1.8; }
+.activity-price { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-top: auto; }
 .activity-price strong { color: #ead296; font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .activity-price strong small { margin-right: 3px; font-size: 14px; }
 .activity-price > span { color: #b7bec8; font-size: 10px; }
@@ -1265,18 +1270,23 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .activity-enterprise button { border-color: #cbd6bc; background: #d1d9bc; color: #24372c; }
 .activity-enterprise button:hover { background: #e1e7d4; }
 @media (max-width: 1200px) {
-  .workspace-layout { grid-template-columns: minmax(0, 1fr) 232px; gap: 20px; }
+  .workspace-layout { grid-template-columns: minmax(0, 1fr) 260px; gap: 24px 20px; }
   .tasks-page { margin-right: 24px; }
   .tasks-page .search-wrap { width: 100%; }
   .tasks-page .batch-toggle { flex-basis: 100%; }
   .tasks-page .batch-downloads:empty { display: none; }
   .tasks-page .batch-downloads { margin-top: -8px; }
   .activity-card { padding: 20px 18px; }
+  .activity-card h2 { font-size: 27px; }
+  .workspace-guide { gap: 10px; padding: 14px; }
 }
 @media (max-width: 1000px) {
   .tasks-page { margin-left: 24px; }
   .workspace-layout { grid-template-columns: minmax(0, 1fr); }
-  .workspace-activity { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workspace-main { display: block; min-width: 0; }
+  .tasks-page .page-heading { margin-bottom: 24px; }
+  .workspace-guide { display: none; }
+  .workspace-activity { grid-column: auto; grid-row: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto minmax(300px, auto); }
   .activity-heading { grid-column: 1 / -1; }
 }
 @media (max-width: 620px) {
@@ -1298,7 +1308,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
   .activity-edition span { font-size: 10px; }
   .activity-card h2 { font-size: 20px; margin-top: 14px; }
   .activity-card p { font-size: 10px; }
-  .activity-price { gap: 4px; margin-top: 12px; }
+  .activity-price { gap: 4px; }
   .activity-price strong { font-size: 24px; }
   .activity-card button { font-size: 11px; padding: 0 8px; }
 }

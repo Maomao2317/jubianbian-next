@@ -647,6 +647,10 @@
           <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, page - 1)}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, page + 1)}" ${page >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
         </div>
         </div>
+        <div class="workspace-guide" aria-label="创作流程">
+          <span class="workspace-guide-icon" aria-hidden="true">▶</span>
+          <div><strong>从视频，到剧本</strong><p>上传视频 · 自动整理 · 导出剧本</p></div>
+        </div>
         <aside class="workspace-activity" aria-label="充值活动">
           <div class="activity-heading"><span>为创作加点动力</span><small>积分充值</small></div>
           ${["personal", "enterprise"].map((tier) => {
