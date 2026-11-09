@@ -113,7 +113,7 @@ window.APP_CONFIG = {
       { id: "personal-premium", name: "尊享包", credits: 4720, price: 369 },
     ],
     enterprise: [
-      { id: "enterprise-1000", name: "企业充值", credits: 15500, price: 1000 },
+      { id: "enterprise-1000", name: "企业充值", credits: 14720, price: 1000, promotionLabel: "加赠150元积分", promotionBenefit: "到账数量已包含150元赠送积分" },
       { id: "enterprise-3000", name: "企业充值", credits: 45600, price: 3000 },
       { id: "enterprise-5000", name: "企业充值", credits: 75800, price: 5000 },
     ],

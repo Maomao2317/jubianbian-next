@@ -1183,12 +1183,12 @@
       const enterprise = tier === "enterprise";
       const cards = cfg.rechargeOffers[tier].map((offer) => `
         <article class="recharge-offer ${offer.badge ? "is-featured" : ""}">
-          <div class="offer-heading"><h4>${offer.name}</h4>${offer.badge ? `<span class="offer-badge">${offer.badge}</span>` : ""}${enterprise ? `<span class="offer-discount">基础兑换价 8 折</span>` : ""}</div>
+          <div class="offer-heading"><h4>${offer.name}</h4>${offer.badge ? `<span class="offer-badge">${offer.badge}</span>` : ""}${enterprise ? `<span class="offer-discount">${offer.promotionLabel || "基础兑换价 8 折"}</span>` : ""}</div>
           <div class="offer-credits"><strong>${offer.credits.toLocaleString("en-US")}</strong><span>积分</span></div>
           <div class="offer-price"><span>¥</span><strong>${offer.price.toLocaleString("en-US")}</strong></div>
           <div class="offer-benefits">
             <p>${enterprise ? "充值权益" : "额外赠送 · 国内版权益"}</p>
-            <ul>${(enterprise ? ["到账数量已包含八折优惠", "可用于站内各项积分付费功能"] : ["短剧成片下载群", "短剧拆剧数据库", "短剧拆片下载库"]).map((text) => `<li>${text}</li>`).join("")}</ul>
+            <ul>${(enterprise ? [offer.promotionBenefit || "到账数量已包含八折优惠", "可用于站内各项积分付费功能"] : ["短剧成片下载群", "短剧拆剧数据库", "短剧拆片下载库"]).map((text) => `<li>${text}</li>`).join("")}</ul>
           </div>
           <button class="offer-contact" id="contact-${offer.id}" type="button" data-action="recharge" data-offer="${offer.id}" aria-label="联系客服开通${enterprise ? "企业版" : "个人版"}${offer.name}，${offer.price}元${offer.credits}积分">联系客服开通 <span aria-hidden="true">↗</span></button>
         </article>`).join("");
