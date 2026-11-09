@@ -3272,11 +3272,29 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             script = normalize_script(repaired, script.get("title") or task["title"])
     lines = [f"# {script.get('title') or task['title']}", ""]
 
-    def quote_dialogue(text: Any) -> str:
+    def dialogue_text(text: Any) -> str:
         value = str(text or "").strip()
-        if len(value) >= 2 and value[0] in {'“', '"', '「'} and value[-1] in {'”', '"', '」'}:
+        pairs = {'“': '”', '"': '"', '「': '」'}
+        if len(value) < 2 or pairs.get(value[0]) != value[-1]:
             return value
-        return f"“{value}”"
+        # Remove only a pair enclosing the entire utterance. Separate quoted
+        # phrases (e.g. “yes” or “no”) and quotes inside dialogue stay intact.
+        opening, closing = value[0], value[-1]
+        depth = 1
+        escaped = False
+        for index, char in enumerate(value[1:], 1):
+            if opening == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if not escaped:
+                if char == closing:
+                    depth -= 1
+                elif char == opening:
+                    depth += 1
+                if depth == 0:
+                    return value[1:-1].strip() if index == len(value) - 1 else value
+            escaped = False
+        return value
 
     def parenthetical(value: Any) -> str:
         text = normalize_text(value)
@@ -3309,7 +3327,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             if block_type == "dialogue":
                 warning = uncertainty(block, "dialogue")
                 acting = parenthetical(block.get("performance"))
-                lines.append(f"{block.get('speaker', '人物')}{warning}{acting}：{quote_dialogue(block.get('text', ''))}")
+                lines.append(f"{block.get('speaker', '人物')}{warning}{acting}：{dialogue_text(block.get('text', ''))}")
             elif block_type in {"vo", "os"}:
                 inferred = uncertainty(block, "vo")
                 speaker = block.get("speaker") or "旁白"
@@ -3318,7 +3336,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
                     label = "OS" if speaker in {"旁白", "未知说话人", "OS", "内心独白"} else f"{speaker}（OS）"
                 else:
                     label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker}（VO）"
-                lines.append(f"{label}{inferred}：{quote_dialogue(block.get('text', ''))}")
+                lines.append(f"{label}{inferred}：{dialogue_text(block.get('text', ''))}")
             elif block_type == "sound":
                 category = "环境音" if block.get("category") == "ambience" else "音效"
                 lines.append(f"{uncertainty(block, 'sound')}【{category}：{block.get('text', '')}】")
