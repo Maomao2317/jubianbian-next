@@ -8,6 +8,8 @@
   const POINTS_PER_YUAN = 12.8;
   const api = window.AppAPI;
   const $ = (selector, root = document) => root.querySelector(selector);
+  let rechargeReturnFocus = null;
+  let rechargeReturnOffer = "";
 
   const state = {
     view: "list",
@@ -18,6 +20,7 @@
     current: null,
     reviewIds: [],
     profile: null,
+    rechargeTier: "personal",
     authMode: "login",
     authBusy: false,
     authCooldown: 0,
@@ -176,7 +179,7 @@
             <strong>${credits}</strong><span>积分</span>
           </button>
           ${state.profile && state.profile.role === "admin" ? `<a class="text-btn admin-link" href="#/admin"><img class="nav-icon admin-nav-logo" src="${cfg.brand.adminLogo || cfg.brand.logo}" alt="" />管理后台</a>` : ""}
-          <button class="text-btn recharge-btn" type="button" data-action="recharge"><span class="nav-icon">＋</span>充值</button>
+          <button class="text-btn recharge-btn" type="button" data-action="show-pricing"><span class="nav-icon">＋</span>充值套餐</button>
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
       </div>`;
@@ -540,6 +543,7 @@
       searchFocused: Boolean(active),
       selectionStart: active?.selectionStart,
       selectionEnd: active?.selectionEnd,
+      pricingFocusId: document.activeElement?.closest?.(".recharge-showcase") ? document.activeElement.id : "",
     };
   }
 
@@ -559,6 +563,7 @@
         search?.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
       }
     }
+    if (snapshot.pricingFocusId) document.getElementById(snapshot.pricingFocusId)?.focus({ preventScroll: true });
   }
 
   function setListLoading(loading) {
@@ -623,6 +628,7 @@
           </div>
           <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
         </div>
+        ${rechargePostersMarkup()}
         <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
           <p class="mobile-upload-note">手机端可查看已有任务。上传视频和新建任务请使用电脑端。</p>
           <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
@@ -842,6 +848,18 @@
 
   function uploadEstimate() {
     return Number(state.upload.estimatedMinutes || 0);
+  }
+
+  function closeModal() {
+    const rechargeOpen = Boolean($(".recharge-modal"));
+    $("#modalRoot").innerHTML = "";
+    if (rechargeOpen) {
+      const target = rechargeReturnFocus?.isConnected ? rechargeReturnFocus : rechargeReturnOffer ? $(`[data-offer="${rechargeReturnOffer}"]`) : $('[data-action="show-pricing"]');
+      target?.focus?.({ preventScroll: true });
+      rechargeReturnFocus = null;
+      rechargeReturnOffer = "";
+    }
+    return true;
   }
 
   function selectedFilesMarkup(upload) {
@@ -1134,8 +1152,61 @@
     }
   }
 
-  function openRechargeModal() {
-    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal recharge-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><span class="modal-kicker">积分充值</span><h2>联系管理员充值</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码" /><p>请扫码添加客服人员微信联系充值额度</p></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
+  function rechargePostersMarkup() {
+    const panels = ["personal", "enterprise"].map((tier) => {
+      const enterprise = tier === "enterprise";
+      const cards = cfg.rechargeOffers[tier].map((offer) => `
+        <article class="recharge-offer ${offer.badge ? "is-featured" : ""}">
+          <div class="offer-heading"><h4>${offer.name}</h4>${offer.badge ? `<span class="offer-badge">${offer.badge}</span>` : ""}${enterprise ? `<span class="offer-discount">基础兑换价 8 折</span>` : ""}</div>
+          <div class="offer-credits"><strong>${offer.credits.toLocaleString("en-US")}</strong><span>积分</span></div>
+          <div class="offer-price"><span>¥</span><strong>${offer.price.toLocaleString("en-US")}</strong></div>
+          <div class="offer-benefits">
+            <p>${enterprise ? "充值权益" : "额外赠送 · 国内版权益"}</p>
+            <ul>${(enterprise ? ["到账数量已包含八折优惠", "可用于站内各项积分付费功能"] : ["短剧成片下载群", "短剧拆剧数据库", "短剧拆片下载库"]).map((text) => `<li>${text}</li>`).join("")}</ul>
+          </div>
+          <button class="offer-contact" id="contact-${offer.id}" type="button" data-action="recharge" data-offer="${offer.id}" aria-label="联系客服开通${enterprise ? "企业版" : "个人版"}${offer.name}，${offer.price}元${offer.credits}积分">联系客服开通 <span aria-hidden="true">↗</span></button>
+        </article>`).join("");
+      return `<div class="recharge-poster ${enterprise ? "enterprise-poster" : "personal-poster"}" id="pricing-${tier}" data-pricing-panel="${tier}" ${state.rechargeTier === tier ? "" : "hidden"}>
+        <div class="poster-intro">
+          <span class="poster-edition">${enterprise ? "FOR TEAMS / 企业版" : "FOR CREATORS / 个人版"}</span>
+          <h3>${enterprise ? "团队创作<br>从容开场。" : "好故事，<br>即刻开场。"}</h3>
+          <p>${enterprise ? "为持续创作，备足每一份灵感。" : "从第一份剧本，到下一部好作品。"}</p>
+          <div class="poster-art" aria-hidden="true"><span></span><i>▶</i><span></span></div>
+          <span class="poster-signature">剧编编 · 让创作更进一步</span>
+        </div>
+        <div class="poster-packages"><div class="offer-grid">${cards}</div><p class="poster-note">${enterprise ? "企业充值 · 扫码联系微信客服开通" : "充值后添加客服微信，领取额外赠送权益"}</p></div>
+      </div>`;
+    }).join("");
+    return `<section class="recharge-showcase" id="rechargeShowcase" aria-labelledby="rechargeTitle">
+      <div class="recharge-heading"><div><span class="recharge-kicker">RECHARGE / 积分充值</span><h2 id="rechargeTitle">为你的下一部作品，准备就绪</h2></div>
+        <div class="recharge-switch" role="group" aria-label="充值套餐版本">${[["personal", "个人版"], ["enterprise", "企业版"]].map(([tier, label]) => `<button id="pricing-switch-${tier}" type="button" data-action="pricing-switch" data-tier="${tier}" aria-controls="pricing-${tier}" aria-pressed="${state.rechargeTier === tier}">${label}</button>`).join("")}</div>
+      </div>${panels}</section>`;
+  }
+
+  function switchRechargeTier(tier) {
+    if (!["personal", "enterprise"].includes(tier)) return;
+    state.rechargeTier = tier;
+    document.querySelectorAll("[data-pricing-panel]").forEach((panel) => { panel.hidden = panel.dataset.pricingPanel !== tier; });
+    document.querySelectorAll('[data-action="pricing-switch"]').forEach((button) => { button.setAttribute("aria-pressed", String(button.dataset.tier === tier)); });
+  }
+
+  function showRechargePricing() {
+    const showcase = $("#rechargeShowcase");
+    if (!showcase) {
+      go("tasks");
+      return;
+    }
+    showcase.scrollIntoView({ behavior: "smooth", block: "start" });
+    $(`#pricing-switch-${state.rechargeTier}`)?.focus({ preventScroll: true });
+  }
+
+  function openRechargeModal(offerId) {
+    rechargeReturnFocus = document.activeElement;
+    rechargeReturnOffer = offerId || "";
+    const offer = Object.values(cfg.rechargeOffers).flat().find((item) => item.id === offerId);
+    const edition = offer?.id.startsWith("enterprise-") ? "企业版" : "个人版";
+    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal recharge-modal" role="dialog" aria-modal="true" aria-labelledby="rechargeModalTitle"><div class="modal-head"><div><span class="modal-kicker">微信专属客服</span><h2 id="rechargeModalTitle">扫码联系，开通创作之旅</h2></div><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${offer ? `<div class="recharge-selection"><span>${edition} · ${offer.name}</span><strong>¥${offer.price.toLocaleString("en-US")} <small>/ ${offer.credits.toLocaleString("en-US")} 积分</small></strong></div>` : ""}<div class="recharge-content"><img src="./assets/recharge-wechat.jpg" alt="客服微信二维码，扫一扫添加客服" /><p>使用微信扫一扫，添加客服后告知所选套餐</p><small>手机端可保存二维码后，在微信中识别</small></div><div class="modal-actions"><button class="cancel-btn" type="button" data-action="close-modal">我知道了</button></div></div></div>`;
+    $('.recharge-modal [data-action="close-modal"]')?.focus();
   }
 
   async function openPointsModal() {
@@ -1465,10 +1536,12 @@
     }
     if (action === "logout") { await logout(); return; }
     if (action === "create") { if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; } if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; } openCreateModal(); }
-    if (action === "close-modal") $("#modalRoot").innerHTML = "";
+    if (action === "close-modal") closeModal();
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
-    if (action === "recharge") openRechargeModal();
+    if (action === "pricing-switch") switchRechargeTier(actionElement.dataset.tier);
+    if (action === "show-pricing") showRechargePricing();
+    if (action === "recharge") openRechargeModal(actionElement.dataset.offer);
     if (action === "open-task") go("task/" + id);
     if (action === "toggle-menu") {
       event.stopPropagation();
@@ -1573,7 +1646,7 @@
       const input = $("#fileInput");
       if (input && event.target.id !== "fileInput") input.click();
     }
-    if (event.target.id === "modalMask") $("#modalRoot").innerHTML = "";
+    if (event.target.id === "modalMask") closeModal();
   });
 
   document.addEventListener("dragover", (event) => {
@@ -1587,6 +1660,18 @@
   });
 
   document.addEventListener("keydown", (event) => {
+    const rechargeModal = $(".recharge-modal");
+    if (rechargeModal) {
+      if (event.key === "Escape") { closeModal(); return; }
+      if (event.key === "Tab") {
+        const buttons = [...rechargeModal.querySelectorAll("button")];
+        const first = buttons[0];
+        const last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+      return;
+    }
     if (event.key === "Escape" && $("#modalRoot").innerHTML) $("#modalRoot").innerHTML = "";
   });
 
