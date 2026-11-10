@@ -62,14 +62,12 @@ class RemoteAsrTests(unittest.TestCase):
 
     def test_audio_transport_is_lossless_and_samples_match(self):
         pcm = b"\1\0\2\0" * 80000
-        response = io.BytesIO(json.dumps(self.result()).encode())
-        opener = Mock()
-        opener.open.return_value = response
         with (patch.object(remote_asr, "remote_attempt", return_value=nullcontext()),
               patch.object(remote_asr.config, "ASR_REMOTE_TOKEN", "private-test-token"),
               patch.object(remote_asr.config, "ASR_REMOTE_URL", "http://private"),
-              patch.object(remote_asr, "build_opener", return_value=opener)):
+              patch.object(remote_asr, "post", return_value=self.result()) as post):
             remote_asr.request_asr(pcm, 10)
-        request = opener.open.call_args.args[0]
-        self.assertEqual(gzip.decompress(request.data), pcm)
-        self.assertEqual(request.get_header("X-asr-samples"), "160000")
+        args = post.call_args.args
+        self.assertEqual(gzip.decompress(args[3]), pcm)
+        self.assertEqual(args[4], len(args[3]))
+        self.assertEqual(args[5]["X-ASR-Samples"], "160000")

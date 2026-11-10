@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import gzip
 import math
-from urllib.request import Request, build_opener, ProxyHandler
 from . import config
 from .remote_circuit import remote_attempt
+from .gpu_transport import post
 
 PROTOCOL = "jbb-asr-1"
 
@@ -54,17 +54,12 @@ def validate_result(value, duration: float, samples: int):
 def request_asr(pcm: bytes, duration: float):
     if not config.ASR_REMOTE_TOKEN or not pcm or len(pcm) % 2 or len(pcm) > 3600 * 32000:
         raise ValueError("invalid ASR request")
-    with remote_attempt("asr", config.ASR_REMOTE_URL, config.ASR_REMOTE_TOKEN, config.ASR_REMOTE_TIMEOUT_SECONDS):
+    timeout = max(config.ASR_REMOTE_TIMEOUT_SECONDS, min(1200, duration * .6 + 60))
+    with remote_attempt("asr", config.ASR_REMOTE_URL, config.ASR_REMOTE_TOKEN, timeout):
         # Speech PCM compresses well; transport remains bit-for-bit lossless.
         payload = gzip.compress(pcm, compresslevel=1)
-        request = Request(config.ASR_REMOTE_URL + "/asr", data=payload, method="POST", headers={
-            "Authorization": "Bearer " + config.ASR_REMOTE_TOKEN,
-            "Content-Type": "application/octet-stream", "Content-Length": str(len(payload)),
+        value = post(config.ASR_REMOTE_URL, config.ASR_REMOTE_TOKEN, "/asr", payload, len(payload), {
             "Content-Encoding": "gzip", "X-ASR-Samples": str(len(pcm) // 2),
             "X-ASR-Duration": str(duration), "X-ASR-Settings": json.dumps(settings(), separators=(",", ":")),
-        })
-        with build_opener(ProxyHandler({})).open(request, timeout=config.ASR_REMOTE_TIMEOUT_SECONDS) as response:
-            raw = response.read(4_000_001)
-        if len(raw) > 4_000_000:
-            raise ValueError("oversized ASR response")
-        return validate_result(json.loads(raw), duration, len(pcm) // 2)
+        }, timeout)
+        return validate_result(value, duration, len(pcm) // 2)

@@ -20,6 +20,7 @@ from .config import (
     DOWNLOAD_CONCURRENCY,
     MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS,
     MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+    MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS,
     MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS,
     ARK_UPLOAD_MAX_IN_FLIGHT,
     OBJECT_STORAGE_ACCESS_KEY,
@@ -63,7 +64,7 @@ def _object_parts(uri: str | Path) -> tuple[str, str]:
     return bucket, unquote(parsed.path.lstrip("/"))
 
 
-def _client(*, delivery: bool = False) -> Any:
+def _client(*, delivery: bool = False, download: bool = False) -> Any:
     if not OBJECT_STORAGE_ENABLED:
         raise RuntimeError("对象存储尚未配置")
     try:
@@ -85,8 +86,8 @@ def _client(*, delivery: bool = False) -> Any:
             # Keep required checksums and the explicit Content-Length PUT.
             request_checksum_calculation="when_required",
             connect_timeout=10 if delivery else 60,
-            read_timeout=30 if delivery else 60,
-            retries={"total_max_attempts": 2, "mode": "standard"} if delivery else {"max_attempts": 4, "mode": "adaptive"},
+            read_timeout=min(15, MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS / 2) if download else (30 if delivery else 60),
+            retries={"total_max_attempts": 1 if download else 2, "mode": "standard"} if delivery else {"max_attempts": 4, "mode": "adaptive"},
         ),
     )
 
@@ -171,15 +172,18 @@ def _bounded_transfer(operation: str, bucket: str, key: str, path: Path, timeout
     _progress(progress_callback, stage, 0)
     deadline = time.monotonic() + timeout
     previous = -1
+    last_activity = time.monotonic()
     updates = queue.SimpleQueue()
 
     def report() -> None:
-        nonlocal previous
+        nonlocal previous, last_activity
         while True:
             try:
-                value = updates.get_nowait()
+                value, active = updates.get_nowait()
             except queue.Empty:
                 return
+            if active:
+                last_activity = time.monotonic()
             if value > previous:
                 previous = value
                 _progress(progress_callback, stage, value)
@@ -194,7 +198,13 @@ def _bounded_transfer(operation: str, bucket: str, key: str, path: Path, timeout
                 line = line.strip()
                 # Never forward SDK errors or other transport output.
                 if 0 < len(line) <= 3 and line.isascii() and line.isdecimal():
-                    updates.put(min(99, int(line)))
+                    updates.put((min(99, int(line)), True))
+                elif line.startswith("bytes "):
+                    fields = line.split()
+                    if len(fields) == 3 and all(s.isascii() and s.isdecimal() and len(s) <= 16 for s in fields[1:]):
+                        done, total = map(int, fields[1:])
+                        if 0 < done <= total:
+                            updates.put((min(99, int(done * 100 / total)), True))
 
         reader = threading.Thread(target=read_progress, daemon=True)
         reader.start()
@@ -206,6 +216,8 @@ def _bounded_transfer(operation: str, bucket: str, key: str, path: Path, timeout
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("视频传输超时，系统将自动尝试恢复")
+                if operation == "download" and time.monotonic() - last_activity >= MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS:
+                    raise TimeoutError("视频下载长时间无进展，系统将自动尝试恢复")
                 try:
                     process.wait(timeout=min(.5, remaining))
                 except subprocess.TimeoutExpired:
@@ -228,7 +240,7 @@ def _bounded_transfer(operation: str, bucket: str, key: str, path: Path, timeout
 def _transfer_main() -> None:
     """Isolated transport; credentials remain in inherited environment only."""
     value = json.load(sys.stdin)
-    client = _client(delivery=True)
+    client = _client(delivery=True, download=value["operation"] == "download")
     from boto3.s3.transfer import TransferConfig
     total = 0
     transferred = 0
@@ -254,13 +266,69 @@ def _transfer_main() -> None:
     elif value["operation"] == "download":
         # Resolve size explicitly: some SDK versions obtain metadata through
         # GET instead of emitting the transfer manager's HeadObject event.
-        total = int(client.head_object(Bucket=value["bucket"], Key=value["key"]).get("ContentLength") or 0)
-        client.download_file(value["bucket"], value["key"], value["path"],
-                             Callback=progress,
-                             Config=TransferConfig(max_concurrency=1, use_threads=False,
-                                                   num_download_attempts=2))
+        _download_resumable(client, value["bucket"], value["key"], Path(value["path"]))
     else:
         raise ValueError("Unsupported media operation")
+
+
+def _download_resumable(client, bucket: str, key: str, path: Path) -> None:
+    """Retry stalled streams in-place, pinned to one object identity.
+
+    The parent still owns the absolute deadline and kills/reaps this process.
+    Never accept an ignored Range or changed ETag as a successful continuation.
+    """
+    from botocore.exceptions import BotoCoreError
+    metadata = client.head_object(Bucket=bucket, Key=key)
+    total = int(metadata.get("ContentLength") or 0)
+    etag = metadata.get("ETag")
+    version = metadata.get("VersionId")
+    if total <= 0:
+        raise ValueError("Empty source object")
+    offset = 0
+    with path.open("wb") as output:
+        for attempt in range(3):
+            body = None
+            try:
+                if offset and not etag and not version:
+                    # No stable identity means restarting, never joining bytes.
+                    offset = 0
+                    output.seek(0)
+                    output.truncate()
+                arguments = dict(Bucket=bucket, Key=key)
+                if etag:
+                    arguments["IfMatch"] = etag
+                if version:
+                    arguments["VersionId"] = version
+                if offset:
+                    arguments["Range"] = f"bytes={offset}-"
+                response = client.get_object(**arguments)
+                body = response["Body"]
+                if etag and response.get("ETag") != etag:
+                    raise ValueError("Source object changed during download")
+                if version and response.get("VersionId") != version:
+                    raise ValueError("Source object version changed during download")
+                if int(response.get("ContentLength", -1)) != total - offset:
+                    raise ValueError("Invalid source response length")
+                if offset and (response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 206
+                               or response.get("ContentRange") != f"bytes {offset}-{total - 1}/{total}"):
+                    raise ValueError("Source server ignored download Range")
+                while chunk := body.read(64 * 1024):
+                    if offset + len(chunk) > total:
+                        raise ValueError("Source response exceeded expected length")
+                    output.write(chunk)
+                    offset += len(chunk)
+                    print(f"bytes {offset} {total}", flush=True)
+                if offset != total:
+                    raise OSError("Incomplete source response")
+                return
+            except (BotoCoreError, OSError):
+                if attempt == 2:
+                    raise
+                # The next GET resumes only bytes actually written; SDK read
+                # retries cannot reset offsets or silently duplicate a part.
+            finally:
+                if body is not None:
+                    body.close()
 
 
 def delete_media(uri: str | Path) -> None:

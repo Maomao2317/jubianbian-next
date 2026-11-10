@@ -120,3 +120,11 @@ class RemoteCircuitTests(unittest.TestCase):
                 pass
             with self.assertRaisesRegex(ValueError, "original"), remote.remote_attempt("ocr", "http://gpu", "token", 90):
                 raise ValueError("original")
+
+    def test_explicit_busy_does_not_open_healthy_gpu_circuit(self):
+        with patch.object(remote, "circuit", self.gate), patch.object(remote, "_probe") as probe:
+            with self.assertRaises(remote.RemoteBusy), remote.remote_attempt("ocr", "http://gpu", "token", 240):
+                raise remote.RemoteBusy("admission busy")
+            with remote.remote_attempt("ocr", "http://gpu", "token", 240):
+                pass
+            self.assertEqual(probe.call_count, 1)

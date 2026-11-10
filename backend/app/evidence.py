@@ -479,7 +479,7 @@ def _ocr_evidence(path: Path, duration_sec: float) -> dict[str, Any]:
     return _ocr_evidence_local(path, duration_sec)
 
 
-def _ocr_evidence_local(path: Path, duration_sec: float, *, page_runner=None, provider="tesseract") -> dict[str, Any]:
+def _ocr_evidence_local(path: Path, duration_sec: float, *, page_runner=None, provider="tesseract", raise_errors=False) -> dict[str, Any]:
     """Optionally OCR sampled frames when both command-line tools exist.
 
     This deliberately stays optional: a missing OCR language pack or binary
@@ -569,6 +569,8 @@ def _ocr_evidence_local(path: Path, duration_sec: float, *, page_runner=None, pr
                         path.name, len(images), ocr_calls, execution["processes"], execution["batches"],
                         execution["fallback_batches"], OCR_BATCH_SIZE)
     except Exception as exc:
+        if raise_errors:
+            raise
         logger.warning("evidence_ocr_failed file=%s error=%s", path.name, safe_error_text(exc))
         return _source("ocr", "unavailable", provider=provider, reason=f"OCR 失败：{safe_error_text(exc)}")
     if successful_frames == 0 and errors:

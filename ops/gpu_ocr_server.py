@@ -22,7 +22,9 @@ from fastapi import FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 from app.evidence import _ocr_evidence_local, _bounded_text
 from app.config import OCR_SAMPLE_INTERVAL_SECONDS, OCR_MAX_FRAMES
+from app.config import LOCAL_ASR_CONCURRENCY
 from app.remote_ocr import PROTOCOL
+from app import ocr_pages
 
 TOKEN = os.environ.get("JBB_GPU_OCR_TOKEN", "")
 MODEL = None
@@ -86,12 +88,29 @@ def authenticate(request):
         raise HTTPException(401, "unauthorized")
 
 
+async def upload_stream(request, seconds=95):
+    """Release admission even if an authenticated client stalls its upload."""
+    deadline = time.monotonic() + seconds
+    iterator = request.stream().__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(iterator.__anext__(), max(0, deadline - time.monotonic()))
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise HTTPException(408, "GPU upload deadline exceeded")
+        yield chunk
+
+
 @app.get("/health")
 def health(request: Request):
     authenticate(request)
     return {"ready": MODEL is not None, "provider": "paddleocr-gpu", "protocol": PROTOCOL,
+            "pageProtocol": ocr_pages.PROTOCOL, "revision": os.environ.get("JBB_GPU_REVISION", "unknown"),
             "interval": OCR_SAMPLE_INTERVAL_SECONDS, "maxFrames": OCR_MAX_FRAMES,
             "recBatch": REC_BATCH, "detBatch": DET_BATCH,
+            "asrConcurrency": LOCAL_ASR_CONCURRENCY,
+            "ocrActive": 2 - ADMISSION._value, "asrActive": 2 - ASR_ADMISSION._value,
             "asrReady": ASR_READY, "asrProvider": "faster-whisper-gpu" if ASR_READY else None}
 
 
@@ -118,10 +137,10 @@ async def asr(request: Request):
     try:
         await asyncio.wait_for(ASR_ADMISSION.acquire(), timeout=1)
     except asyncio.TimeoutError:
-        raise HTTPException(503, "GPU ASR busy")
+        raise HTTPException(503, "GPU ASR busy", headers={"X-GPU-Busy": "1"})
     try:
         payload = bytearray()
-        async for chunk in request.stream():
+        async for chunk in upload_stream(request):
             payload.extend(chunk)
             if len(payload) > size:
                 raise HTTPException(413, "audio too large")
@@ -164,6 +183,7 @@ def run_pages(paths, _tesseract, _temp_dir):
     detection_seconds = 0.0
     recognition_seconds = 0.0
     with GPU_LOCK:
+        admitted = time.perf_counter()
         detector, recognizer, sort_boxes, crop_boxes = MODEL
         for indices in groups.values():
             phase = time.perf_counter()
@@ -202,7 +222,7 @@ def run_pages(paths, _tesseract, _temp_dir):
         if any(text is None for text in texts):
             raise ValueError("GPU OCR result missing recognized text")
         results.append((0, _bounded_text(" ".join(str(text) for text in texts), 1000), ""))
-    print(f"gpu_ocr_pages pages={len(paths)} crops={len(crops)} det_ms={detection_seconds*1000:.1f} "
+    print(f"gpu_ocr_pages pages={len(paths)} crops={len(crops)} queue_ms={(admitted-started)*1000:.1f} det_ms={detection_seconds*1000:.1f} "
           f"rec_ms={recognition_seconds*1000:.1f} duration_ms={(time.perf_counter()-started)*1000:.1f}", flush=True)
     return results, {"processes": 0, "batches": 1, "fallback_batches": 0}
 
@@ -223,13 +243,13 @@ async def ocr(request: Request):
     try:
         await asyncio.wait_for(ADMISSION.acquire(), timeout=1)
     except asyncio.TimeoutError:
-        raise HTTPException(503, "GPU OCR busy")
+        raise HTTPException(503, "GPU OCR busy", headers={"X-GPU-Busy": "1"})
     try:
         with tempfile.TemporaryDirectory(prefix="jbb-gpu-video-") as directory:
             video = Path(directory) / "source.mp4"
             received = 0
             with video.open("wb") as file:
-                async for chunk in request.stream():
+                async for chunk in upload_stream(request):
                     received += len(chunk)
                     if received > size:
                         raise HTTPException(413, "video too large")
@@ -241,5 +261,45 @@ async def ocr(request: Request):
             if source.get("status") != "available" or not (source.get("sampling") or {}).get("complete"):
                 raise HTTPException(503, "GPU OCR did not cover every sampled page")
             return {"protocol": PROTOCOL, "source": source}
+    finally:
+        ADMISSION.release()
+
+
+@app.post("/ocr/pages")
+async def ocr_page_batch(request: Request):
+    authenticate(request)
+    try:
+        size = int(request.headers["content-length"])
+        count = int(request.headers["x-ocr-pages"])
+        digest = request.headers["x-ocr-sha256"]
+        if (not 0 < size <= ocr_pages.MAX_BYTES or not 0 < count <= OCR_MAX_FRAMES * 2
+                or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+            raise ValueError()
+    except (KeyError, ValueError):
+        raise HTTPException(400, "invalid OCR page payload")
+    try:
+        await asyncio.wait_for(ADMISSION.acquire(), timeout=1)
+    except asyncio.TimeoutError:
+        raise HTTPException(503, "GPU OCR busy", headers={"X-GPU-Busy": "1"})
+    try:
+        with tempfile.TemporaryDirectory(prefix="jbb-gpu-pages-") as directory:
+            archive = Path(directory) / "pages.zip"
+            received = 0
+            with archive.open("wb") as file:
+                async for chunk in upload_stream(request):
+                    received += len(chunk)
+                    if received > size:
+                        raise HTTPException(413, "OCR pages too large")
+                    file.write(chunk)
+            if received != size or ocr_pages.file_digest(archive) != digest:
+                raise HTTPException(400, "incomplete OCR page upload")
+            try:
+                paths = await run_in_threadpool(ocr_pages.unpack, archive, directory, count, OCR_MAX_FRAMES * 2)
+            except Exception:
+                raise HTTPException(400, "invalid OCR page archive")
+            results, _ = await run_in_threadpool(run_pages, paths, None, Path(directory))
+            if len(results) != count or any(code != 0 for code, _, _ in results):
+                raise HTTPException(503, "GPU OCR incomplete pages")
+            return {"protocol": ocr_pages.PROTOCOL, "sha256": digest, "pages": [text for _, text, _ in results]}
     finally:
         ADMISSION.release()

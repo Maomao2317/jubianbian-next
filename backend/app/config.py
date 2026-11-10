@@ -29,6 +29,7 @@ SHARED_MODEL_CONCURRENCY = max(1, min(24, int(os.getenv("JBB_SHARED_MODEL_CONCUR
 DOWNLOAD_CONCURRENCY = max(1, min(8, int(os.getenv("JBB_DOWNLOAD_CONCURRENCY", "2"))))
 MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS", "600")))
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = max(30.0, float(os.getenv("JBB_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "300")))
+MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS = max(10.0, min(60.0, float(os.getenv("JBB_MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS", "30"))))
 # Cross-region uploads can take several minutes even for a valid 15 MiB proxy.
 # Keep a finite process deadline while allowing a 40 MiB proxy at 50 KiB/s.
 MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS = max(10.0, float(os.getenv("JBB_MEDIA_PROXY_UPLOAD_TIMEOUT_SECONDS", "900")))
@@ -91,7 +92,7 @@ LOCAL_ASR_VAD_MIN_SILENCE_MS = max(100, int(os.getenv("JBB_LOCAL_ASR_VAD_MIN_SIL
 LOCAL_ASR_VAD_SPEECH_PAD_MS = max(0, int(os.getenv("JBB_LOCAL_ASR_VAD_SPEECH_PAD_MS", "200")))
 ASR_REMOTE_URL = os.getenv("JBB_ASR_REMOTE_URL", "").strip().rstrip("/")
 ASR_REMOTE_TOKEN = os.getenv("JBB_ASR_REMOTE_TOKEN", "").strip()
-ASR_REMOTE_TIMEOUT_SECONDS = max(5, min(300, float(os.getenv("JBB_ASR_REMOTE_TIMEOUT_SECONDS", "60"))))
+ASR_REMOTE_TIMEOUT_SECONDS = max(5, min(1200, float(os.getenv("JBB_ASR_REMOTE_TIMEOUT_SECONDS", "180"))))
 OCR_LANG = os.getenv("JBB_OCR_LANG", "chi_sim+eng").strip() or "chi_sim+eng"
 OCR_SAMPLE_INTERVAL_SECONDS = max(0.1, float(os.getenv("JBB_OCR_SAMPLE_INTERVAL_SECONDS", "0.25")))
 OCR_MAX_FRAMES = max(12, min(1440, int(os.getenv("JBB_OCR_MAX_FRAMES", "720"))))
@@ -100,7 +101,8 @@ OCR_MAX_FRAMES = max(12, min(1440, int(os.getenv("JBB_OCR_MAX_FRAMES", "720"))))
 OCR_BATCH_SIZE = max(1, min(32, int(os.getenv("JBB_OCR_BATCH_SIZE", "16"))))
 OCR_REMOTE_URL = os.getenv("JBB_OCR_REMOTE_URL", "").strip().rstrip("/")
 OCR_REMOTE_TOKEN = os.getenv("JBB_OCR_REMOTE_TOKEN", "").strip()
-OCR_REMOTE_TIMEOUT_SECONDS = max(5, min(300, float(os.getenv("JBB_OCR_REMOTE_TIMEOUT_SECONDS", "90"))))
+OCR_REMOTE_TIMEOUT_SECONDS = max(5, min(1200, float(os.getenv("JBB_OCR_REMOTE_TIMEOUT_SECONDS", "240"))))
+OCR_REMOTE_PAGE_TRANSPORT = os.getenv("JBB_OCR_REMOTE_PAGE_TRANSPORT", "0") == "1"
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
 ARK_API_KEY_2 = os.getenv("ARK_API_KEY_2", "").strip()
 ARK_API_KEY_3 = os.getenv("ARK_API_KEY_3", "").strip()

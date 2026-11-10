@@ -13,6 +13,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from . import config
 from .resource_limits import capacity
+from .gpu_transport import RemoteBusy
 
 
 class CircuitOpen(RuntimeError):
@@ -126,7 +127,8 @@ def remote_attempt(kind, url, token, timeout):
     # the application boundary so a harmless burst does not become HTTP 503,
     # circuit cooldown, and unnecessary CPU fallback. The hashed scope keeps
     # separate GPU endpoints independent without persisting URLs or tokens.
-    with capacity(f"gpu-remote-{capacity_scope}", limit, directory=directory) as queue_ms:
+    with capacity(f"gpu-remote-{capacity_scope}", limit, directory=directory,
+                  timeout=config.MEDIA_TRANSFER_QUEUE_TIMEOUT_SECONDS) as queue_ms:
         logger.info("gpu_remote_admitted kind=%s limit=%s queue_ms=%.1f", kind, limit, queue_ms)
         deadline = time.monotonic() + 4
         while True:
@@ -144,6 +146,10 @@ def remote_attempt(kind, url, token, timeout):
                 _probe(kind, url, token)
                 _finish(scope, epoch, True)
             yield
+        except RemoteBusy:
+            # Admission rejection says nothing about model/transport health.
+            # Do not make every other task switch to CPU for a harmless burst.
+            raise
         except Exception:
             _finish(scope, epoch, False)
             raise

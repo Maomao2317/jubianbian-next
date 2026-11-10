@@ -24,6 +24,7 @@ class StorageTransferTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.body = bytes(range(256)) * 2048
         self.uploads = []
+        self.downloads = []
         self.started = threading.Event()
         fixture = self
 
@@ -31,17 +32,39 @@ class StorageTransferTests(unittest.TestCase):
             def log_message(self, *_args):
                 pass
 
-            def headers_for(self, size):
-                self.send_response(200)
+            def headers_for(self, size, status=200, offset=0, changed=False):
+                self.send_response(status)
                 self.send_header("Content-Length", str(size))
-                self.send_header("ETag", '"' + hashlib.md5(fixture.body).hexdigest() + '"')
+                self.send_header("ETag", '"changed"' if changed else '"' + hashlib.md5(fixture.body).hexdigest() + '"')
+                if status == 206:
+                    self.send_header("Content-Range", f"bytes {offset}-{len(fixture.body)-1}/{len(fixture.body)}")
                 self.end_headers()
 
             def do_HEAD(self):
                 self.headers_for(len(fixture.body))
 
             def do_GET(self):
+                fixture.downloads.append((self.path, self.headers.get("Range"), self.headers.get("If-Match")))
+                if any(key in self.path for key in ("resume", "ignore-range", "change-etag")):
+                    offset = int(self.headers.get("Range", "bytes=0-")[6:-1])
+                    if offset and "ignore-range" in self.path:
+                        self.headers_for(len(fixture.body))
+                        self.wfile.write(fixture.body)
+                        return
+                    self.headers_for(len(fixture.body) - offset, 206 if offset else 200,
+                                     offset, changed=bool(offset and "change-etag" in self.path))
+                    if not offset:
+                        # Abrupt socket EOF after complete chunks, with a longer
+                        # advertised body: next request must use exact Range.
+                        self.wfile.write(fixture.body[:131072])
+                    else:
+                        self.wfile.write(fixture.body[offset:])
+                    return
                 self.headers_for(len(fixture.body))
+                if "idle" in self.path:
+                    fixture.started.set()
+                    time.sleep(3)
+                    return
                 if "stall" not in self.path and "progress" not in self.path:
                     self.wfile.write(fixture.body)
                     return
@@ -172,6 +195,30 @@ class StorageTransferTests(unittest.TestCase):
             with self.assertRaises(OSError) as raised:
                 storage._bounded_transfer("download", "fixture", "key", self.root / "file", 2)
         self.assertNotIn("private", str(raised.exception))
+
+    def test_truncated_response_resumes_exact_bytes_under_original_identity(self):
+        with patch.object(storage, "DATA_DIR", self.root):
+            target, directory = storage.materialize_media("s3://fixture/resume.mp4", "resume")
+        self.assertEqual(target.read_bytes(), self.body)
+        self.assertEqual([call[1] for call in self.downloads], [None, "bytes=131072-"])
+        self.assertTrue(all(call[2] == '"' + hashlib.md5(self.body).hexdigest() + '"' for call in self.downloads))
+        storage.cleanup_materialized(directory)
+
+    def test_changed_identity_or_ignored_range_is_rejected_and_cleaned(self):
+        for key in ("change-etag", "ignore-range"):
+            with self.subTest(key=key), patch.object(storage, "DATA_DIR", self.root):
+                with self.assertRaises(OSError):
+                    storage.materialize_media(f"s3://fixture/{key}.mp4", key)
+            self.assertEqual(list(self.root.glob("jbb-media-*")), [])
+
+    def test_no_progress_is_stopped_before_absolute_deadline(self):
+        started = time.monotonic()
+        with (patch.object(storage, "DATA_DIR", self.root),
+              patch.object(storage, "MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS", 1)):
+            with self.assertRaisesRegex(TimeoutError, "无进展"):
+                storage.materialize_media("s3://fixture/idle.mp4", "idle")
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(list(self.root.glob("jbb-media-*")), [])
 
 
 if __name__ == "__main__":

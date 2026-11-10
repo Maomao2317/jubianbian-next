@@ -22,7 +22,8 @@ from urllib.request import Request, urlopen
 
 SOURCE_FILES = (
     "backend/app/__init__.py", "backend/app/config.py", "backend/app/evidence.py",
-    "backend/app/remote_ocr.py", "backend/app/remote_asr.py", "backend/app/logging_setup.py", "backend/app/resource_limits.py",
+    "backend/app/remote_ocr.py", "backend/app/remote_asr.py", "backend/app/remote_circuit.py",
+    "backend/app/gpu_transport.py", "backend/app/ocr_pages.py", "backend/app/logging_setup.py", "backend/app/resource_limits.py",
     "ops/gpu_ocr_server.py", "ops/manage_gpu_ocr.py", "ops/gpu-ocr-deployment.md",
 )
 
@@ -48,10 +49,14 @@ def environment(root):
     # The mirror may not support Xet's token exchange. Plain HTTP downloads
     # also work with the standard endpoint and reuse the same model cache.
     env.setdefault("HF_HUB_DISABLE_XET", "1")
+    # Allocate Paddle memory on demand, leaving room for Whisper and a bounded
+    # candidate worker during staging verification on the same physical GPU.
+    env.setdefault("FLAGS_allocator_strategy", "auto_growth")
     if env.get("JBB_GPU_ASR_ENABLED") == "1":
         env.update(JBB_LOCAL_ASR_DEVICE="cuda", JBB_LOCAL_ASR_COMPUTE_TYPE="float16",
-                   JBB_LOCAL_ASR_MODEL="small", JBB_LOCAL_ASR_CONCURRENCY="1",
+                   JBB_LOCAL_ASR_MODEL="small",
                    JBB_LOCAL_ASR_MODEL_PATH=str(root / "cache/whisper-small"))
+        env.setdefault("JBB_LOCAL_ASR_CONCURRENCY", "1")
     libraries = sorted((root / "venv/lib/python3.10/site-packages/nvidia").glob("*/lib"))
     env["LD_LIBRARY_PATH"] = ":".join([*(str(path) for path in libraries), env.get("LD_LIBRARY_PATH", "")])
     return env
@@ -115,9 +120,13 @@ def install(root):
 
 
 def command(root, name, env):
+    port = int(env.get("JBB_GPU_PORT", "8866"))
+    tunnel_port = int(env.get("JBB_GPU_TUNNEL_PORT", "18866"))
+    if not (1024 <= port <= 65535 and 1024 <= tunnel_port <= 65535):
+        raise ValueError("Invalid private GPU port")
     if name == "server":
         return [str(root / "venv/bin/python"), "-m", "uvicorn", "ops.gpu_ocr_server:app",
-                "--host", "127.0.0.1", "--port", "8866", "--workers", "1"]
+                "--host", "127.0.0.1", "--port", str(port), "--workers", "1"]
     host = env.get("JBB_GPU_TUNNEL_HOST", "")
     if not host or host.startswith("-") or any(c.isspace() for c in host):
         raise RuntimeError("Set JBB_GPU_TUNNEL_HOST=user@host in service.env")
@@ -126,7 +135,7 @@ def command(root, name, env):
             "-o", "UserKnownHostsFile=" + str(root / "cloud-known-hosts"),
             "-o", "StrictHostKeyChecking=yes", "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-            "-R", "127.0.0.1:18866:127.0.0.1:8866", host]
+            "-R", f"127.0.0.1:{tunnel_port}:127.0.0.1:{port}", host]
 
 
 def guard(root, name):
@@ -177,7 +186,8 @@ def start(root):
 
 def status(root):
     env = environment(root)
-    request = Request("http://127.0.0.1:8866/health", headers={"Authorization": "Bearer " + env.get("JBB_GPU_OCR_TOKEN", "")})
+    request = Request("http://127.0.0.1:" + env.get("JBB_GPU_PORT", "8866") + "/health",
+                      headers={"Authorization": "Bearer " + env.get("JBB_GPU_OCR_TOKEN", "")})
     with urlopen(request, timeout=5) as response:
         print(json.dumps(json.load(response), ensure_ascii=False))
 

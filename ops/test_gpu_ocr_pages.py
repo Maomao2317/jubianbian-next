@@ -1,5 +1,6 @@
 """Protect page order and fail-closed behavior without requiring a local GPU."""
 import ast
+import asyncio
 from pathlib import Path
 import threading
 import time
@@ -9,6 +10,25 @@ from unittest.mock import patch
 
 
 class CrossFrameOcrTests(unittest.TestCase):
+    def test_upload_deadline_releases_a_stalled_stream(self):
+        tree = ast.parse(Path(__file__).with_name("gpu_ocr_server.py").read_text(encoding="utf-8"))
+        function = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "upload_stream")
+        namespace = dict(asyncio=asyncio, time=time, HTTPException=lambda code, detail: RuntimeError(str(code)))
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "gpu_ocr_server.py", "exec"), namespace)
+
+        async def stream():
+            yield b"first"
+            await asyncio.sleep(1)
+
+        async def run():
+            chunks = []
+            with self.assertRaisesRegex(RuntimeError, "408"):
+                async for chunk in namespace["upload_stream"](SimpleNamespace(stream=stream), seconds=.03):
+                    chunks.append(chunk)
+            self.assertEqual(chunks, [b"first"])
+
+        asyncio.run(run())
+
     def run_pages(self, *, missing_page=False, missing_crop=False):
         tree = ast.parse(Path(__file__).with_name("gpu_ocr_server.py").read_text(encoding="utf-8"))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_pages")
