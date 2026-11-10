@@ -31,6 +31,11 @@ Deploy the pushed revision to an independent GPU worker and staging first.
 Record GPU protocol, source hashes, readiness, memory and throughput. Raise ASR
 inference concurrency only if measured throughput and memory justify it. Deploy
 the same revision to production only after staging verification and while the
-queue is empty, protected by the SQLite writer lock. Existing GPU worker remains
+compute queue is empty, protected by the SQLite writer lock. Pending direct S3
+upload reservations are preserved without modifying their rows or objects;
+the existing reconciler accepts uploads completed during the switch. Local
+uploads and all ready/running jobs continue to block release. Two additional
+release tests cover writer-lock races, reservation preservation and refusal
+to stop active work. Existing GPU worker remains
 available until both environments have safely moved. Host release records carry
 the exact pushed commit, hashes, GPU verification and environment verification.

@@ -9,6 +9,7 @@ import fcntl
 import json
 import re
 import shutil
+import sqlite3
 import sys
 
 import release_quality_ledger as common
@@ -24,9 +25,36 @@ TESTS = ["test_" + n for n in (
 CHECK_FILES = ["backend/" + n + ".py" for n in TESTS]
 ALLOWED = set(APP_FILES + CHECK_FILES + ["ops/" + p for p in (
     "gpu_ocr_server.py", "manage_gpu_ocr.py", "test_gpu_ocr_pages.py", "release_gpu_transport.py",
-    "gpu-transport-release-2026-11-10.md")])
+    "gpu-transport-release-2026-11-10.md", "test_release_gpu_transport.py")])
 ENV = {"JBB_OCR_REMOTE_PAGE_TRANSPORT": "1", "JBB_ASR_REMOTE_TIMEOUT_SECONDS": "180",
        "JBB_OCR_REMOTE_TIMEOUT_SECONDS": "240", "JBB_MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS": "30"}
+
+
+def stop_when_compute_idle(project):
+    """Keep direct object uploads intact, but never interrupt a claimed job.
+
+    S3 PUTs bypass the application. Their durable reservations survive a restart
+    and the existing upload reconciler accepts objects completed during it.
+    Local uploads, ready jobs and every running job still block the switch.
+    The writer lock prevents claims/completion transitions during the stop.
+    """
+    connection = sqlite3.connect(str(common.database(project)), timeout=5)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        state = dict(connection.execute("SELECT status,count(*) FROM tasks GROUP BY status"))
+        active = connection.execute(
+            """SELECT count(*) FROM tasks
+               WHERE status IN ('queued', 'running', 'uploading')
+               AND NOT (status = 'queued' AND COALESCE(stage, '') = 'uploading'
+                        AND COALESCE(stored_path, '') GLOB 's3://?*')"""
+        ).fetchone()[0]
+        if active:
+            raise RuntimeError("Release deferred: active compute/local uploads " + str(active))
+        common.run(["docker", "stop", "--time", "5", project + "-app-1"], timeout=15)
+        return state
+    finally:
+        connection.rollback()
+        connection.close()
 
 
 def main():
@@ -133,7 +161,7 @@ def main():
             else:
                 target.pop(k, None)
         assert adjusted == old_config, "Unrelated compose changes"
-        record["tasksAtSwitch"] = common.stop_only_when_idle(project)
+        record["tasksAtSwitch"] = stop_when_compute_idle(project)
         stopped = True
         common.run(new_compose + ["up", "-d", "--no-build", "--no-deps", "app"])
         record["health"] = common.health(port, site, build)
@@ -153,7 +181,7 @@ def main():
         print("DEPLOYMENT_VERIFIED", site, commit, "tasks", record["tasksAtSwitch"], record["tasksAfter"], flush=True)
     except BaseException:
         if stopped and common.inspect(project)["State"]["Running"]:
-            common.stop_only_when_idle(project)
+            stop_when_compute_idle(project)
         for p in paths:
             if existed[p]:
                 shutil.copy2(backup / p, root / p)
