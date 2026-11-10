@@ -20,6 +20,9 @@ from .config import (
     ARK_FALLBACK_ON_ERROR,
     ARK_LITE_MODEL,
     ARK_MIN_GROSS_MARGIN_RATIO,
+    ARK_REVENUE_REALIZATION_RATIO,
+    ARK_INFRA_RESERVE_RATIO,
+    ARK_QUALITY_BUDGET_OVERRUN_RATIO,
     ARK_MODEL,
     ARK_MAX_IN_FLIGHT,
     ARK_ROUTING_MODE,
@@ -241,7 +244,7 @@ def _quality_call_budget(
     usage: dict[str, Any],
     model: str,
 ) -> dict[str, Any]:
-    """Admit a corrective model call only while the task keeps its margin.
+    """Admit corrective calls within the margin budget plus at most 3%.
 
     The previous call's token counts are repriced for the requested model. A
     duration floor covers short prompts and provider accounting gaps, then a
@@ -250,7 +253,9 @@ def _quality_call_budget(
     billed_minutes = _row_number(row, "credits_used")
     if billed_minutes <= 0:
         billed_minutes = max(1.0, (max(0.0, duration) + 59.999) // 60)
-    revenue = billed_minutes * POINTS_PER_MINUTE / POINTS_PER_YUAN
+    nominal_revenue = billed_minutes * POINTS_PER_MINUTE / POINTS_PER_YUAN
+    revenue = nominal_revenue * ARK_REVENUE_REALIZATION_RATIO
+    infra_reserve = revenue * ARK_INFRA_RESERVE_RATIO
     current_cost = max(0.0, float(usage.get("api_cost_rmb") or 0))
     whole_duration = max(1.0, float(duration or 0))
     scope = max(1.0, min(whole_duration, float(scope_seconds or whole_duration)))
@@ -271,18 +276,25 @@ def _quality_call_budget(
     per_minute_floor = 0.18 if turbo else 0.06
     conservative_floor = per_minute_floor * max(0.5, scope / 60.0)
     estimated_call = max(token_estimate, conservative_floor) * ARK_TURBO_COST_SAFETY_FACTOR
-    cost_ceiling = revenue * (1.0 - ARK_MIN_GROSS_MARGIN_RATIO)
+    base_ceiling = max(0.0, revenue * (1.0 - ARK_MIN_GROSS_MARGIN_RATIO) - infra_reserve)
+    overrun_ratio = max(0.0, min(0.03, ARK_QUALITY_BUDGET_OVERRUN_RATIO))
+    cost_ceiling = base_ceiling * (1.0 + overrun_ratio)
     projected_cost = current_cost + estimated_call
     allowed = projected_cost <= cost_ceiling
     return {
         "allowed": allowed,
         "revenueRmb": round(revenue, 6),
+        "nominalRevenueRmb": round(nominal_revenue, 6),
+        "revenueRealizationRatio": ARK_REVENUE_REALIZATION_RATIO,
+        "infraReserveRmb": round(infra_reserve, 6),
         "currentCostRmb": round(current_cost, 6),
         "model": model,
         "tier": "turbo" if turbo else "lite",
         "estimatedCallCostRmb": round(estimated_call, 6),
         "projectedCostRmb": round(projected_cost, 6),
         "costCeilingRmb": round(cost_ceiling, 6),
+        "baseCostCeilingRmb": round(base_ceiling, 6),
+        "budgetOverrunRatio": overrun_ratio,
         "minimumGrossMargin": ARK_MIN_GROSS_MARGIN_RATIO,
         "scopeSeconds": round(scope, 3),
         "reason": "within_margin" if allowed else "minimum_margin_would_be_breached",
@@ -1075,24 +1087,11 @@ async def _run_recognizer_with_media(
                     "unresolvedIssues": quality.get("blockingIssues", []),
                 })
                 if repair_metadata["remainingRanges"]:
-                    balance_failure = next((error for error in repair_metadata["errors"]
-                                            if error.get("balanceError")), None)
-                    if balance_failure:
-                        error = ArkError(
-                            balance_failure["error"],
-                            status_code=balance_failure.get("statusCode"),
-                            provider_code=balance_failure.get("providerCode") or "InsufficientBalance",
-                        )
-                        error.usage = dict(final_usage)
-                        error.quality = dict(quality)
-                        raise error
-                    raise _quality_failure(
-                        "视频中仍有未识别片段，自动质量修复已用完可盈利预算，残缺结果不会交付。",
-                        "content_repair_incomplete",
-                        {**final_usage, "provider": provider, "model": final_model},
-                        quality,
-                        script,
-                    )
+                    # A repair limit or provider failure must never hide an
+                    # existing draft. Preserve the gaps for owner review.
+                    quality["deliveryStatus"] = "review_required"
+                    review_metadata["unresolvedIssues"] = quality.get("blockingIssues", [])
+                    review_metadata["retainedDraftReason"] = "unresolved_content_gaps"
             identity_review_needed = any(
                 issue.get("tag") == "人物身份连续性" and issue.get("severity") == "P0"
                 for issue in quality.get("issues") or [] if isinstance(issue, dict)

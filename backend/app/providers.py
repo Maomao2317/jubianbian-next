@@ -7,6 +7,7 @@ import hashlib
 import math
 from contextlib import contextmanager, ExitStack
 from copy import deepcopy
+from http.client import HTTPException
 import re
 import shutil
 import subprocess
@@ -197,7 +198,7 @@ def _ark_http_error(exc: HTTPError, api_key: str) -> ArkError:
         # Download errors may echo the temporary read URL. Never store its
         # signature in task errors/logs or return it to the frontend.
         detail = re.sub(r"https?://[^\s\"<>]+", "[video URL]", detail)
-    except (OSError, ValueError):
+    except (OSError, HTTPException, ValueError):
         pass
     if is_account_balance_error(ArkError(detail, status_code=exc.code, provider_code=provider_code)):
         _cool_down_ark_account(api_key, 300)
@@ -320,7 +321,7 @@ def ark_http(
         raise
     except URLError as exc:
         raise ArkError(f"无法连接方舟接口：{exc.reason}", provider_code="transient_network") from exc
-    except OSError as exc:
+    except (OSError, HTTPException) as exc:
         raise ArkError(f"方舟接口网络错误：{exc}", provider_code="transient_network") from exc
     if not raw:
         return {}
@@ -451,7 +452,7 @@ def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
                         raise _ark_incomplete_error(response_payload)
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
-    except (URLError, OSError) as exc:
+    except (URLError, OSError, HTTPException) as exc:
         if not response_id:
             raise ArkError(
                 f"方舟接口网络错误：{getattr(exc, 'reason', exc)}",

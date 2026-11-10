@@ -1320,3 +1320,18 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
   .activity-price strong { font-size: 24px; }
   .activity-card button { font-size: 11px; padding: 0 8px; }
 }
+/* Filtered ledger totals stay outside the scrollable transaction table. */
+.ledger-summary { padding: 20px 24px; border-bottom: 1px solid #e7e2d8; background: #fcfbf8; }
+.ledger-summary-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 14px; }
+.ledger-summary-heading strong { color: #152238; font-size: 15px; }
+.ledger-summary-heading span, .ledger-summary-note { color: #728096; font-size: 12px; line-height: 1.6; }
+.ledger-summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+.ledger-total { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid #e8e3da; border-radius: 12px; background: #fff; min-width: 0; }
+.ledger-total > span { color: #637187; font-size: 13px; }
+.ledger-total strong { font-size: clamp(17px, 1.5vw, 24px); color: #17243b; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ledger-total small { color: #7a8595; font-size: 11px; line-height: 1.5; }
+.ledger-total-recharge { border-top: 3px solid #21a18b; }
+.ledger-total-grant { border-top: 3px solid #e8b633; }
+.ledger-summary-note { margin: 12px 0 0; }
+@media (max-width: 1050px) { .ledger-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .ledger-summary { padding: 16px; } .ledger-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .ledger-total { padding: 12px; } }

@@ -200,6 +200,9 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
             return script(action(0, end - start, "补全前段。")), {"total_tokens": 5}, start, end - start
 
         with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .20),
+              patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", 1),
+              patch.object(processing, "ARK_INFRA_RESERVE_RATIO", 0),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
               patch.object(processing, "ARK_LITE_MODEL", "lite"),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -235,14 +238,14 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
                   unavailable, (original, {"total_tokens": 10}),
               ]) as whole,
               patch.object(processing, "ark_recognize_range") as ranges):
-            with self.assertRaises(ArkError) as caught:
-                await processing._run_recognizer_with_media(
-                    {"id": "task", "title": "第11集"}, Path("unused"), 60, {"durationSec": 60},
-                    {"model": "lite", "mode": "lite_only", "band": "simple", "score": 0, "reasons": []},
-                    {}, None,
-                )
+            result, quality, _, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集"}, Path("unused"), 60, {"durationSec": 60},
+                {"model": "lite", "mode": "lite_only", "band": "simple", "score": 0, "reasons": []},
+                {}, None,
+            )
 
-        self.assertEqual(caught.exception.provider_code, "content_repair_incomplete")
+        self.assertTrue(quality["contentGapRanges"])
+        self.assertEqual(quality["deliveryStatus"], "review_required")
         self.assertEqual(whole.call_count, 2)
         self.assertEqual(budget.call_count, 2)
         ranges.assert_not_called()
@@ -250,6 +253,9 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_draft_keeps_the_existing_review_path(self):
         original = script(action(0, 120))
         with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .20),
+              patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", 1),
+              patch.object(processing, "ARK_INFRA_RESERVE_RATIO", 0),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
               patch.object(processing, "_needs_automated_content_review", return_value=True),
@@ -310,6 +316,9 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
             return script(action(0, end - start, "补全前段。")), {"total_tokens": 5}, start, end - start
 
         with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .20),
+              patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", 1),
+              patch.object(processing, "ARK_INFRA_RESERVE_RATIO", 0),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
               patch.object(processing, "ARK_LITE_MODEL", "lite"),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -334,6 +343,9 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
             return script(action(0, end - start, "restored opening")), {"total_tokens": 5}, start, end - start
 
         with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .20),
+              patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", 1),
+              patch.object(processing, "ARK_INFRA_RESERVE_RATIO", 0),
               patch.object(processing, "ARK_API_KEYS", ("test",)),
               patch.object(processing, "ARK_LITE_MODEL", "lite"),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -495,7 +507,7 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(metadata["attemptedRanges"][0]["resolved"])
         self.assertEqual(metadata["remainingRanges"], [{"startSec": 10.0, "endSec": 40.0}])
 
-    async def test_unresolved_repair_is_retried_instead_of_delivered(self):
+    async def test_unresolved_repair_returns_candidate_for_owner_review(self):
         original = script(action(50, 60, "只识别到结尾。"))
         route = {"model": "lite", "mode": "complexity", "band": "simple",
                  "score": 0, "reasons": []}
@@ -516,12 +528,13 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
               patch.object(processing, "ark_recognize", return_value=(original, {})),
               patch.object(processing, "repair_content_gaps",
                            AsyncMock(return_value=(original, quality, {})))):
-            with self.assertRaises(ArkError) as caught:
-                await processing._run_recognizer_with_media(
-                    {"id": "task", "title": "第11集", "attempts": 0},
-                    Path("unused"), 60, {"durationSec": 60}, route, {}, None,
-                )
-        self.assertEqual(caught.exception.provider_code, "content_repair_incomplete")
+            result, quality, _, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集", "attempts": 0},
+                Path("unused"), 60, {"durationSec": 60}, route, {}, None,
+            )
+        self.assertTrue(quality["contentGapRanges"])
+        self.assertEqual(quality["deliveryStatus"], "review_required")
+        self.assertIn("只识别到结尾。", str(result))
 
     async def test_repaired_gaps_still_review_unknown_speaker_and_preserve_usage_and_metadata(self):
         original = script(action(110, 120))

@@ -1108,7 +1108,7 @@ def speech_action_speaker(text: Any, characters: list[str]) -> str | None:
 
 
 def repair_dialogue_speakers(blocks: list[dict[str, Any]], characters: list[str]) -> None:
-    """Reconcile dialogue labels with explicit lip-sync/action evidence."""
+    """Fill unknown labels from lip sync; send conflicting claims to review."""
     previous_action = ""
     for block in blocks:
         if block.get("type") == "action":
@@ -1119,6 +1119,7 @@ def repair_dialogue_speakers(blocks: list[dict[str, Any]], characters: list[str]
                 previous_action = ""
             continue
         current = character_label(block.get("speaker")) or "未知说话人"
+        block.pop("speakerConflict", None)
         visible = character_label(block.get("visibleSpeaker"))
         mouth_moving = block.get("mouthMoving")
         # A reaction shot cannot transfer an ongoing utterance to its subject.
@@ -1128,17 +1129,14 @@ def repair_dialogue_speakers(blocks: list[dict[str, Any]], characters: list[str]
             continue
         candidate = visible if visible in characters and mouth_moving is True else speech_action_speaker(previous_action, characters)
         if candidate and candidate != current:
-            block["speakerCorrectedFrom"] = current
-            block["speaker"] = candidate
-            block["speakerCorrection"] = "visible_lip_sync" if candidate == visible else "preceding_speech_action"
-            block["confidence"] = "high" if candidate == visible else "medium"
-            # The deterministic mismatch has been resolved; unrelated dialogue
-            # integrity findings, if any, remain reviewable.
-            issues = [item for item in (block.get("dialogueIssues") or []) if item != "speaker_label_mismatch"]
-            if issues:
-                block["dialogueIssues"] = issues
+            if current in {"未知说话人", "未知男声", "未知女声"} and candidate == visible and mouth_moving is True:
+                block["speakerCorrectedFrom"] = current
+                block["speaker"] = candidate
+                block["speakerCorrection"] = "visible_lip_sync"
             else:
-                block.pop("dialogueIssues", None)
+                # These are competing model claims, not independently verified
+                # ground truth. Preserve words and identity until video review.
+                block["speakerConflict"] = candidate
         previous_action = ""
 
 
@@ -3526,7 +3524,9 @@ def script_quality(
                     # block delivery, while this remains an internal hint.
                     add_issue("对白置信度低", "P1", f"第 {scene_index} 场第 {block_index} 句对白置信度较低。", scene_index, block_index)
                 visible_speaker = character_label(block.get("visibleSpeaker"))
-                if (visible_speaker and visible_speaker != speaker and block.get("mouthMoving") is True
+                if block.get("speakerConflict"):
+                    add_issue("台词归属错", "P0", f"第 {scene_index} 场第 {block_index} 句对白标记为{speaker}，动作或口型提示为{block['speakerConflict']}，须核对原视频。", scene_index, block_index)
+                elif (visible_speaker and visible_speaker != speaker and block.get("mouthMoving") is True
                         and block.get("speechContinuity") is not True):
                     add_issue("台词归属错", "P0", f"第 {scene_index} 场第 {block_index} 句口型人物为{visible_speaker}，但对白标记为{speaker}。", scene_index, block_index)
                 elif block.get("mouthMoving") is False and block.get("speechContinuity") is not True:
@@ -3537,6 +3537,9 @@ def script_quality(
                         dialogue_mixed_speaker_warnings += 1
                     add_issue("漏台词", "P0", f"第 {scene_index} 场第 {block_index} 句对白存在完整性问题：{','.join(block['dialogueIssues'])}。", scene_index, block_index)
             elif block_type == "vo":
+                if (block.get("voKind") == "os" and block.get("mouthMoving") is True
+                        and character_label(block.get("visibleSpeaker")) == character_label(block.get("speaker"))):
+                    add_issue("OS/VO混淆", "P0", f"第 {scene_index} 场第 {block_index} 条内心独白与本人开口证据冲突，须核对原视频。", scene_index, block_index)
                 if not character_label(block.get("speaker")) or block.get("speaker") in {"未知说话人", "未知男声", "未知女声"}:
                     add_issue("台词归属错", "P0", f"第 {scene_index} 场第 {block_index} 条声音说话人需要核对。", scene_index, block_index)
                 if block.get("voKind") not in _VO_KINDS:

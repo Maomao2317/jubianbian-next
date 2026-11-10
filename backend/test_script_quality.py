@@ -2,6 +2,7 @@ import asyncio
 import json
 import unittest
 from pathlib import Path
+from http.client import IncompleteRead
 from unittest.mock import patch
 
 from app import processing, providers
@@ -155,7 +156,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
 
             def __iter__(self):
                 yield b'data: {"type":"response.created","response":{"id":"resp-test","status":"in_progress"}}\n'
-                raise TimeoutError("read operation timed out")
+                raise IncompleteRead(b"", 100)
 
         with (
             patch.object(providers, "urlopen", return_value=DisconnectingResponse()) as create,
@@ -168,6 +169,44 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(create.call_count, 1)
         self.assertEqual(create.call_args.kwargs["timeout"], 45)
         self.assertEqual(payload, completed)
+
+    def test_http_truncated_body_is_transient_and_poll_reuses_response_id(self):
+        completed = {"id": "resp-test", "status": "completed", "output": []}
+
+        class TruncatedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                raise IncompleteRead(b"", 100)
+
+        class CompletedResponse(TruncatedResponse):
+            def read(self):
+                return json.dumps(completed).encode()
+
+        with (patch.object(providers, "urlopen", return_value=TruncatedResponse()),
+              self.assertRaises(ArkError) as caught):
+            providers.ark_http("GET", "/responses/resp-test", api_key="key")
+        self.assertEqual(caught.exception.provider_code, "transient_network")
+        with (patch.object(providers, "urlopen", side_effect=[TruncatedResponse(), CompletedResponse()]) as http,
+              patch.object(providers.time, "sleep")):
+            result = providers._ark_poll_response("resp-test", "key")
+        self.assertEqual(result, completed)
+        self.assertEqual(http.call_count, 2)
+        for call in http.call_args_list:
+            self.assertEqual(call.args[0].get_method(), "GET")
+            self.assertTrue(call.args[0].full_url.endswith("/responses/resp-test"))
+
+    def test_stream_truncated_before_id_becomes_transient(self):
+        with (patch.object(providers, "urlopen", side_effect=IncompleteRead(b"", 100)),
+              patch.object(providers, "_ark_poll_response") as poll,
+              self.assertRaises(ArkError) as caught):
+            providers._ark_stream_response({"model": "test"}, "key")
+        self.assertEqual(caught.exception.provider_code, "transient_network")
+        poll.assert_not_called()
 
     def test_ark_poll_retries_transient_network_without_losing_response(self):
         completed = {"id": "resp-test", "status": "completed", "output": []}
@@ -404,7 +443,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertEqual(line["text"], "我没有拿你的东西。")
         self.assertEqual(line["rawText"], "我没有拿你的东西")
 
-    def test_explicit_speech_action_repairs_wrong_speaker(self):
+    def test_conflicting_generated_action_preserves_speaker_for_video_review(self):
         normalized = normalize_script(
             {
                 "characters": ["甲", "乙"],
@@ -421,8 +460,9 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             "测试",
         )
         dialogue = normalized["scenes"][0]["blocks"][1]
-        self.assertEqual(dialogue["speaker"], "甲")
-        self.assertEqual(dialogue["speakerCorrectedFrom"], "乙")
+        self.assertEqual(dialogue["speaker"], "乙")
+        self.assertEqual(dialogue["speakerConflict"], "甲")
+        self.assertTrue(any(i["tag"] == "台词归属错" and i["severity"] == "P0" for i in script_quality(normalized, "test")["issues"]))
 
     def test_non_lip_synced_character_voice_exports_as_parenthesized_os(self):
         normalized = normalize_script(
@@ -999,7 +1039,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
     def test_lite_first_funnel_uses_two_lite_calls_before_one_turbo(self):
         route = {"provider": "ark", "model": "lite", "mode": "lite_first",
                  "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
-        row = {"id": "task-funnel", "title": "测试", "credits_used": 1}
+        row = {"id": "task-funnel", "title": "测试", "credits_used": 4}
         with (
             patch.object(processing, "ARK_API_KEYS", ("key",)),
             patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -1022,7 +1062,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
     def test_turbo_blocker_gets_one_final_lite_cleanup_without_second_turbo(self):
         route = {"provider": "ark", "model": "lite", "mode": "lite_first",
                  "band": "simple", "score": 0, "reasons": ["routing_mode=lite_first"]}
-        row = {"id": "task-cleanup", "title": "测试", "credits_used": 1}
+        row = {"id": "task-cleanup", "title": "测试", "credits_used": 4}
         with (
             patch.object(processing, "ARK_API_KEYS", ("key",)),
             patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
@@ -1104,6 +1144,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             patch.object(processing, "POINTS_PER_MINUTE", 5),
             patch.object(processing, "POINTS_PER_YUAN", 12.8),
             patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", 0.2),
+            patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", 1),
+            patch.object(processing, "ARK_INFRA_RESERVE_RATIO", 0),
             patch.object(processing, "ARK_TURBO_COST_SAFETY_FACTOR", 1.25),
         ):
             turbo = processing._quality_call_budget(row, 60, 60, usage, "turbo")
@@ -1235,7 +1277,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                            {"type": "dialogue", "speaker": "甲", "text": "你好", "startSec": 1, "endSec": 2}],
             }],
         }
-        row = {"id": "task-1", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30}
+        row = {"id": "task-1", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 30, "credits_used": 6}
         with (
             patch.object(processing, "recognition_cache", return_value=None),
             patch.object(processing, "ARK_API_KEYS", ("key",)),

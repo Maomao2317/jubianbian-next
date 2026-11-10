@@ -13,6 +13,12 @@ const calls = [];
 const userCalls = [], taskCalls = [];
 let overviewCalls = 0;
 const user = { id: "u", name: "测试用户<名称>", email: "user@example.test", credits: 128.4, totalUsed: 2, isActive: true };
+const summary = entryType => ({ by_type: Object.fromEntries([
+  ["recharge", 129, 1651.2, 1], ["refund", 10, 128, 1], ["consume", -25, -320, 25],
+  ["grant", 10, 128, 1], ["adjustment", -1, -12.8, 2], ["other", 0, 0, 0],
+].map(([kind, amount, points, count]) => [kind, { amount_rmb: !entryType || entryType === "all" || entryType === kind ? amount : 0,
+  points: !entryType || entryType === "all" || entryType === kind ? points : 0,
+  count: !entryType || entryType === "all" || entryType === kind ? count : 0 }])), review_count: 0 });
 const api = {
   getAdminOverview: async () => { overviewCalls++; return { users: { total: 1, active: 1, credits: 128.4 }, tasks: { total: 3, running: 1, queued: 1 }, recentTasks: [{ ...user, status: "done" }] }; },
   getAdminUsers: async query => { userCalls.push(query); return { total: 1, items: [user] }; },
@@ -26,7 +32,7 @@ const api = {
       lite: { tasks: 2, calls: 2, input_tokens: 1000, output_tokens: 234, total_tokens: 1234, api_cost_rmb: 0.0042, estimated: true },
       turbo: { tasks: 1, calls: 1, input_tokens: 500, output_tokens: 100, total_tokens: 600, api_cost_rmb: 0.003 },
     } }] }; },
-  getAdminRecharges: async query => { calls.push(query); return { total: 1, items: [
+  getAdminRecharges: async query => { calls.push(query); return { total: 25, summary: summary(query.entry_type), items: [
     { entry_type: "consume", points_amount: -10, balance_after: 90, reason: "test", created_at: "2026-10-27" },
   ] }; },
 };
@@ -35,7 +41,7 @@ const context = vm.createContext({ window: { AppAPI: api, addEventListener() {} 
     addEventListener: (event, handler) => { (handlers[event] ||= []).push(handler); } },
   location: { protocol: "http:" }, console, Intl, Date, setTimeout, clearTimeout });
 vm.runInContext(fs.readFileSync(path.join(__dirname, "js/app.js"), "utf8").replace("  boot();",
-  "  window.testUI = { adminLedgerRow, ledgerBadge, adminUserIdentity, renderAdmin, state };"), context);
+  "  window.testUI = { adminLedgerRow, adminLedgerSummary, ledgerBadge, adminUserIdentity, renderAdmin, state };"), context);
 const ui = context.window.testUI;
 const row = (kind, amount, extra = {}) => ui.adminLedgerRow({ entry_type: kind, points_amount: amount,
   balance_after: 100, created_at: "2026-10-27", ...extra });
@@ -53,20 +59,38 @@ const unsafe = row('<img src=x onerror=alert(1)>', 1, { name: "<script>", reason
 assert.doesNotMatch(unsafe, /<img|<script/);
 assert.match(unsafe, /其他变动.*&lt;img&gt;/s);
 assert.match(row("__proto__", 1), /其他变动/);
-const click = async action => {
-  for (const handler of handlers.click) await handler({ target: { closest: selector => selector === "[data-action]" ? { dataset: { action } } : null } });
+assert.match(row("grant", 128, { allocation: "included_gift" }), /同笔充值中的赠送/);
+assert.match(ui.adminLedgerSummary({ by_type: { recharge: { amount_rmb: 0, points: 128, count: 1, unrecorded_cash_count: 1 } }, review_count: 2 }), /1 笔未记录人民币.*2 笔备注无法准确拆分/s);
+assert.doesNotMatch(ui.adminLedgerSummary({ by_type: { grant: { amount_rmb: "<img>", points: "<script>", count: "<img>" } } }), /<img|<script/);
+const click = async (action, extra = {}) => {
+  for (const handler of handlers.click) await handler({ target: { closest: selector => selector === "[data-action]" ? { dataset: { action, ...extra } } : null } });
 };
 (async () => {
   ui.state.profile = { role: "admin" }; ui.state.view = "admin"; ui.state.adminTab = "credits";
   await ui.renderAdmin();
-  assert.match(node("#main").innerHTML, /充值与积分流水.*1 笔流水.*积分变动.*变动后余额/s);
+  assert.match(node("#main").innerHTML, /充值与积分流水.*25 笔流水.*当前筛选合计.*充值本金.*¥ 129.00.*赠送折合.*¥ 10.00.*积分变动.*变动后余额/s);
+  assert.match(node("#main").innerHTML, /扣款折合.*−¥ 25.00.*人工调整折合.*−¥ 1.00/s);
+  assert.ok(node("#main").innerHTML.indexOf('recharge-toolbar') < node("#main").innerHTML.indexOf('ledger-summary'));
+  await click("admin-recharge-page", { page: "1" });
+  assert.equal(calls.at(-1).offset, 10);
+  assert.match(node("#main").innerHTML, /扣款折合.*−¥ 25.00/s);
   node("#adminRechargeType").value = "refund";
+  node("#adminRechargeKeyword").value = "Test";
+  node("#adminRechargeFrom").value = "2026-10-27";
+  node("#adminRechargeTo").value = "2026-10-28";
   ui.state.adminRechargePage = 3;
   await click("admin-recharge-search");
   assert.equal(calls.at(-1).entry_type, "refund");
   assert.equal(calls.at(-1).offset, 0);
+  assert.equal(calls.at(-1).keyword, "Test");
+  assert.equal(calls.at(-1).date_from, "2026-10-27");
+  assert.equal(calls.at(-1).date_to, "2026-10-28");
+  assert.match(node("#main").innerHTML, /充值本金.*¥ 0.00.*退费折合.*¥ 10.00.*扣款折合.*¥ 0.00/s);
   await click("admin-recharge-reset");
   assert.equal(calls.at(-1).entry_type, "all");
+  assert.equal(calls.at(-1).keyword, "");
+  assert.equal(calls.at(-1).date_from, "");
+  assert.match(node("#main").innerHTML, /充值本金.*¥ 129.00/s);
   assert.doesNotMatch(node("#main").innerHTML, /<h2>用户管理<\/h2>|后续）/);
   const beforeInvalid = calls.length;
   node("#adminRechargeFrom").value = "2026-10-28";

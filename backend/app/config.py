@@ -117,7 +117,10 @@ ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "lite_first").strip().lower() o
 # a source-fidelity blocker remains.  The upgrade estimate keeps a real margin
 # after the already-spent Lite call; uncertain estimates are padded before a
 # paid request is admitted.
-ARK_MIN_GROSS_MARGIN_RATIO = max(0.0, min(0.9, float(os.getenv("JBB_ARK_MIN_GROSS_MARGIN_RATIO", "0.20"))))
+ARK_MIN_GROSS_MARGIN_RATIO = max(0.0, min(0.9, float(os.getenv("JBB_ARK_MIN_GROSS_MARGIN_RATIO", "0.65"))))
+ARK_REVENUE_REALIZATION_RATIO = max(0.01, min(1.0, float(os.getenv("JBB_ARK_REVENUE_REALIZATION_RATIO", "0.80"))))
+ARK_INFRA_RESERVE_RATIO = max(0.0, min(0.5, float(os.getenv("JBB_ARK_INFRA_RESERVE_RATIO", "0.05"))))
+ARK_QUALITY_BUDGET_OVERRUN_RATIO = max(0.0, min(0.03, float(os.getenv("JBB_ARK_QUALITY_BUDGET_OVERRUN_RATIO", "0.03"))))
 ARK_TURBO_COST_SAFETY_FACTOR = max(1.0, min(5.0, float(os.getenv("JBB_ARK_TURBO_COST_SAFETY_FACTOR", "1.25"))))
 # Keep the initial pass dense enough for source fidelity. Cost control comes
 # from bounded issue review and avoiding repeated full-video calls; deployments

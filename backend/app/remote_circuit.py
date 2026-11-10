@@ -19,6 +19,10 @@ class CircuitOpen(RuntimeError):
     pass
 
 
+class ProbePending(CircuitOpen):
+    pass
+
+
 class RemoteCircuit:
     def __init__(self, directory=None):
         self.directory = directory
@@ -46,6 +50,8 @@ class RemoteCircuit:
             if row and row[1] == "closed":
                 return row[0], False
             if row and now < row[2]:
+                if row[1] == "probe":
+                    raise ProbePending("GPU health probe in progress")
                 raise CircuitOpen("GPU temporarily unavailable; use CPU fallback")
             epoch = uuid.uuid4().hex
             connection.execute("INSERT INTO circuits VALUES (?,?,?,?,?) ON CONFLICT(scope) DO UPDATE SET epoch=excluded.epoch,state=excluded.state,until=excluded.until",
@@ -122,10 +128,21 @@ def remote_attempt(kind, url, token, timeout):
     # separate GPU endpoints independent without persisting URLs or tokens.
     with capacity(f"gpu-remote-{capacity_scope}", limit, directory=directory) as queue_ms:
         logger.info("gpu_remote_admitted kind=%s limit=%s queue_ms=%.1f", kind, limit, queue_ms)
-        epoch, probe = circuit.admit(scope, timeout + 3)
+        deadline = time.monotonic() + 4
+        while True:
+            try:
+                epoch, probe = circuit.admit(scope, timeout + 3)
+                break
+            except ProbePending:
+                # A concurrent initial/recovery request should share a healthy
+                # probe, not start slow CPU inference while the GPU is ready.
+                if time.monotonic() >= deadline:
+                    raise CircuitOpen("GPU health probe did not finish; use CPU fallback")
+                time.sleep(0.05)
         try:
             if probe:
                 _probe(kind, url, token)
+                _finish(scope, epoch, True)
             yield
         except Exception:
             _finish(scope, epoch, False)

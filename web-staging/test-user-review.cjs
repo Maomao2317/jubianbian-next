@@ -82,6 +82,8 @@ const click = async (action, id) => {
   const group = { id: "batch", title: "测试剧", tasks: [task, { ...task, id: "two" }] };
   assert.match(ui.batchRow(group), /批量复核（2集）/);
   assert.match(ui.batchRow(group), /等待用户复核/);
+  assert.doesNotMatch(ui.batchRow({ ...group, tasks: [task, { ...task, id: "done", status: "done" }] }), /data-action="download-batch"/);
+  assert.match(ui.batchRow({ ...group, tasks: [{ ...task, status: "done" }] }), /data-action="download-batch"/);
   ui.state.tasks = group.tasks;
   await click("review-batch", "batch");
   assert.match(node("#modalRoot").innerHTML, /确认通过并开放下载（2集）/, node("#toast").textContent);

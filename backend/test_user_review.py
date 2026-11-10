@@ -80,6 +80,21 @@ class UserReviewTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT count(*) FROM credit_ledger").fetchone()[0], 0)
         self.assertIn("我们出发吧", routes.download_batch(None, "batch", "txt").body.decode())
 
+    def test_bulk_download_requires_all_pending_reviews_and_never_approves(self):
+        asyncio.run(routes.approve_task(None, "one"))
+        self.add_task("foreign-review", user="other", index=3)
+        for download in (lambda: routes.download_batch(None, "batch", "txt"),
+                         lambda: routes.download_all_tasks(None, "md")):
+            with self.assertRaises(HTTPException) as caught:
+                download()
+            self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(self.row("two")["status"], "review")
+        with self.assertRaises(HTTPException):
+            routes.download_task(None, "two", "md")
+        asyncio.run(routes.approve_task(None, "two"))
+        self.assertIn("我们出发吧", routes.download_batch(None, "batch", "txt").body.decode())
+        self.assertIn("我们出发吧", routes.download_all_tasks(None, "md").body.decode())
+
     def test_cross_owner_or_missing_task_rolls_back_whole_batch(self):
         self.add_task("foreign", user="other")
         for task_id in ("foreign", "missing"):

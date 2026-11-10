@@ -58,6 +58,7 @@ from .config import (
     UPLOAD_DIR,
 )
 from .billing import fetch_monthly_ark_cost
+from .ledger_summary import ledger_components, ledger_totals
 from .logging_setup import _email_log_id, logger, safe_error_text
 from .media import (
     default_batch_title,
@@ -68,7 +69,7 @@ from .media import (
     title_with_episode,
     is_default_batch_title,
 )
-from .processing import _refund_task_once, process_task
+from .processing import _refund_task_once
 from .rechecks import (
     create_recheck_snapshot,
     mark_recheck_resolved,
@@ -99,6 +100,8 @@ from .task_store import (
 
 # Route handlers stay thin: validation and HTTP translation live here, while
 # persistence, providers, and script processing remain in their own modules.
+# Handlers only persist queued jobs. Starting recognition here would race
+# the durable worker's atomic claim and bypass its concurrency limits.
 
 # Health and operational visibility
 def health() -> Any:
@@ -561,9 +564,6 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
     params: list[Any] = []
     if entry_type not in {"all", "recharge", "refund", "consume", "grant", "adjustment", "other"}:
         raise HTTPException(status_code=400, detail="不支持的流水类型")
-    if entry_type != "all":
-        clauses.append("entry_type = ?")
-        params.append(entry_type)
     if keyword.strip():
         value = f"%{keyword.strip()}%"
         clauses.append("(email LIKE ? OR name LIKE ? OR reason LIKE ?)")
@@ -572,8 +572,8 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
         clauses.append("created_at >= ?")
         params.append(f"{date_from}T00:00:00")
     if date_to:
-        clauses.append("created_at <= ?")
-        params.append(f"{date_to}T23:59:59")
+        clauses.append("substr(created_at, 1, 10) <= ?")
+        params.append(date_to)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     # Recharge writes both ledgers in one transaction. Show its RMB record once,
     # retaining legacy credit-only recharges when no matching RMB record exists.
@@ -601,12 +601,14 @@ def admin_recharge_ledger(request: Request, keyword: str = "", date_from: str = 
         )
     """
     with db() as connection:
-        total = connection.execute(f"{ledger_cte} SELECT COUNT(*) AS count FROM ledger{where}", params).fetchone()["count"]
         rows = connection.execute(
-            f"{ledger_cte} SELECT id, user_id, rmb_amount, points_amount, balance_after, reason, created_at, email, name, entry_type FROM ledger{where} ORDER BY created_at DESC, id DESC, entry_type DESC LIMIT ? OFFSET ?",
-            (*params, limit, offset),
+            f"{ledger_cte} SELECT id, user_id, rmb_amount, points_amount, balance_after, reason, created_at, email, name, entry_type FROM ledger{where} ORDER BY created_at DESC, id DESC, entry_type DESC",
+            params,
         ).fetchall()
-    return {"total": int(total), "items": [dict(row) for row in rows], "limit": limit, "offset": offset}
+    items = [part for row in rows for part in ledger_components(row)
+             if entry_type == "all" or part["entry_type"] == entry_type]
+    return {"total": len(items), "items": items[offset:offset + limit], "limit": limit, "offset": offset,
+            "summary": ledger_totals(items)}
 
 
 def admin_user_ledger(request: Request, user_id: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
@@ -894,7 +896,6 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
         record_task_event(task_id, event_type, message, status="queued", stage="queued", progress_percent=4)
         audit_action = "task_done_recheck" if task_status == "done" else "task_review_retry"
         _admin_audit(admin["id"], audit_action, "task", task_id, "quality recheck without additional user charge")
-        background.add_task(process_task, task_id)
         return {
             "id": task_id,
             "status": "queued",
@@ -909,7 +910,7 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
             current = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
             available = int(current["credits"] or 0) if current else 0
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
-        connection.execute(
+        changed = connection.execute(
             """
             UPDATE tasks
             SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
@@ -919,7 +920,9 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
             WHERE id = ? AND user_id = ? AND status = 'failed'
             """,
             (retry_minutes, now_iso(), task_id, user_id),
-        )
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(status_code=409, detail="任务已被其他请求重新排队")
         _, balance = charged
         connection.execute(
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -927,7 +930,6 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
         )
     record_task_event(task_id, "admin_retry", "管理员重新排队", status="queued", stage="queued", progress_percent=4)
     _admin_audit(admin["id"], "task_retry", "task", task_id)
-    background.add_task(process_task, task_id)
     return {"id": task_id, "status": "queued", "charged": True}
 
 
@@ -1364,7 +1366,6 @@ async def create_task(
         size,
         REQUEST_ID.get(),
     )
-    background.add_task(process_task, task_id)
     return user_task(get_task(task_id, user["id"]))  # type: ignore[arg-type]
 
 
@@ -1457,7 +1458,7 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
             current = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
             available = int(current["credits"] or 0) if current else 0
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
-        connection.execute(
+        changed = connection.execute(
             """
             UPDATE tasks
             SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
@@ -1467,7 +1468,9 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
             WHERE id = ? AND user_id = ? AND status = 'failed'
             """,
             (retry_minutes, now_iso(), task_id, user_id),
-        )
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(status_code=409, detail="任务已被其他请求重新排队")
         _, balance = charged
         connection.execute(
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1475,7 +1478,6 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
         )
     record_task_event(task_id, "retry", "任务已重新排队", status="queued", stage="queued", progress_percent=4)
     logger.info("task_retry task_id=%s request_id=%s", task_id, REQUEST_ID.get())
-    background.add_task(process_task, task_id)
     return user_task(get_task(task_id, user_id))  # type: ignore[arg-type]
 
 
@@ -1504,6 +1506,9 @@ def _download_markdown(task: dict[str, Any]) -> str:
 def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
     user = current_user(request)
     with db() as connection:
+        pending = connection.execute("SELECT 1 FROM tasks WHERE user_id = ? AND status = 'review' LIMIT 1", (user["id"],)).fetchone()
+        if pending:
+            raise HTTPException(status_code=409, detail="请先完成全部待复核剧本的确认，再下载全部剧本")
         rows = connection.execute("SELECT * FROM tasks WHERE user_id = ? AND status = 'done' ORDER BY created_at ASC", (user["id"],)).fetchall()
     if not rows:
         raise HTTPException(status_code=409, detail="暂无已完成剧本")
@@ -1528,6 +1533,9 @@ def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|tx
 def download_batch(request: Request, batch_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
     user = current_user(request)
     with db() as connection:
+        pending = connection.execute("SELECT 1 FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'review' LIMIT 1", (user["id"], batch_id)).fetchone()
+        if pending:
+            raise HTTPException(status_code=409, detail="请先完成该批次全部待复核剧本的确认，再批量下载")
         rows = connection.execute(
             "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'done' ORDER BY created_at ASC",
             (user["id"], batch_id),

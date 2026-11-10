@@ -50,6 +50,7 @@ class DialogueExportTests(unittest.TestCase):
         task = self.task("“他说‘别动’，你听见了吗？”")
         original = deepcopy(task)
         connection = MagicMock()
+        connection.__enter__.return_value.execute.return_value.fetchone.return_value = None
         connection.__enter__.return_value.execute.return_value.fetchall.return_value = [
             {"file_name": "1.mp4", "batch_index": 1, "batch_title": "测试批次", "created_at": "2026-11-09T00:00:00Z"},
         ]
