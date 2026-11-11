@@ -114,8 +114,8 @@ def deploy(commit, build, base):
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))
 
     overlay = root / "release-double11-carousel.yml"
-    assert str(overlay) not in config_files
-    new_compose = common.compose_args(PROJECT, root, config_files + [str(overlay)])
+    deployment_files = config_files if str(overlay) in config_files else config_files + [str(overlay)]
+    new_compose = common.compose_args(PROJECT, root, deployment_files)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = base / ("backup-staging-" + stamp)
     backup.mkdir(mode=0o700)
