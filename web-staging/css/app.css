@@ -1218,7 +1218,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .campaign-viewport, .campaign-track { height: 100%; }
 .campaign-viewport { overflow: hidden; }
 .campaign-track { display: flex; transition: transform .55s cubic-bezier(.22, .72, .25, 1); }
-.campaign-slide { position: relative; display: grid; flex: 0 0 100%; min-width: 0; height: 100%; padding: 16px 64px; overflow: hidden; }
+.campaign-slide { position: relative; display: grid; flex: 0 0 100%; min-width: 0; height: 100%; padding: 16px 32px; overflow: hidden; }
 .campaign-slide::after { position: absolute; top: -98px; right: 112px; width: 260px; height: 360px; border: 1px solid #e4c97b20; transform: rotate(24deg); content: ""; pointer-events: none; }
 .campaign-overview { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 28px; background: linear-gradient(112deg, #111a28 0 62%, #1d2a3e 100%); }
 .campaign-copy { position: relative; z-index: 1; min-width: 0; }
@@ -1226,7 +1226,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .campaign-copy h2 { margin: 6px 0 3px; color: #f7f5ef; font-size: 21px; font-weight: 650; line-height: 1.25; letter-spacing: 0; }
 .campaign-copy h2 strong { color: #efd38e; font-weight: 750; }
 .campaign-copy p { margin: 0; color: #b6beca; font-size: 10px; line-height: 1.5; }
-.campaign-arrow:focus-visible, .campaign-dots button:focus-visible { outline: 3px solid var(--gold-strong); outline-offset: 3px; }
+.campaign-dots button:focus-visible { outline: 3px solid var(--gold-strong); outline-offset: 3px; }
 .campaign-rate { position: relative; z-index: 1; display: grid; grid-template-columns: auto auto auto; align-items: end; color: #e8cc86; font-variant-numeric: tabular-nums; }
 .campaign-rate > span { align-self: center; font-size: 34px; }
 .campaign-rate > strong { font-family: Georgia, "Times New Roman", serif; font-size: 96px; font-weight: 500; line-height: .9; }
@@ -1238,19 +1238,13 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .campaign-plan-heading { position: relative; z-index: 1; min-width: 0; }
 .campaign-plan-heading h2 { margin: 7px 0 5px; color: #f7f5ef; font-size: 21px; font-weight: 700; letter-spacing: 0; }
 .campaign-packages { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; border-left: 1px solid #ffffff18; }
-.campaign-package { display: grid; grid-template-columns: auto auto auto; align-items: baseline; gap: 6px 8px; min-width: 0; padding: 10px 17px; border-right: 1px solid #ffffff18; font-variant-numeric: tabular-nums; }
-.campaign-package > strong { grid-column: 1 / -1; color: #f6f3e9; font-size: 19px; font-weight: 650; }
+.campaign-package { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; align-content: center; gap: 2px; min-width: 0; padding: 8px 17px 10px; border-right: 1px solid #ffffff18; font-variant-numeric: tabular-nums; }
+.campaign-package > strong { color: #f6f3e9; font-size: 19px; font-weight: 650; }
 .campaign-package > strong small { margin-right: 2px; font-size: 11px; }
-.campaign-package > span { color: #9fa9b7; font-size: 11px; }
-.campaign-package > i { color: #bd9d50; font-size: 12px; font-style: normal; }
+.campaign-package > span { color: #9fa9b7; font-size: 11px; text-decoration: line-through; text-decoration-color: #ffffff66; }
 .campaign-package > b { color: #efd38e; font-size: 16px; font-weight: 700; white-space: nowrap; }
 .campaign-package > b small { margin-left: 3px; color: #aeb7c4; font-size: 9px; font-weight: 400; }
 .campaign-enterprise .campaign-plan-heading > span, .campaign-enterprise .campaign-package > b { color: #d5ddbd; }
-.campaign-enterprise .campaign-package > i { color: #a7b28c; }
-.campaign-arrow { position: absolute; z-index: 4; top: 50%; display: grid; place-items: center; width: 34px; height: 46px; padding: 0; border: 0; color: #f4e6be; background: #0b111c78; font-size: 27px; line-height: 1; transform: translateY(-50%); }
-.campaign-arrow:hover { background: #0b111cb8; }
-.campaign-prev { left: 0; }
-.campaign-next { right: 0; }
 .campaign-dots { position: absolute; z-index: 4; right: 50%; bottom: 11px; display: flex; gap: 7px; transform: translateX(50%); }
 .campaign-dots button { width: 18px; height: 4px; padding: 0; border: 0; border-radius: 0; background: #ffffff42; }
 .campaign-dots button[aria-current="true"] { background: #e6c66f; }
@@ -1313,7 +1307,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .activity-enterprise button { border-color: #cbd6bc; background: #d1d9bc; color: #24372c; }
 .activity-enterprise button:hover { background: #e1e7d4; }
 @media (max-width: 1200px) {
-  .campaign-slide { padding-right: 54px; padding-left: 54px; }
+  .campaign-slide { padding-right: 30px; padding-left: 30px; }
   .campaign-personal, .campaign-enterprise { grid-template-columns: 150px minmax(0, 1fr); gap: 18px; }
   .campaign-package { padding-right: 12px; padding-left: 12px; }
   .workspace-layout { grid-template-columns: minmax(0, 1fr) 260px; gap: 24px 20px; }
@@ -1335,7 +1329,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 @media (max-width: 1000px) {
   .tasks-page { margin-left: 24px; }
   .campaign-carousel { height: 140px; margin-bottom: 18px; }
-  .campaign-slide { padding: 16px 48px; }
+  .campaign-slide { padding: 14px 28px 20px; }
   .campaign-copy h2 { font-size: 20px; }
   .campaign-rate > strong { font-size: 78px; }
   .campaign-personal, .campaign-enterprise { grid-template-columns: 135px minmax(0, 1fr); gap: 14px; }
@@ -1353,7 +1347,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 @media (max-width: 620px) {
   .tasks-page { margin: 0 12px; padding-top: 24px; }
   .campaign-carousel { height: 146px; margin-bottom: 16px; border-radius: 8px; }
-  .campaign-slide { padding: 14px 36px 22px; }
+  .campaign-slide { padding: 14px 18px 22px; }
   .campaign-slide::after { right: 10px; }
   .campaign-overview { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
   .campaign-copy h2 { font-size: 17px; line-height: 1.35; }
@@ -1367,15 +1361,13 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
   .campaign-plan-heading > span { font-size: 9px; }
   .campaign-plan-heading h2 { margin: 0; font-size: 16px; line-height: 1.2; }
   .campaign-packages { align-items: stretch; border-top: 1px solid #ffffff18; border-left: 0; }
-  .campaign-package { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; place-items: center; align-content: center; gap: 1px; padding: 7px 3px 8px; border-right: 1px solid #ffffff18; text-align: center; }
+  .campaign-package { place-items: center; gap: 1px; padding: 7px 3px 8px; text-align: center; }
   .campaign-package:last-child { border-right: 0; }
   .campaign-package > strong { grid-column: auto; font-size: 13px; line-height: 1.25; }
   .campaign-package > strong small { font-size: 9px; }
-  .campaign-package > span { font-size: 9px; line-height: 1.25; text-decoration: line-through; text-decoration-color: #ffffff66; }
-  .campaign-package > i { display: none; }
+  .campaign-package > span { font-size: 9px; line-height: 1.25; }
   .campaign-package > b { max-width: 100%; font-size: 12px; line-height: 1.25; }
   .campaign-package > b small { display: inline; margin-left: 2px; font-size: 8px; }
-  .campaign-arrow { width: 28px; height: 42px; }
   .campaign-dots { bottom: 8px; }
   .tasks-page .page-heading { min-height: 0; margin-bottom: 20px; }
   .tasks-page .page-heading h1 { font-size: 25px; }

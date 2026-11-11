@@ -24,9 +24,9 @@ for (const value of ["500", "555", "1,620", "1,802", "5,488", "6,008", "15,360",
   assert.ok(html.includes(value), `missing campaign value ${value}`);
 }
 assert.equal((html.match(/data-action="campaign-slide"/g) || []).length, 3);
-assert.match(html, /data-action="campaign-prev".*data-action="campaign-next"/s);
+assert.doesNotMatch(html, /data-action="campaign-prev"|data-action="campaign-next"|class="campaign-arrow"/);
 assert.doesNotMatch(html, /联系客服|1元\s*=\s*12\.8|多得积分|原套餐积分/);
-assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.campaign-package\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
-assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.campaign-package\s*>\s*span\s*\{[^}]*text-decoration:\s*line-through/);
-assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.campaign-package\s*>\s*i\s*\{[^}]*display:\s*none/);
+assert.match(styles, /\.campaign-package\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
+assert.match(styles, /\.campaign-package\s*>\s*span\s*\{[^}]*text-decoration:\s*line-through/);
+assert.match(source, /},\s*5000\);/);
 console.log("Campaign carousel checks passed");

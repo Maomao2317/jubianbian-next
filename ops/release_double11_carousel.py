@@ -15,8 +15,8 @@ import sys
 import release_quality_ledger as common
 
 
-BASELINE = "60cdcb651bd814e0eb8c036db1f99a84b4c995f1"
-BASE_BUILD = "ark-response-recovery-60cdcb6"
+BASELINE = "6281fea5abd4dac1588e8d10e1e1f3dd973deba1"
+BASE_BUILD = "double11-carousel-20261111-6281fea"
 REF = "codex/repair-batch-content"
 PROJECT = "jubianbian-staging"
 PORT = 18000

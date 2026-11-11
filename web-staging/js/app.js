@@ -200,7 +200,6 @@
     return `<div class="campaign-package">
       <strong><small>¥</small>${item.price.toLocaleString("en-US")}</strong>
       <span>${item.credits.toLocaleString("en-US")}</span>
-      <i aria-hidden="true">→</i>
       <b>${item.campaignCredits.toLocaleString("en-US")}<small>积分</small></b>
     </div>`;
   }
@@ -228,8 +227,6 @@
       <div class="campaign-viewport">
         <div class="campaign-track" style="transform:translateX(-${state.campaignSlide * 100}%)">${slides.map((slide, index) => slide.replace("<article ", `<article aria-hidden="${index === state.campaignSlide ? "false" : "true"}"${index === state.campaignSlide ? "" : " inert"} `)).join("")}</div>
       </div>
-      <button class="campaign-arrow campaign-prev" type="button" data-action="campaign-prev" aria-label="上一张活动" title="上一张活动">‹</button>
-      <button class="campaign-arrow campaign-next" type="button" data-action="campaign-next" aria-label="下一张活动" title="下一张活动">›</button>
       <div class="campaign-dots" role="group" aria-label="选择活动内容">${slides.map((_, index) => `<button type="button" data-action="campaign-slide" data-slide="${index}" aria-label="查看第 ${index + 1} 张活动" aria-current="${index === state.campaignSlide ? "true" : "false"}"></button>`).join("")}</div>
       <span class="sr-only campaign-announcement" aria-live="polite">第 ${state.campaignSlide + 1} 张，共 ${slides.length} 张</span>
     </section>`;
@@ -263,7 +260,7 @@
       if (document.hidden) return;
       state.campaignSlide = (state.campaignSlide + 1) % 3;
       updateCampaignCarousel();
-    }, 6500);
+    }, 5000);
   }
 
   function setCampaignSlide(index) {
@@ -1678,8 +1675,6 @@
     if (action === "request-code") { await requestCode(); return; }
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "points") { await openPointsModal(); return; }
-    if (action === "campaign-prev") { setCampaignSlide(state.campaignSlide - 1); return; }
-    if (action === "campaign-next") { setCampaignSlide(state.campaignSlide + 1); return; }
     if (action === "campaign-slide") { setCampaignSlide(actionElement.dataset.slide); return; }
     if (action === "task-page") { state.taskPage = Number(actionElement.dataset.page) || 0; renderList(); return; }
     if (action === "toggle-batch") { const batchId = actionElement.dataset.id; state.expandedBatches[batchId] = !state.expandedBatches[batchId]; renderList(); return; }
