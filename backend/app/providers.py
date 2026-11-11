@@ -6,6 +6,7 @@ import json
 import hashlib
 import math
 from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
 from copy import deepcopy
 from http.client import HTTPException
 import re
@@ -69,7 +70,7 @@ from .config import (
     OPENAI_TEXT_MODEL,
     OPENAI_TRANSCRIPTION_MODEL,
 )
-from .errors import ArkError, is_account_balance_error
+from .errors import ArkAcceptedResponseError, ArkError, is_account_balance_error
 from .content_coverage import slice_evidence
 from .evidence import evidence_summary
 from .logging_setup import logger, safe_error_text
@@ -97,6 +98,8 @@ _ark_model_cooldowns: dict[tuple[str, str], float] = {}
 _ark_key_semaphore_lock = threading.Lock()
 _ark_key_generation_semaphores: dict[str, threading.BoundedSemaphore] = {}
 _ark_request_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
+ark_task_id: ContextVar[str] = ContextVar("ark_task_id", default="-")
+_ARK_USAGE_COST_FIELDS = ("api_cost_rmb", "cost_rmb", "total_cost", "cost")
 _ark_generation_semaphore = threading.BoundedSemaphore(ARK_MAX_IN_FLIGHT)
 _ark_upload_semaphore = threading.BoundedSemaphore(ARK_UPLOAD_MAX_IN_FLIGHT)
 # Bound multipart allocation as well as network transfers; workers otherwise
@@ -237,6 +240,8 @@ def _ark_http_capacity(upload: bool, deadline: float | None):
                 yield
         return
     if not semaphore.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        if not upload:
+            raise _ark_recovery_timeout()
         raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
                        provider_code="video_upload_capacity_timeout")
     try:
@@ -265,6 +270,7 @@ def ark_http(
     upload_deadline: float | None = None,
     progress_callback: MediaProgress | None = None,
     upload_capacity_held: bool = False,
+    recovery_deadline: float | None = None,
 ) -> Any:
     api_key = api_key or ARK_API_KEY
     if not api_key:
@@ -278,27 +284,32 @@ def ark_http(
         },
         method=method,
     )
+    deadline = upload_deadline if upload else recovery_deadline
     try:
         try:
             provider_budget.wait_cooldown(
                 _ark_quota_scope(api_key),
-                timeout=max(0, upload_deadline - time.monotonic()) if upload_deadline else 300,
+                timeout=max(0, deadline - time.monotonic()) if deadline is not None else 300,
             )
         except TimeoutError as exc:
             if upload:
                 raise ArkError("识别上传通道繁忙，已在等待上限内停止；原视频和已完成的采集结果已保留。",
                                provider_code="video_upload_capacity_timeout") from exc
+            if recovery_deadline is not None:
+                raise _ark_recovery_timeout() from exc
             raise
         # Slow multipart transfers must not consume model-generation slots.
         if upload:
             _report_media_progress(progress_callback, "video_upload_wait", None)
-        with (ExitStack() if upload and upload_capacity_held else _ark_http_capacity(upload, upload_deadline)):
+        with (ExitStack() if upload and upload_capacity_held else _ark_http_capacity(upload, deadline)):
             if upload:
                 _report_media_progress(progress_callback, "video_upload", None)
             request_timeout = timeout or ARK_RESPONSE_TIMEOUT_SECONDS
-            if upload_deadline is not None:
-                remaining = upload_deadline - time.monotonic()
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if not upload:
+                        raise _ark_recovery_timeout()
                     raise ArkError("识别视频上传超过等待上限，请稍后重试；已完成的处理结果已保留。",
                                    provider_code="video_upload_capacity_timeout")
                 request_timeout = min(request_timeout, remaining)
@@ -328,7 +339,8 @@ def ark_http(
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise ArkError("方舟接口返回了无法解析的响应") from exc
+        raise ArkError("方舟接口返回了无法解析的响应",
+                       provider_code="transient_network" if recovery_deadline is not None else "") from exc
 
 
 def _ark_upload_chunks(data: bytes, deadline: float | None):
@@ -340,18 +352,31 @@ def _ark_upload_chunks(data: bytes, deadline: float | None):
         yield view[offset:offset + 64 * 1024]
 
 
+def _ark_recovery_timeout() -> ArkAcceptedResponseError:
+    return ArkAcceptedResponseError(
+        "方舟已接收识别请求，但未在等待上限内返回结果。原视频和已采集结果已保留，请稍后重试。",
+        provider_code="ark_response_recovery_timeout", unresolved=True,
+    )
+
+
 def _ark_poll_response(response_id: str, api_key: str) -> Any:
     """Recover a stored streamed response after the original socket closes."""
-    deadline = time.monotonic() + ARK_RESPONSE_POLL_TIMEOUT_SECONDS
+    started = time.monotonic()
+    deadline = started + ARK_RESPONSE_POLL_TIMEOUT_SECONDS
     encoded_id = quote(response_id, safe="")
-    while True:
+    attempts = 0
+    while time.monotonic() < deadline:
+        attempts += 1
         try:
             payload = ark_http(
                 "GET",
                 f"/responses/{encoded_id}",
                 api_key=api_key,
                 timeout=min(60.0, ARK_RESPONSE_TIMEOUT_SECONDS),
+                recovery_deadline=deadline,
             )
+        except ArkAcceptedResponseError:
+            raise
         except ArkError as exc:
             # Ark documents that querying an in-progress response returns an
             # error. Network hiccups, throttling and provider 5xx errors are
@@ -361,24 +386,34 @@ def _ark_poll_response(response_id: str, api_key: str) -> Any:
                 exc.provider_code == "transient_network"
                 or exc.status_code in {400, 404, 408, 409, 425, 429, 500, 502, 503, 504}
             )
-            if retryable and time.monotonic() < deadline:
+            if not retryable:
+                if is_account_balance_error(exc):
+                    raise
+                logger.warning("provider_step provider=ark operation=response_lookup_rejected task_id=%s response_id=%s status_code=%s",
+                               ark_task_id.get(), response_id, exc.status_code)
+                raise ArkAcceptedResponseError(
+                    "无法查询方舟已接收的识别请求。原视频和已采集结果已保留，请稍后重试。",
+                    provider_code="ark_response_lookup_failed", unresolved=True,
+                ) from exc
+            # A 404 alone does not distinguish 'still generating' from missing.
+            # Keep the existing recovery window, but do not log every lookup.
+            if attempts == 1 or attempts % 12 == 0:
                 logger.warning(
-                    "provider_step provider=ark operation=response_poll_retry response_id=%s status_code=%s error=%s",
-                    response_id,
-                    exc.status_code,
-                    safe_error_text(exc),
+                    "provider_step provider=ark operation=response_poll_retry task_id=%s response_id=%s attempts=%d status_code=%s",
+                    ark_task_id.get(), response_id, attempts, exc.status_code,
                 )
-                time.sleep(ARK_RESPONSE_POLL_SECONDS)
-                continue
-            raise
-        status = str(payload.get("status") or "").strip().lower() if isinstance(payload, dict) else ""
-        if status == "completed" or (not status and ark_response_text(payload)):
-            return payload
-        if status in {"failed", "incomplete", "cancelled", "canceled"}:
-            raise _ark_incomplete_error(payload)
-        if time.monotonic() >= deadline:
-            raise ArkError("方舟识别处理超时，已超过后台等待上限")
-        time.sleep(ARK_RESPONSE_POLL_SECONDS)
+        else:
+            status = str(payload.get("status") or "").strip().lower() if isinstance(payload, dict) else ""
+            if status == "completed" or (not status and ark_response_text(payload)):
+                logger.info("provider_step provider=ark operation=response_recovered task_id=%s response_id=%s attempts=%d recovery_ms=%.1f",
+                            ark_task_id.get(), response_id, attempts, (time.monotonic() - started) * 1000)
+                return payload
+            if status in {"failed", "incomplete", "cancelled", "canceled"}:
+                raise _ark_incomplete_error(payload)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(ARK_RESPONSE_POLL_SECONDS, remaining))
+    raise _ark_recovery_timeout()
 
 
 def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
@@ -387,8 +422,34 @@ def _ark_incomplete_error(payload: dict[str, Any]) -> ArkError:
     if str(reason).strip().lower() in {"max_output_tokens", "max_tokens", "length"}:
         error = ArkError("方舟识别输出达到长度上限", provider_code="output_limit")
     else:
-        error = ArkError(f"方舟识别未完成：{detail}")
-    error.usage_payload = {"usage": payload.get("usage", {})}
+        # Retry only an explicit terminal service failure with zero reported
+        # usage. Missing usage is unknown, not free.
+        usage = payload.get("usage")
+        code = str(detail.get("code") or "").casefold() if isinstance(detail, dict) else ""
+        safe_to_retry = (
+            str(payload.get("status") or "").strip().casefold() == "failed"
+            and code in {"internalservererror", "serviceunavailable"}
+            and isinstance(usage, dict)
+            and type(usage.get("total_tokens")) is int
+            and usage["total_tokens"] == 0
+            and all(
+                type(source[key]) in (int, float) and source[key] == 0
+                for source, fields in (
+                    (usage, (*_ARK_USAGE_COST_FIELDS, "billed_amount",
+                             "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens")),
+                    (payload, (*_ARK_USAGE_COST_FIELDS, "billed_amount")),
+                )
+                for key in fields if key in source
+            )
+        )
+        error = ArkAcceptedResponseError(
+            "方舟报告识别请求失败，原视频和已采集结果已保留。",
+            provider_code="ark_response_failed_retryable" if safe_to_retry else "ark_response_failed",
+        )
+    error.usage_payload = {
+        "usage": payload.get("usage", {}),
+        **{key: payload[key] for key in _ARK_USAGE_COST_FIELDS if key in payload},
+    }
     return error
 
 
@@ -405,8 +466,8 @@ def ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
             tokens=ARK_INPUT_TOKEN_RESERVE + int(payload.get("max_output_tokens") or ARK_MAX_OUTPUT_TOKENS),
             lifetime=ARK_RESPONSE_TIMEOUT_SECONDS + ARK_RESPONSE_POLL_TIMEOUT_SECONDS + 120,
         )
-        logger.info("provider_step provider=ark operation=generation_admission model=%s queue_ms=%.1f quota_wait_ms=%.1f",
-                    payload.get("model"), queue_ms, (time.perf_counter() - started) * 1000)
+        logger.info("provider_step provider=ark operation=generation_admission task_id=%s model=%s queue_ms=%.1f quota_wait_ms=%.1f",
+                    ark_task_id.get(), payload.get("model"), queue_ms, (time.perf_counter() - started) * 1000)
         usage = None
         try:
             result = _ark_stream_response(payload, api_key)
@@ -426,6 +487,8 @@ def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
         method="POST",
     )
     response_id = ""
+    started = time.monotonic()
+    disconnect = "eof"
     try:
         with _ark_request_semaphore:
             with urlopen(request, timeout=min(ARK_RESPONSE_TIMEOUT_SECONDS, ARK_STREAM_IDLE_TIMEOUT_SECONDS)) as response:
@@ -448,7 +511,8 @@ def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
                     status = str(response_payload.get("status") or "").lower()
                     if event_type == "response.completed" or status == "completed":
                         return response_payload
-                    if event_type in {"response.failed", "response.incomplete"} or status in {"failed", "incomplete"}:
+                    if (event_type in {"response.failed", "response.incomplete", "response.cancelled", "response.canceled"}
+                            or status in {"failed", "incomplete", "cancelled", "canceled"}):
                         raise _ark_incomplete_error(response_payload)
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
@@ -458,14 +522,17 @@ def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
                 f"方舟接口网络错误：{getattr(exc, 'reason', exc)}",
                 provider_code="transient_network",
             ) from exc
-        logger.warning(
-            "provider_step provider=ark operation=response_stream_recover response_id=%s error=%s",
-            response_id,
-            safe_error_text(exc),
-        )
+        disconnect = type(exc).__name__
     if not response_id:
         raise ArkError("方舟流式响应结束但没有返回 response_id")
-    return _ark_poll_response(response_id, api_key)
+    logger.warning("provider_step provider=ark operation=response_stream_recover task_id=%s response_id=%s stream_ms=%.1f reason=%s",
+                   ark_task_id.get(), response_id, (time.monotonic() - started) * 1000, disconnect)
+    try:
+        return _ark_poll_response(response_id, api_key)
+    except ArkError as exc:
+        logger.warning("provider_step provider=ark operation=response_recovery_failed task_id=%s response_id=%s total_ms=%.1f code=%s",
+                       ark_task_id.get(), response_id, (time.monotonic() - started) * 1000, exc.provider_code)
+        raise
 
 
 def _bitrate_bps(value: str) -> int:
@@ -1211,7 +1278,7 @@ def ark_usage(payload: Any, model: str = "") -> dict[str, Any]:
     cost: float | None = None
     cost_source = "provider"
     for source in (usage, payload if isinstance(payload, dict) else {}):
-        for key in ("api_cost_rmb", "cost_rmb", "total_cost", "cost"):
+        for key in _ARK_USAGE_COST_FIELDS:
             value = source.get(key)
             if isinstance(value, (int, float)):
                 cost = float(value)
@@ -1244,6 +1311,8 @@ def ark_usage(payload: Any, model: str = "") -> dict[str, Any]:
 
 
 def _is_ark_model_unavailable(error: ArkError) -> bool:
+    if isinstance(error, ArkAcceptedResponseError):
+        return False
     text = f"{error.provider_code} {error}".casefold()
     return error.status_code in {400, 404} and any(
         marker in text
@@ -1270,7 +1339,7 @@ def _ark_failed_usage(error: ArkError, model: str, api_key: str) -> dict[str, An
 
 def _is_video_url_error(error: ArkError) -> bool:
     """Fall back only when the provider cannot ingest the URL, not the model."""
-    if is_account_balance_error(error):
+    if isinstance(error, ArkAcceptedResponseError) or is_account_balance_error(error):
         return False
     message = f"{error.provider_code} {error}".casefold()
     return error.status_code in {400, 403, 404, 422} and any(
@@ -1787,6 +1856,7 @@ def ark_recognize(
         response_payload["thinking"] = {"type": ARK_THINKING_TYPE}
     payload: Any = None
     response_usages: list[dict[str, Any]] = []
+    retried_terminal = False
     for attempt in range(1, ARK_RESPONSE_CREATE_ATTEMPTS + 1):
         attempt_usage_recorded = False
         try:
@@ -1862,6 +1932,12 @@ def ark_recognize(
             else:
                 response_usages.append(_ark_failed_usage(exc, selected_model, api_key))
             exc.usage = _ark_call_usage(response_usages, selected_model, audit_kind, duration_sec, fps)
+            if (exc.provider_code == "ark_response_failed_retryable" and not retried_terminal
+                    and attempt < ARK_RESPONSE_CREATE_ATTEMPTS):
+                retried_terminal = True
+                logger.warning("provider_step provider=ark operation=retry_terminal_response task_id=%s attempt=%d",
+                               ark_task_id.get(), attempt)
+                continue
             if (patch_review and exc.provider_code == "output_limit"
                     and response_payload["max_output_tokens"] < ARK_MAX_OUTPUT_TOKENS
                     and attempt < ARK_RESPONSE_CREATE_ATTEMPTS):

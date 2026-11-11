@@ -39,10 +39,10 @@ from .config import (
 from .auth_store import db, now_iso
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
 from .content_coverage import content_gaps, merge_gap_repair, repair_windows
-from .errors import ArkError, is_account_balance_error
+from .errors import ArkAcceptedResponseError, ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
-from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, ark_review_target_text, openai_script, openai_transcribe
+from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, ark_review_target_text, ark_task_id, openai_script, openai_transcribe
 from .glm_provider import glm_prepare_video, glm_recognize, glm_recognize_range
 from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
 from .rechecks import has_pending_recheck, restore_recheck_snapshot
@@ -650,6 +650,8 @@ def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _is_lite_model_unavailable(error: ArkError) -> bool:
+    if isinstance(error, ArkAcceptedResponseError):
+        return False
     text = f"{error} {error.provider_code}".casefold()
     return error.status_code in {400, 404} and any(
         marker in text
@@ -658,6 +660,8 @@ def _is_lite_model_unavailable(error: ArkError) -> bool:
 
 
 def _is_non_retryable_provider_error(error: BaseException) -> bool:
+    if isinstance(error, ArkAcceptedResponseError):
+        return True
     if getattr(error, "provider_code", "") in {
         "empty_screenplay", "glm_configuration", "provider_configuration", "glm_api_error",
         "content_repair_incomplete", "quality_budget_guard", "quality_upgrade_exhausted",
@@ -940,7 +944,9 @@ async def _run_recognizer_with_media(
                     ark_error.status_code if ark_error else None,
                     safe_error_text(ark_error) if ark_error else "unknown",
                 )
-                if is_glm or getattr(ark_error, "provider_code", "") == "empty_screenplay" or not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY:
+                if (is_glm or getattr(ark_error, "provider_code", "") == "empty_screenplay"
+                        or (isinstance(ark_error, ArkAcceptedResponseError) and ark_error.unresolved)
+                        or not ARK_FALLBACK_ON_ERROR or not OPENAI_API_KEY):
                     raise ark_error or exc
         if ark_script is not None and ark_usage_data is not None:
             script = normalize_script(ark_script, row["title"])
@@ -1498,7 +1504,11 @@ async def process_task(task_id: str) -> None:
     logger.info("task_start task_id=%s title=%s file=%s", task_id, row["title"], row["file_name"])
     try:
         mark_task_stage(task_id, status="running", stage="probing", progress_percent=12, message="正在读取视频信息")
-        script, quality, usage, evidence = await run_recognizer(task_row(task_id))
+        token = ark_task_id.set(task_id)
+        try:
+            script, quality, usage, evidence = await run_recognizer(task_row(task_id))
+        finally:
+            ark_task_id.reset(token)
         if not has_screenplay_body(script):
             # Stop before persistence. Failed rechecks use the existing snapshot
             # restore path; initial failures refund once without paid retries.

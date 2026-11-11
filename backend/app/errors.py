@@ -14,6 +14,14 @@ class ArkError(RuntimeError):
         self.provider_code = provider_code
 
 
+class ArkAcceptedResponseError(ArkError):
+    """A failure after Ark accepted the generation, not a create rejection."""
+
+    def __init__(self, message: str, *, provider_code: str, unresolved: bool = False) -> None:
+        super().__init__(message, provider_code=provider_code)
+        self.unresolved = unresolved
+
+
 def is_account_balance_error(error: BaseException) -> bool:
     """Identify explicit billing failures without treating every 403 as one."""
     code = re.sub(r"[^a-z0-9]", "", str(getattr(error, "provider_code", "")).casefold())
