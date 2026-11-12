@@ -76,7 +76,7 @@ from .rechecks import (
     pending_recheck_snapshot,
     restore_recheck_snapshot,
 )
-from .script import has_screenplay_body, script_to_markdown
+from .script import has_screenplay_body, quality_gate, script_to_markdown
 from .user_view import user_events, user_task
 from .storage import (
     delete_media,
@@ -1026,7 +1026,10 @@ def _approve_user_tasks(user_id: str, task_ids: list[str]) -> dict[str, Any]:
                 continue
             if row["status"] != "review":
                 raise HTTPException(status_code=409, detail="只有待复核的剧本可以确认，请刷新任务状态")
-            quality.update(deliveryStatus="approved", approvedAt=approved_at,
+            # Download acceptance does not clear unresolved automatic findings.
+            automatic_passed = quality_gate(quality)[0]
+            quality.update(automaticQualityStatus="passed" if automatic_passed else "review_required",
+                           deliveryStatus="approved", approvedAt=approved_at,
                            approvedBy=user_id, approvalRole="user")
             if isinstance(quality.get("recheck"), dict):
                 quality["recheck"]["adminApprovalRequired"] = False

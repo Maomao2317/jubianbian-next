@@ -65,6 +65,7 @@ class UserReviewTests(unittest.TestCase):
         quality = json.loads(row["quality_json"])
         self.assertEqual(quality["issues"], [self.issue])
         self.assertEqual((quality["approvedBy"], quality["approvalRole"]), ("owner", "user"))
+        self.assertEqual(quality["automaticQualityStatus"], "review_required")
         self.assertFalse(quality["recheck"]["adminApprovalRequired"])
         for fmt in ("md", "txt"):
             self.assertIn("我们出发吧", routes.download_task(None, "one", fmt).body.decode())

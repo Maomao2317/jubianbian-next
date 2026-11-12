@@ -1327,8 +1327,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                            {"type": "dialogue", "speaker": "未知说话人", "text": "你好", "uncertain": True}],
             }],
         }
-        # A complex clip starts on Turbo. It never receives another Turbo call
-        # when a real P0 remains; the quality gate fails closed instead.
+        # A complex clip starts on Turbo and gets one bounded content review.
+        # Remaining P0 findings still fail the gate; reviews do not recurse.
         row = {"id": "task-2", "stored_path": str(Path(__file__).resolve()), "title": "测试", "duration_sec": 210}
         with (
             patch.object(processing, "recognition_cache", return_value=None),
@@ -1349,7 +1349,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             ) as recognize,
         ):
             _script, quality, _usage, _ = asyncio.run(processing.run_recognizer(row))
-        self.assertEqual(recognize.call_count, 1)
+        self.assertEqual(recognize.call_count, 2)
+        self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
         self.assertFalse(quality_gate(quality)[0])
         self.assertTrue(quality["automatedReview"]["unresolvedIssues"])
 

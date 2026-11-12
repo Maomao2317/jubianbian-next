@@ -86,9 +86,9 @@ const click = async (action, id) => {
   assert.match(ui.batchRow({ ...group, tasks: [{ ...task, status: "done" }] }), /data-action="download-batch"/);
   ui.state.tasks = group.tasks;
   await click("review-batch", "batch");
-  assert.match(node("#modalRoot").innerHTML, /确认通过并开放下载（2集）/, node("#toast").textContent);
-  assert.match(node("#modalRoot").innerHTML, /系统已完成自动质检和必要的修复/);
-  assert.match(node("#modalRoot").innerHTML, /无需管理员审批/);
+  assert.match(node("#modalRoot").innerHTML, /接受当前版本并开放下载（2集）/, node("#toast").textContent);
+  assert.match(node("#modalRoot").innerHTML, /不代表问题已修复/);
+  assert.match(node("#modalRoot").innerHTML, /可能存在漏台词或内容不完整/);
   assert.deepEqual(calls, []); // Opening the preview never approves anything.
   await click("confirm-user-review");
   assert.deepEqual(calls[0], ["batch", "one", "two"]);

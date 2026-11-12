@@ -20,6 +20,7 @@ from .config import (
     ARK_FALLBACK_ON_ERROR,
     ARK_LITE_MODEL,
     ARK_MIN_GROSS_MARGIN_RATIO,
+    ARK_QUALITY_MIN_GROSS_MARGIN_RATIO,
     ARK_REVENUE_REALIZATION_RATIO,
     ARK_INFRA_RESERVE_RATIO,
     ARK_QUALITY_BUDGET_OVERRUN_RATIO,
@@ -189,6 +190,7 @@ def _evaluate_quality(
     quality["subtitlePrioritySegments"] = subtitle_overrides
     approved, blocking = quality_gate(quality)
     quality["deliveryStatus"] = "approved" if approved else "review_required"
+    quality["automaticQualityStatus"] = "passed" if approved else "review_required"
     quality["blockingIssues"] = blocking
     quality["evidenceStatus"] = evidence.get("status")
     quality["evidenceSources"] = {
@@ -244,7 +246,7 @@ def _quality_call_budget(
     usage: dict[str, Any],
     model: str,
 ) -> dict[str, Any]:
-    """Admit corrective calls within the margin budget plus at most 3%.
+    """Admit bounded corrective calls without crossing estimated break-even.
 
     The previous call's token counts are repriced for the requested model. A
     duration floor covers short prompts and provider accounting gaps, then a
@@ -276,9 +278,10 @@ def _quality_call_budget(
     per_minute_floor = 0.18 if turbo else 0.06
     conservative_floor = per_minute_floor * max(0.5, scope / 60.0)
     estimated_call = max(token_estimate, conservative_floor) * ARK_TURBO_COST_SAFETY_FACTOR
-    base_ceiling = max(0.0, revenue * (1.0 - ARK_MIN_GROSS_MARGIN_RATIO) - infra_reserve)
+    break_even_ceiling = max(0.0, revenue - infra_reserve)
+    base_ceiling = max(0.0, revenue * (1.0 - ARK_QUALITY_MIN_GROSS_MARGIN_RATIO) - infra_reserve)
     overrun_ratio = max(0.0, min(0.03, ARK_QUALITY_BUDGET_OVERRUN_RATIO))
-    cost_ceiling = base_ceiling * (1.0 + overrun_ratio)
+    cost_ceiling = min(break_even_ceiling, base_ceiling * (1.0 + overrun_ratio))
     projected_cost = current_cost + estimated_call
     allowed = projected_cost <= cost_ceiling
     return {
@@ -294,8 +297,10 @@ def _quality_call_budget(
         "projectedCostRmb": round(projected_cost, 6),
         "costCeilingRmb": round(cost_ceiling, 6),
         "baseCostCeilingRmb": round(base_ceiling, 6),
+        "breakEvenCostCeilingRmb": round(break_even_ceiling, 6),
         "budgetOverrunRatio": overrun_ratio,
-        "minimumGrossMargin": ARK_MIN_GROSS_MARGIN_RATIO,
+        "minimumGrossMargin": ARK_QUALITY_MIN_GROSS_MARGIN_RATIO,
+        "normalMinimumGrossMargin": ARK_MIN_GROSS_MARGIN_RATIO,
         "scopeSeconds": round(scope, 3),
         "reason": "within_margin" if allowed else "minimum_margin_would_be_breached",
     }
@@ -1121,6 +1126,7 @@ async def _run_recognizer_with_media(
                 and (
                     is_glm
                     or not turbo_upgrade_used
+                    or _is_turbo_model(initial_model)
                     or review_model == route["model"]
                     and not _is_turbo_model(review_model)
                     and not post_turbo_lite_used
@@ -1519,6 +1525,7 @@ async def process_task(task_id: str) -> None:
         # Keep P0 findings visible and send unresolved candidates for owner review.
         approved, blocking = quality_gate(quality)
         quality["deliveryStatus"] = "approved" if approved else "review_required"
+        quality["automaticQualityStatus"] = "passed" if approved else "review_required"
         quality["blockingIssues"] = blocking
         completed_recheck = has_pending_recheck(task_id)
         if completed_recheck:

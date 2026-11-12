@@ -196,6 +196,18 @@ class RecognitionRegressions(unittest.TestCase):
         title = episode([], [{"type": "screen_text", "screenType": "title_card", "text": "老虎", "startSec": 1, "endSec": 2}])
         self.assertNotIn("字幕对白遗漏", [issue["tag"] for issue in script_quality(title, "test")["issues"]])
 
+    def test_full_caption_with_speech_cue_requires_review_when_asr_is_missing(self):
+        script = episode(["甲"], [
+            {"type": "action", "text": "甲开口说道", "startSec": 10, "endSec": 12},
+            {"type": "screen_text", "screenType": "subtitle", "text": "你到底想干什么", "startSec": 10.2, "endSec": 11.8},
+        ])
+        issues = script_quality(script, "test")["issues"]
+        issue = next(issue for issue in issues if issue["tag"] == "字幕对白遗漏")
+        self.assertEqual(issue["severity"], "P0")
+        self.assertEqual((issue["startSec"], issue["endSec"]), (10.2, 11.8))
+        self.assertTrue(processing._needs_automated_content_review({"issues": issues}))
+        self.assertEqual(script["scenes"][0]["blocks"][1]["type"], "screen_text")
+
     def test_short_ocr_repeated_later_is_checked_at_its_own_time(self):
         script = episode([], [{"type": "screen_text", "text": "呵", "startSec": 0.3, "endSec": 0.6}])
         captured = {"sources": [{"kind": "ocr", "status": "available", "items": [

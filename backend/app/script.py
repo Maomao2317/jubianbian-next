@@ -517,12 +517,6 @@ def restore_spoken_subtitles(script: dict[str, Any], evidence: dict[str, Any] | 
                                and span(line)[0] <= window[1] + .35 and span(line)[1] >= window[0] - .35
                                and text in evidence_comparison_text(line.get("text")) for ep, line in spoken):
                 continue
-            if window and window[1] > window[0] and any(
-                ep == episode(scene) and span(line)
-                and min(window[1], span(line)[1]) - max(window[0], span(line)[0]) >= .65 * (window[1] - window[0])
-                for ep, line in spoken
-            ):
-                continue
             source = str(block.get("voiceSource") or "").lower()
             kind = _VO_KIND_ALIASES.get(str(block.get("voKind") or "").lower()) or _VO_KIND_ALIASES.get(source)
             mouth_value = block.get("mouthMoving", block.get("lipSync"))
@@ -608,18 +602,8 @@ def suppress_redundant_subtitles(script: dict[str, Any]) -> None:
                           and span(block)[0] <= window[1] + 0.35]
             candidates.sort(key=lambda block: span(block))
             joined = "".join(spoken_text(block) for block in candidates)
-            # Matching wording handles brief caption lag. For shortened or
-            # differently worded captions, require substantial time coverage,
-            # not a single coincident edge from an unrelated sentence.
-            intervals = sorted((max(window[0], span(block)[0]), min(window[1], span(block)[1]))
-                               for block in candidates if span(block)[1] > window[0]
-                               and span(block)[0] < window[1])
-            covered, end = 0.0, window[0]
-            for left, right in intervals:
-                covered += max(0.0, right - max(left, end))
-                end = max(end, right)
-            duration = window[1] - window[0]
-            if (joined and text in joined) or (duration > 0 and covered / duration >= 0.65):
+            # Time overlap alone cannot prove that the words were preserved.
+            if joined and text in joined:
                 subtitle["suppressInOutput"] = True
 
 
@@ -3987,8 +3971,12 @@ def script_quality(
                 for item in blocks[:block_index - 1]
             )
             if audio_support or speech_support:
-                issue = add_issue("字幕对白遗漏", "P1", f"第 {scene_index} 场第 {block_index} 条字幕有声音或开口动作佐证，但缺少对应对白；需回看确认角色和原话。", scene_index, block_index)
+                # Partial ASR must not turn a full spoken caption into a silent
+                # advisory. Review the video; do not infer speech from OCR alone.
+                blocking = audio_support or speech_support and len(subtitle) >= 4
+                issue = add_issue("字幕对白遗漏", "P0" if blocking else "P1", f"第 {scene_index} 场第 {block_index} 条字幕有声音或开口动作佐证，但缺少对应对白；需回看确认角色和原话。", scene_index, block_index)
                 issue["audioSupported"] = audio_support
+                issue.update(startSec=start, endSec=end)
 
     coverage = round(100 * sum(punctuation_ok) / len(punctuation_ok)) if punctuation_ok else 0
     confidence = round(100 * (1 - uncertain / len(dialogue))) if dialogue else 0

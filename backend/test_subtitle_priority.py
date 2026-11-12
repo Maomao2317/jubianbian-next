@@ -8,7 +8,7 @@ from app.script import (normalize_script, restore_evidence_boundary_segments,
 
 
 class SubtitlePriorityTests(unittest.TestCase):
-    def test_clear_audio_is_authoritative_and_hides_corresponding_subtitle(self):
+    def test_clear_audio_is_authoritative_without_discarding_different_caption(self):
         script, evidence = self.fixture()
         dialogue = script["scenes"][0]["blocks"][0]
         subtitle = script["scenes"][0]["blocks"][1]
@@ -23,10 +23,10 @@ class SubtitlePriorityTests(unittest.TestCase):
         self.assertIn(audio_text, dialogue["text"])
         self.assertNotEqual(dialogue["text"], subtitle_text)
         self.assertEqual(dialogue.get("textSource"), "audio")
-        self.assertTrue(subtitle.get("suppressInOutput"))
+        self.assertFalse(subtitle.get("suppressInOutput"))
         exported = script_to_markdown({"title": "test", "result": script})
         self.assertIn(audio_text, exported)
-        self.assertNotIn(subtitle_text, exported)
+        self.assertIn(subtitle_text, exported)
 
     def fixture(self, audio="这个人是畜生", subtitle="这个人是坏人", dialogue=None, **fields):
         # Default fixtures exercise unclear ASR; clear-speech cases remove this
@@ -74,7 +74,7 @@ class SubtitlePriorityTests(unittest.TestCase):
                 self.assertEqual(context["draft"]["scenes"][0]["blocks"][0]["speechClarity"], clarity)
                 self.evaluate(script, evidence)
                 self.assertEqual(block["text"], expected)
-                self.assertTrue(script["scenes"][0]["blocks"][1].get("suppressInOutput"))
+                self.assertEqual(bool(script["scenes"][0]["blocks"][1].get("suppressInOutput")), unclear)
 
     def test_user_example_changes_words_and_keeps_speaker_emotion_and_evidence(self):
         script, evidence = self.fixture()

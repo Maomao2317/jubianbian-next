@@ -269,6 +269,23 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
         ranges.assert_not_called()
         self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
 
+    async def test_turbo_draft_can_receive_one_budgeted_content_review(self):
+        original = script(action(0, 120))
+        with (patch.object(processing, "mark_task_stage"),
+              patch.object(processing, "ARK_API_KEYS", ("test",)),
+              patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
+              patch.object(processing, "_quality_call_budget", return_value={"allowed": True}),
+              patch.object(processing, "_needs_automated_content_review", return_value=True),
+              patch.object(processing, "ark_recognize", return_value=(original, {})) as whole,
+              patch.object(processing, "ark_recognize_range") as ranges):
+            _, quality, _, _ = await processing._run_recognizer_with_media(
+                {"id": "task", "title": "第11集"}, Path("unused"), 120, {"durationSec": 120},
+                {"model": "turbo", "mode": "complexity", "band": "complex", "score": 0, "reasons": []}, {}, None)
+        self.assertEqual(whole.call_count, 2)
+        self.assertIsNotNone(whole.call_args.kwargs["review_context"])
+        ranges.assert_not_called()
+        self.assertEqual(quality["automatedReview"]["attemptCount"], 2)
+
     async def test_shared_stop_prevents_new_calls(self):
         stop = asyncio.Event()
         stop.set()
@@ -344,6 +361,7 @@ class RepairFlowTests(unittest.IsolatedAsyncioTestCase):
 
         with (patch.object(processing, "mark_task_stage"),
               patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .20),
+              patch.object(processing, "ARK_QUALITY_MIN_GROSS_MARGIN_RATIO", .20),
               patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", 1),
               patch.object(processing, "ARK_INFRA_RESERVE_RATIO", 0),
               patch.object(processing, "ARK_API_KEYS", ("test",)),

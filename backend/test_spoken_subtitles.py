@@ -68,13 +68,23 @@ class SpokenSubtitleTests(unittest.TestCase):
         raw["scenes"].append({**deepcopy(raw["scenes"][0]), "heading": "2-1 日 外 台阶"})
         self.assertTrue(all(s["blocks"][0]["type"] == "screen_text" for s in normalize_script(raw, "测试", evidence)["scenes"]))
 
-    def test_clear_different_spoken_words_are_not_duplicated_from_captions(self):
+    def test_asr_supported_words_survive_unrelated_overlapping_dialogue(self):
         raw, evidence = self.fixture()
         raw["scenes"][0]["blocks"].insert(0, {"type": "dialogue", "speaker": "周青", "text": "把钱还我",
                                                         "startSec": 10, "endSec": 11})
         script = normalize_script(raw, "测试", evidence)
-        self.assertEqual(sum(b["type"] in {"vo", "dialogue"} for b in script["scenes"][0]["blocks"]), 1)
-        self.assertTrue(script["scenes"][0]["blocks"][1].get("suppressInOutput"))
+        self.assertEqual(sum(b["type"] in {"vo", "dialogue"} for b in script["scenes"][0]["blocks"]), 2)
+        self.assertFalse(script["scenes"][0]["blocks"][1].get("suppressInOutput"))
+        self.assertIn("请还钱", script_to_markdown({"title": "测试", "result": script}))
+
+    def test_different_caption_without_audio_is_not_hidden_or_guessed_as_speech(self):
+        raw, _ = self.fixture()
+        raw["scenes"][0]["blocks"].insert(0, {"type": "dialogue", "speaker": "周青", "text": "把钱还我",
+                                                        "startSec": 10, "endSec": 11})
+        script = normalize_script(raw, "测试")
+        caption = script["scenes"][0]["blocks"][1]
+        self.assertEqual(caption["type"], "screen_text")
+        self.assertFalse(caption.get("suppressInOutput"))
 
     def test_generation_quality_historical_api_and_standalone_export_share_repair(self):
         raw, evidence = self.fixture()

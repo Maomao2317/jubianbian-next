@@ -58,6 +58,7 @@ class SpeakerSafetyTests(unittest.TestCase):
 class MarginTests(unittest.TestCase):
     def test_cash_discount_and_infrastructure_are_reserved_before_review(self):
         with (patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .65),
+              patch.object(processing, "ARK_QUALITY_MIN_GROSS_MARGIN_RATIO", .65),
               patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", .8),
               patch.object(processing, "ARK_INFRA_RESERVE_RATIO", .05)):
             budget = processing._quality_call_budget({"credits_used": 10}, 600, 10, {"api_cost_rmb": .1}, "lite")
@@ -70,6 +71,7 @@ class MarginTests(unittest.TestCase):
 
     def test_three_percent_is_a_hard_limit_on_budget_allowance(self):
         with (patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .65),
+              patch.object(processing, "ARK_QUALITY_MIN_GROSS_MARGIN_RATIO", .65),
               patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", .8),
               patch.object(processing, "ARK_INFRA_RESERVE_RATIO", .05),
               patch.object(processing, "ARK_QUALITY_BUDGET_OVERRUN_RATIO", .50)):
@@ -79,6 +81,19 @@ class MarginTests(unittest.TestCase):
         self.assertEqual(inside["budgetOverrunRatio"], .03)
         self.assertTrue(inside["allowed"])
         self.assertFalse(outside["allowed"])
+
+    def test_quality_budget_can_spend_past_normal_margin_but_not_break_even(self):
+        with (patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .65),
+              patch.object(processing, "ARK_QUALITY_MIN_GROSS_MARGIN_RATIO", 0),
+              patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", .8),
+              patch.object(processing, "ARK_INFRA_RESERVE_RATIO", .05),
+              patch.object(processing, "ARK_QUALITY_BUDGET_OVERRUN_RATIO", .03)):
+            inside = processing._quality_call_budget({"credits_used": 10}, 600, 10, {"api_cost_rmb": 2.92}, "lite")
+            outside = processing._quality_call_budget({"credits_used": 10}, 600, 10, {"api_cost_rmb": 2.94}, "lite")
+        self.assertTrue(inside["allowed"])
+        self.assertFalse(outside["allowed"])
+        self.assertEqual(inside["costCeilingRmb"], 2.96875)
+        self.assertEqual(inside["costCeilingRmb"], inside["breakEvenCostCeilingRmb"])
 
 
 class MarginDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -90,6 +105,7 @@ class MarginDeliveryTests(unittest.IsolatedAsyncioTestCase):
               patch.object(processing, "ARK_LITE_MODEL", "lite"),
               patch.object(processing, "ARK_TURBO_MODEL", "turbo"),
               patch.object(processing, "ARK_MIN_GROSS_MARGIN_RATIO", .65),
+              patch.object(processing, "ARK_QUALITY_MIN_GROSS_MARGIN_RATIO", .65),
               patch.object(processing, "ARK_REVENUE_REALIZATION_RATIO", .8),
               patch.object(processing, "ARK_INFRA_RESERVE_RATIO", .05),
               patch.object(processing, "ark_recognize", return_value=(draft, {"api_cost_rmb": .1})) as whole,

@@ -115,11 +115,10 @@ ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-1-turbo-260628").strip()
 ARK_LITE_MODEL = os.getenv("ARK_LITE_MODEL", "doubao-seed-2-1-lite-260915").strip()
 ARK_TURBO_MODEL = os.getenv("ARK_TURBO_MODEL", ARK_MODEL).strip()
 ARK_ROUTING_MODE = os.getenv("ARK_ROUTING_MODE", "lite_first").strip().lower() or "lite_first"
-# Normal traffic starts on Lite and may spend at most one Turbo call only when
-# a source-fidelity blocker remains.  The upgrade estimate keeps a real margin
-# after the already-spent Lite call; uncertain estimates are padded before a
-# paid request is admitted.
+# Reporting retains the normal margin target. Corrective calls have a separate
+# quality-first margin, still reserving discounted revenue and infrastructure.
 ARK_MIN_GROSS_MARGIN_RATIO = max(0.0, min(0.9, float(os.getenv("JBB_ARK_MIN_GROSS_MARGIN_RATIO", "0.65"))))
+ARK_QUALITY_MIN_GROSS_MARGIN_RATIO = max(0.0, min(0.9, float(os.getenv("JBB_ARK_QUALITY_MIN_GROSS_MARGIN_RATIO", "0"))))
 ARK_REVENUE_REALIZATION_RATIO = max(0.01, min(1.0, float(os.getenv("JBB_ARK_REVENUE_REALIZATION_RATIO", "0.80"))))
 ARK_INFRA_RESERVE_RATIO = max(0.0, min(0.5, float(os.getenv("JBB_ARK_INFRA_RESERVE_RATIO", "0.05"))))
 ARK_QUALITY_BUDGET_OVERRUN_RATIO = max(0.0, min(0.03, float(os.getenv("JBB_ARK_QUALITY_BUDGET_OVERRUN_RATIO", "0.03"))))
