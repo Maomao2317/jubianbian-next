@@ -40,6 +40,7 @@ from .config import (
 from .auth_store import db, now_iso
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
 from .content_coverage import content_gaps, merge_gap_repair, repair_windows
+from .dialogue_recovery import dialogue_evidence_issues, recover_audio_blind_spots, recovery_windows
 from .errors import ArkAcceptedResponseError, ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
 from .media import probe_duration
@@ -186,6 +187,16 @@ def _evaluate_quality(
         "shortSegments": short_recovered["segments"],
     }
     quality = script_quality(script, provider, evidence)
+    extra_issues = dialogue_evidence_issues(script, evidence)
+    if extra_issues:
+        quality["issues"].extend(extra_issues)
+        quality["blockingIssues"].extend(issue for issue in extra_issues if issue["severity"] == "P0")
+        for level in ("P0", "P1"):
+            quality["severityCounts"][level] += sum(issue["severity"] == level for issue in extra_issues)
+        quality["warnings"] += len(extra_issues)
+        quality["issueTags"] = list(dict.fromkeys(quality["issueTags"] + [issue["tag"] for issue in extra_issues]))
+    if evidence.get("dialogueRecovery"):
+        quality["dialogueRecovery"] = evidence["dialogueRecovery"]
     quality["shortDialogueRecovery"] = recovered
     quality["subtitlePrioritySegments"] = subtitle_overrides
     approved, blocking = quality_gate(quality)
@@ -520,6 +531,26 @@ def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any])
     return None
 
 
+def _review_acceptance_reason(initial, reviewed, script, candidate):
+    regression = _review_regression_reason(initial, reviewed)
+    if regression or quality_gate(reviewed)[0]:
+        return regression
+    if script == candidate:
+        return "no_effective_change"
+    before, after = quality_gate(initial)[1], quality_gate(reviewed)[1]
+    # Index shifts, rewritten descriptions and prettier actions are not a fix.
+    improved = len(after) < len(before)
+    improved = improved or any(type(initial.get(key)) in {int, float} and type(reviewed.get(key)) in {int, float}
+                               and reviewed[key] > initial[key] for key in ("transcriptCoverage", "ocrCoverage"))
+    return None if improved else "no_quality_progress"
+
+
+def _review_scope_seconds(context, duration):
+    from .providers import _review_clip_bounds
+    bounds = _review_clip_bounds(context, duration)
+    return bounds[1] - bounds[0] if bounds else duration
+
+
 def _automated_review_context(
     script: dict[str, Any],
     blocking: list[dict[str, Any]],
@@ -652,6 +683,63 @@ def _automated_review_issues(quality: dict[str, Any]) -> list[dict[str, Any]]:
     # P1/P2 findings remain visible for editors but never justify an extra
     # Turbo bill.  quality_gate is the single definition of a delivery blocker.
     return quality_gate(quality)[1]
+
+
+async def _focused_dialogue_review(row, path, duration, script, quality, evidence, route,
+                                   usage, model, prepared_video, recognize):
+    attempts = []
+    visited = []
+    for _ in range(2):
+        issues = [issue for issue in _automated_review_issues(quality)
+                  if issue.get("tag") in {"疑似漏台词片段", "字幕对白遗漏", "字幕语音待核实", "漏台词"}]
+        windows = recovery_windows(issues, duration, limit=40, max_seconds=24)
+        window = next((item for item in windows if not any(
+            item["startSec"] < old["endSec"] and old["startSec"] < item["endSec"] for old in visited)), None)
+        if window is None:
+            break
+        visited.append(window)
+        local_issues = [issue for issue in issues if type(issue.get("startSec")) in {int, float}
+                        and type(issue.get("endSec")) in {int, float}
+                        and issue["startSec"] >= window["startSec"]
+                        and issue["endSec"] <= window["endSec"]]
+        if not local_issues:
+            continue
+        context = _automated_review_context(script, local_issues)
+        context["requirePhysicalClip"] = True
+        scope = _review_scope_seconds(context, duration)
+        # Replacement targets may expand the media bounds. Account for that
+        # actual envelope, and never widen a local fallback to a full replay.
+        if scope > 32:
+            attempts.append({**window, "accepted": False, "reason": "physical_scope_too_wide"})
+            continue
+        budget = _quality_call_budget(row, duration, scope, usage, model)
+        attempt = {**window, "scopeSeconds": scope, "profitGuard": budget, "accepted": False}
+        attempts.append(attempt)
+        if not budget["allowed"]:
+            attempt["reason"] = "minimum_margin_would_be_breached"
+            break
+        attempt["called"] = True
+        try:
+            candidate, candidate_usage = await _run_model_call(
+                recognize, path, row["title"], duration, evidence, model,
+                review_context=context, prepared_video=prepared_video,
+            )
+            usage = _merge_usage(usage, candidate_usage)
+            candidate = normalize_script(candidate, row["title"])
+            candidate_quality, _, _ = _evaluate_quality(candidate, "ark", evidence, route)
+            reason = _review_acceptance_reason(quality, candidate_quality, script, candidate)
+            attempt.update(accepted=reason is None, reason=reason or "quality_improved")
+            if reason is None:
+                for key in ("contentRepair", "profitGuard", "turboProfitGuard", "finalLiteProfitGuard"):
+                    if key in quality:
+                        candidate_quality[key] = quality[key]
+                script, quality = candidate, candidate_quality
+        except ArkError as exc:
+            usage = _merge_usage(usage, getattr(exc, "usage", {}))
+            attempt.update(reason="provider_error", error=safe_error_text(exc))
+            if is_account_balance_error(exc) or isinstance(exc, ArkAcceptedResponseError) and exc.unresolved:
+                break
+    return script, quality, usage, attempts
 
 
 def _is_lite_model_unavailable(error: ArkError) -> bool:
@@ -957,6 +1045,10 @@ async def _run_recognizer_with_media(
             script = normalize_script(ark_script, row["title"])
             if not has_screenplay_body(script):
                 raise ArkError("未生成可用剧本正文，已保留原始视频和已有版本。", provider_code="empty_screenplay")
+            evidence = await asyncio.get_running_loop().run_in_executor(
+                _evidence_collector_executor,
+                partial(recover_audio_blind_spots, path, duration, script, evidence, prepared_video.get("_cache")),
+            )
             quality, _approved, blocking = _evaluate_quality(script, provider, evidence, route)
             initial_model = route["model"]
             final_model = initial_model
@@ -1139,11 +1231,8 @@ async def _run_recognizer_with_media(
                 review_issues = _automated_review_issues(quality)
                 context = _automated_review_context(script, review_issues, quality=quality)
                 if not is_glm:
-                    ranges = context.get("ranges") or []
-                    review_scope = duration if context.get("scope", "").startswith("full_video") else sum(
-                        max(0.0, float(item.get("endSec") or 0) - float(item.get("startSec") or 0))
-                        for item in ranges
-                    ) or duration
+                    review_scope = _review_scope_seconds(context, duration)
+                    context["requirePhysicalClip"] = review_scope < duration
                     budget = _quality_call_budget(
                         row, duration, review_scope, final_usage, review_model
                     )
@@ -1214,7 +1303,7 @@ async def _run_recognizer_with_media(
                     )
                     reviewed_content_issues = _automated_review_issues(reviewed_quality)
                     final_usage = _merge_usage(final_usage, reviewed_usage)
-                    regression = _review_regression_reason(quality, reviewed_quality)
+                    regression = _review_acceptance_reason(quality, reviewed_quality, script, reviewed_script)
                     review_metadata["accepted"] = regression is None
                     if regression:
                         review_metadata["retainedDraftReason"] = regression
@@ -1261,11 +1350,8 @@ async def _run_recognizer_with_media(
             if needs_turbo_followup:
                 turbo_issues = _automated_review_issues(quality)
                 turbo_context = _automated_review_context(script, turbo_issues, quality=quality)
-                ranges = turbo_context.get("ranges") or []
-                turbo_scope = duration if turbo_context.get("scope", "").startswith("full_video") else sum(
-                    max(0.0, float(item.get("endSec") or 0) - float(item.get("startSec") or 0))
-                    for item in ranges
-                ) or duration
+                turbo_scope = _review_scope_seconds(turbo_context, duration)
+                turbo_context["requirePhysicalClip"] = turbo_scope < duration
                 turbo_budget = _quality_call_budget(
                     row, duration, turbo_scope, final_usage, turbo_model
                 )
@@ -1305,7 +1391,7 @@ async def _run_recognizer_with_media(
                         turbo_quality, _turbo_approved, _turbo_blocking = _evaluate_quality(
                             turbo_script, provider, evidence, turbo_route
                         )
-                        regression = _review_regression_reason(quality, turbo_quality)
+                        regression = _review_acceptance_reason(quality, turbo_quality, script, turbo_script)
                         review_metadata["accepted"] = regression is None
                         if regression:
                             review_metadata["retainedDraftReason"] = regression
@@ -1333,15 +1419,14 @@ async def _run_recognizer_with_media(
                 else:
                     review_metadata["skippedReason"] = "minimum_margin_would_be_breached"
 
-            # If the one permitted Turbo upgrade improved the candidate but a
-            # P0 issue remains, spend at most one final Lite call on those
+            # If the one permitted Turbo upgrade leaves a P0 issue, spend at
+            # most one final Lite call on those
             # issue ranges. This preserves Lite dominance and is cheaper and
             # faster than replaying either the whole task or another Turbo.
             needs_final_lite_cleanup = (
                 not is_glm
                 and route.get("mode") == "lite_first"
                 and turbo_upgrade_used
-                and _is_turbo_model(final_model)
                 and not quality.get("contentGapRanges")
                 and not quality_gate(quality)[0]
                 and bool(initial_model)
@@ -1351,13 +1436,8 @@ async def _run_recognizer_with_media(
             if needs_final_lite_cleanup:
                 cleanup_issues = _automated_review_issues(quality)
                 cleanup_context = _automated_review_context(script, cleanup_issues, quality=quality)
-                cleanup_ranges = cleanup_context.get("ranges") or []
-                cleanup_scope = (
-                    duration if cleanup_context.get("scope", "").startswith("full_video") else sum(
-                        max(0.0, float(item.get("endSec") or 0) - float(item.get("startSec") or 0))
-                        for item in cleanup_ranges
-                    ) or duration
-                )
+                cleanup_scope = _review_scope_seconds(cleanup_context, duration)
+                cleanup_context["requirePhysicalClip"] = cleanup_scope < duration
                 cleanup_budget = _quality_call_budget(
                     row, duration, cleanup_scope, final_usage, initial_model
                 )
@@ -1397,7 +1477,7 @@ async def _run_recognizer_with_media(
                         cleanup_quality, _cleanup_approved, _cleanup_blocking = _evaluate_quality(
                             cleanup_script, provider, evidence, cleanup_route
                         )
-                        regression = _review_regression_reason(quality, cleanup_quality)
+                        regression = _review_acceptance_reason(quality, cleanup_quality, script, cleanup_script)
                         review_metadata["finalCleanupAccepted"] = regression is None
                         if regression:
                             review_metadata["finalCleanupRetainedReason"] = regression
@@ -1425,6 +1505,22 @@ async def _run_recognizer_with_media(
                 else:
                     review_metadata["finalCleanupSkippedReason"] = "minimum_margin_would_be_breached"
 
+            # A no-op/error must not send the same wide clip through another
+            # generic review. Listen to at most two physical, local windows.
+            if (not is_glm and not quality_gate(quality)[0] and not quality.get("contentGapRanges")
+                    and (review_metadata.get("retainedDraftReason") in {"no_effective_change", "no_quality_progress"}
+                         or review_metadata.get("reviewError"))
+                    and route.get("mode") not in {"lite", "lite_only"}):
+                script, quality, final_usage, focused = await _focused_dialogue_review(
+                    row, path, duration, script, quality, evidence, route, final_usage,
+                    final_model, prepared_video, recognize,
+                )
+                review_metadata["focusedRecovery"] = focused
+                review_metadata["attemptCount"] += sum(bool(attempt.get("called")) for attempt in focused)
+                review_metadata["unresolvedIssues"] = _automated_review_issues(quality)
+                if any(attempt.get("accepted") for attempt in focused):
+                    review_metadata["accepted"] = True
+            review_metadata["qualityGatePassed"] = quality_gate(quality)[0]
             quality["automatedReview"] = review_metadata
             quality["providerUsage"] = final_usage
             return script, quality, {**final_usage, "provider": provider, "model": final_model}, evidence

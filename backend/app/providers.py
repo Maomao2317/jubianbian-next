@@ -1791,6 +1791,9 @@ def ark_recognize(
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
     selected_model = (model or ARK_MODEL).strip() or ARK_MODEL
     bounds = _review_clip_bounds(review_context, duration_sec) if review_context else None
+    if ((review_context or {}).get("requirePhysicalClip")
+            and not (review_context or {}).get("_originalContext") and (not bounds or not path.is_file())):
+        raise ArkError("定向补漏无法生成安全的局部切片", provider_code="review_clip_unavailable")
     if bounds and path.is_file():
         try:
             return _recognize_review_clip(path, title, duration_sec, evidence or {}, selected_model,
@@ -1798,7 +1801,7 @@ def ark_recognize(
         except ArkError as exc:
             # Only a local encoding failure falls back. A sent model request
             # must never silently start a second full-video review budget.
-            if exc.provider_code != "review_clip_unavailable":
+            if exc.provider_code != "review_clip_unavailable" or (review_context or {}).get("requirePhysicalClip"):
                 raise
             logger.warning("provider_step provider=ark operation=review_clip_fallback file=%s", path.name)
     started = time.perf_counter()
@@ -1857,7 +1860,8 @@ def ark_recognize(
     payload: Any = None
     response_usages: list[dict[str, Any]] = []
     retried_terminal = False
-    for attempt in range(1, ARK_RESPONSE_CREATE_ATTEMPTS + 1):
+    create_attempts = 1 if (review_context or {}).get("requirePhysicalClip") else ARK_RESPONSE_CREATE_ATTEMPTS
+    for attempt in range(1, create_attempts + 1):
         attempt_usage_recorded = False
         try:
             tried_model_accounts: set[str] = set()
@@ -1933,14 +1937,14 @@ def ark_recognize(
                 response_usages.append(_ark_failed_usage(exc, selected_model, api_key))
             exc.usage = _ark_call_usage(response_usages, selected_model, audit_kind, duration_sec, fps)
             if (exc.provider_code == "ark_response_failed_retryable" and not retried_terminal
-                    and attempt < ARK_RESPONSE_CREATE_ATTEMPTS):
+                    and attempt < create_attempts):
                 retried_terminal = True
                 logger.warning("provider_step provider=ark operation=retry_terminal_response task_id=%s attempt=%d",
                                ark_task_id.get(), attempt)
                 continue
             if (patch_review and exc.provider_code == "output_limit"
                     and response_payload["max_output_tokens"] < ARK_MAX_OUTPUT_TOKENS
-                    and attempt < ARK_RESPONSE_CREATE_ATTEMPTS):
+                    and attempt < create_attempts):
                 # A bounded review can still produce many real corrections.
                 # Retry the prepared video with the original allowance.
                 response_payload["max_output_tokens"] = ARK_MAX_OUTPUT_TOKENS
@@ -1950,7 +1954,7 @@ def ark_recognize(
             # ``ark_stream_response``.  Only retry creation when the socket
             # failed before an ID was received; reuse the prepared file so a
             # transient disconnect never forces another upload/transcode.
-            if (exc.provider_code not in {"transient_network", "invalid_script_response", "empty_screenplay"} and exc.status_code != 429) or attempt >= ARK_RESPONSE_CREATE_ATTEMPTS:
+            if (exc.provider_code not in {"transient_network", "invalid_script_response", "empty_screenplay"} and exc.status_code != 429) or attempt >= create_attempts:
                 raise
             if exc.provider_code in {"invalid_script_response", "empty_screenplay"}:
                 # Regenerate once with the same source. Never turn a truncated

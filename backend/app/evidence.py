@@ -125,7 +125,7 @@ def _get_local_asr_model() -> Any:
 
 
 @limited("evidence-decode", 2)
-def _decode_audio_pcm(path: Path) -> bytes:
+def _decode_audio_pcm(path: Path, *, start: float | None = None, duration: float | None = None) -> bytes:
     """Decode media with ffmpeg so ASR does not depend on PyAV's API version."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -138,8 +138,10 @@ def _decode_audio_pcm(path: Path) -> bytes:
             "error",
             "-threads",
             "2",
+            *(["-ss", str(start)] if start is not None else []),
             "-i",
             str(path),
+            *(["-t", str(duration)] if duration is not None else []),
             "-vn",
             "-ac",
             "1",

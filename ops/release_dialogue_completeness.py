@@ -15,26 +15,24 @@ import sys
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
-BASELINE = "4331a97c975eb3b2dfcddf9c957acaa77ac29dc3"
-BASE_BUILD = "double11-carousel-20261111-4331a97"
+BASELINE = "b8e87e2180ce3d942f5ea98dda5fc90914d33349"
+BASE_BUILD = "dialogue-completeness-20261112-b8e87e2"
 REF = "codex/script-translation-language"
-APP_FILES = ["backend/app/" + name + ".py" for name in ("config", "processing", "routes", "script")]
-APP_FILES += ["web-staging/js/app.js"]
-PRESERVED_FILES = ["web-staging/index.html", "web-staging/css/app.css"]
+APP_FILES = ["backend/app/" + name + ".py" for name in ("evidence", "processing", "providers", "dialogue_recovery")]
+NEW_FILES = {"backend/app/dialogue_recovery.py"}
+PRESERVED_FILES = ["backend/app/" + name + ".py" for name in ("config", "routes", "script")]
+PRESERVED_FILES += ["web-staging/index.html", "web-staging/css/app.css", "web-staging/js/app.js"]
 TESTS = ["test_" + name for name in (
-    "spoken_subtitles", "script_quality", "subtitle_priority", "provider_delivery",
+    "dialogue_recovery", "spoken_subtitles", "script_quality", "subtitle_priority", "provider_delivery",
     "generation_completeness", "recognition_regressions", "content_repair", "quality_capacity",
     "user_review", "dialogue_export", "ark_response_recovery", "ark_cost_control",
     "remote_asr", "remote_ocr", "route_queue", "recognition_cache", "batch_concurrency",
     "account_balance", "rechecks", "admin_ledger", "ocr_dialogue_integrity",
 )]
 CHECK_FILES = ["backend/" + name + ".py" for name in TESTS]
-ALLOWED = set(APP_FILES + ["backend/" + name + ".py" for name in (
-    "test_spoken_subtitles", "test_quality_capacity", "test_content_repair",
-    "test_user_review", "test_recognition_regressions", "test_script_quality", "test_subtitle_priority")])
-ALLOWED.update({"backend/.env.example", "docker-compose.yml", "docker-compose.staging.yml",
-                "web-staging/test-user-review.cjs", "ops/release_dialogue_completeness.py",
-                "ops/test_release_dialogue_completeness.py", "ops/dialogue-completeness-release-2026-11-12.md"})
+ALLOWED = set(APP_FILES + ["backend/test_dialogue_recovery.py"])
+ALLOWED.update({"ops/release_dialogue_completeness.py", "ops/test_release_dialogue_completeness.py",
+                "ops/dialogue-recovery-release-2026-11-12.md"})
 BUDGET_ENV = {
     "JBB_ARK_QUALITY_MIN_GROSS_MARGIN_RATIO": "0",
     "JBB_ARK_REVENUE_REALIZATION_RATIO": "0.80",
@@ -71,8 +69,9 @@ def prepare(project, site, port, commit, build, base):
     assert changed <= ALLOWED and set(APP_FILES) <= changed, "Unexpected release files"
     before = common.fingerprint(project)
     assert common.environment(common.inspect(project))["JBB_BUILD_VERSION"] == BASE_BUILD
+    assert all(common.environment(common.inspect(project)).get(key) == value for key, value in BUDGET_ENV.items())
     common.verify_files(project, port, {
-        p: common.digest(common.git("show", BASELINE + ":" + p)) for p in APP_FILES + PRESERVED_FILES
+        p: common.digest(common.git("show", BASELINE + ":" + p)) for p in APP_FILES + PRESERVED_FILES if p not in NEW_FILES
     })
     hashes = {}
     for p in APP_FILES + PRESERVED_FILES + CHECK_FILES:
@@ -124,7 +123,7 @@ def deploy(project, site, port, commit, build, base):
     files = before["Config"]["Labels"]["com.docker.compose.project.config_files"].split(",")
     assert all(Path(p).parent == root for p in files)
     compose = common.compose_args(project, root, files)
-    overlay = root / "release-dialogue-completeness.yml"
+    overlay = root / "release-dialogue-recovery.yml"
     assert str(overlay) not in files
     new_compose = common.compose_args(project, root, files + [str(overlay)])
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))
@@ -188,7 +187,7 @@ def main():
     mode, site, commit = sys.argv[1:]
     assert mode in {"prepare", "deploy"} and site in {"staging", "production"}
     assert re.fullmatch("[0-9a-f]{40}", commit)
-    build = "dialogue-completeness-20261112-" + commit[:7]
+    build = "dialogue-recovery-20261112-" + commit[:7]
     base = Path("/opt/jubianbian-" + build)
     project, port = ("jubianbian-staging", 18000) if site == "staging" else ("jubianbian", 8000)
     with Path("/run/lock/jubianbian-quality-release.lock").open("w") as lock:

@@ -28,6 +28,13 @@ class DialogueReleaseTests(unittest.TestCase):
         new["services"]["app"]["environment"].update(update)
         return old, new, update
 
+    def test_overlay_is_limited_to_recovery_patch_and_preserves_frontend(self):
+        self.assertEqual(self.release.NEW_FILES, {"backend/app/dialogue_recovery.py"})
+        self.assertIn("backend/test_dialogue_recovery.py", self.release.CHECK_FILES)
+        self.assertNotIn("web-staging/js/app.js", self.release.APP_FILES)
+        self.assertIn("web-staging/js/app.js", self.release.PRESERVED_FILES)
+        self.assertNotIn("backend/.env", self.release.ALLOWED)
+
     def test_authorized_budget_and_image_changes_only(self):
         old, new, update = self.config()
         unchanged = deepcopy(new)
