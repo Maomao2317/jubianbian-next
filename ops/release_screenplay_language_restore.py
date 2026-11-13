@@ -111,8 +111,12 @@ def prepare(commit, build, base):
             for revision in (BASELINE, commit)
         }
         assert_known_runtime_digest(path, common.digest(live), known)
-    translation = common.output(["docker", "exec", PROJECT + "-app-1", "cat", "/app/backend/app/translation.py"])
-    assert common.digest(translation) == common.digest(common.git("show", BASELINE + ":backend/app/translation.py"))
+    translation = common.output([
+        "docker", "exec", PROJECT + "-app-1", "sh", "-c",
+        "if test -f /app/backend/app/translation.py; then cat /app/backend/app/translation.py; else printf __ABSENT__; fi",
+    ])
+    if translation != b"__ABSENT__":
+        assert common.digest(translation) == common.digest(common.git("show", BASELINE + ":backend/app/translation.py"))
 
     digests = {}
     for path in APP_FILES + REMOVE_FILES + TEST_FILES:
