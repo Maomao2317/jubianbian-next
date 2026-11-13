@@ -358,6 +358,9 @@ def init_db() -> None:
                 progress_percent INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 result_json TEXT,
+                delivery_json TEXT,
+                source_language TEXT NOT NULL DEFAULT 'zh',
+                output_language TEXT NOT NULL DEFAULT 'zh',
                 quality_json TEXT,
                 evidence_json TEXT,
                 provider TEXT,
@@ -391,6 +394,9 @@ def init_db() -> None:
             ("batch_index", "INTEGER"),
             ("batch_total", "INTEGER"),
             ("stage_progress_percent", "INTEGER"),
+            ("delivery_json", "TEXT"),
+            ("source_language", "TEXT NOT NULL DEFAULT 'zh'"),
+            ("output_language", "TEXT NOT NULL DEFAULT 'zh'"),
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")

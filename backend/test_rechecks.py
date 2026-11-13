@@ -25,6 +25,7 @@ class RecheckSnapshotTests(unittest.TestCase):
                 progress_percent INTEGER,
                 error TEXT,
                 result_json TEXT,
+                delivery_json TEXT,
                 quality_json TEXT,
                 evidence_json TEXT,
                 provider TEXT,
@@ -54,14 +55,15 @@ class RecheckSnapshotTests(unittest.TestCase):
         self.connection.execute(
             """
             INSERT INTO tasks (
-                id, status, stage, progress_percent, result_json, quality_json,
+                id, status, stage, progress_percent, result_json, delivery_json, quality_json,
                 evidence_json, provider, model, input_tokens, output_tokens,
                 total_tokens, api_cost_rmb, attempts, completed_at, updated_at
-            ) VALUES (?, 'done', 'done', 100, ?, ?, ?, 'ark', 'lite', 1, 2, 3, 0.4, 1, ?, ?)
+            ) VALUES (?, 'done', 'done', 100, ?, ?, ?, ?, 'ark', 'lite', 1, 2, 3, 0.4, 1, ?, ?)
             """,
             (
                 "task-1",
                 json.dumps({"version": "delivered"}),
+                json.dumps({"version": "delivered_translation"}),
                 json.dumps({"deliveryStatus": "approved"}),
                 json.dumps({"status": "available"}),
                 "2026-10-10T01:00:00+00:00",
@@ -90,6 +92,7 @@ class RecheckSnapshotTests(unittest.TestCase):
         task = self.connection.execute("SELECT * FROM tasks WHERE id = 'task-1'").fetchone()
         self.assertEqual(task["status"], "done")
         self.assertEqual(json.loads(task["result_json"])["version"], "delivered")
+        self.assertEqual(json.loads(task["delivery_json"])["version"], "delivered_translation")
         snapshot = self.connection.execute(
             "SELECT state, resolved_at FROM task_recheck_snapshots WHERE task_id = 'task-1'"
         ).fetchone()

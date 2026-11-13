@@ -15,6 +15,7 @@ SNAPSHOT_FIELDS = (
     "progress_percent",
     "error",
     "result_json",
+    "delivery_json",
     "quality_json",
     "evidence_json",
     "provider",
