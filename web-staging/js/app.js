@@ -13,7 +13,6 @@
   let pricingReturnFocus = null;
   let pricingScrollTop = 0;
   let rechargeReturnToPricing = false;
-  let campaignTimer = null;
 
   const state = {
     view: "list",
@@ -25,7 +24,6 @@
     reviewIds: [],
     profile: null,
     rechargeTier: "personal",
-    campaignSlide: 0,
     authMode: "login",
     authBusy: false,
     authCooldown: 0,
@@ -188,97 +186,6 @@
           <button class="avatar" type="button" data-action="account" title="个人信息">${escapeHtml(initial)}</button>
         </div>
       </div>`;
-  }
-
-  function double11Offer(offer) {
-    const bonus = Math.round(Number(offer.price) * POINTS_PER_YUAN * 0.11);
-    return { ...offer, campaignCredits: Number(offer.credits) + bonus };
-  }
-
-  function campaignPackage(offer) {
-    const item = double11Offer(offer);
-    return `<div class="campaign-package">
-      <strong><small>¥</small>${item.price.toLocaleString("en-US")}</strong>
-      <span>${item.credits.toLocaleString("en-US")}</span>
-      <b>${item.campaignCredits.toLocaleString("en-US")}<small>积分</small></b>
-    </div>`;
-  }
-
-  function campaignSlidesMarkup() {
-    const slides = [
-      `<article class="campaign-slide campaign-overview" aria-label="双11创作力加码">
-        <div class="campaign-copy">
-          <span class="campaign-kicker">DOUBLE 11 · 限时加码</span>
-          <h2>现有套餐权益照常享<br><strong>额外加赠 11% 积分</strong></h2>
-          <p>个人版、企业版全档位参与，充值越多，创作续航越充足。</p>
-        </div>
-        <div class="campaign-rate" aria-hidden="true"><span>+</span><strong>11</strong><b>%</b><small>EXTRA POINTS</small></div>
-      </article>`,
-      `<article class="campaign-slide campaign-personal" aria-label="个人创作套餐双11到账积分">
-        <div class="campaign-plan-heading"><span>FOR CREATORS</span><h2>个人创作套餐</h2></div>
-        <div class="campaign-packages">${cfg.rechargeOffers.personal.map(campaignPackage).join("")}</div>
-      </article>`,
-      `<article class="campaign-slide campaign-enterprise" aria-label="企业协作套餐双11到账积分">
-        <div class="campaign-plan-heading"><span>FOR TEAMS</span><h2>企业协作套餐</h2></div>
-        <div class="campaign-packages">${cfg.rechargeOffers.enterprise.map(campaignPackage).join("")}</div>
-      </article>`,
-    ];
-    return `<section class="campaign-carousel" aria-roledescription="轮播" aria-label="双11积分充值活动">
-      <div class="campaign-viewport">
-        <div class="campaign-track" style="transform:translateX(-${state.campaignSlide * 100}%)">${slides.map((slide, index) => slide.replace("<article ", `<article aria-hidden="${index === state.campaignSlide ? "false" : "true"}"${index === state.campaignSlide ? "" : " inert"} `)).join("")}</div>
-      </div>
-      <div class="campaign-dots" role="group" aria-label="选择活动内容">${slides.map((_, index) => `<button type="button" data-action="campaign-slide" data-slide="${index}" aria-label="查看第 ${index + 1} 张活动" aria-current="${index === state.campaignSlide ? "true" : "false"}"></button>`).join("")}</div>
-      <span class="sr-only campaign-announcement" aria-live="polite">第 ${state.campaignSlide + 1} 张，共 ${slides.length} 张</span>
-    </section>`;
-  }
-
-  function stopCampaignCarousel() {
-    clearInterval(campaignTimer);
-    campaignTimer = null;
-  }
-
-  function updateCampaignCarousel() {
-    const carousel = $(".campaign-carousel");
-    if (!carousel) return;
-    const track = $(".campaign-track", carousel);
-    if (track) track.style.transform = `translateX(-${state.campaignSlide * 100}%)`;
-    carousel.querySelectorAll(".campaign-slide").forEach((slide, index) => {
-      slide.setAttribute("aria-hidden", String(index !== state.campaignSlide));
-      slide.inert = index !== state.campaignSlide;
-    });
-    carousel.querySelectorAll(".campaign-dots button").forEach((dot, index) => dot.setAttribute("aria-current", String(index === state.campaignSlide)));
-    const announcement = $(".campaign-announcement", carousel);
-    if (announcement) announcement.textContent = `第 ${state.campaignSlide + 1} 张，共 3 张`;
-  }
-
-  function startCampaignCarousel() {
-    stopCampaignCarousel();
-    const carousel = $(".campaign-carousel");
-    if (!carousel || carousel.matches(":hover") || carousel.contains(document.activeElement) || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    campaignTimer = setInterval(() => {
-      if (!$(".campaign-carousel")) { stopCampaignCarousel(); return; }
-      if (document.hidden) return;
-      state.campaignSlide = (state.campaignSlide + 1) % 3;
-      updateCampaignCarousel();
-    }, 5000);
-  }
-
-  function setCampaignSlide(index) {
-    state.campaignSlide = (Number(index) + 3) % 3;
-    updateCampaignCarousel();
-    startCampaignCarousel();
-  }
-
-  function setupCampaignCarousel() {
-    const carousel = $(".campaign-carousel");
-    if (!carousel) { stopCampaignCarousel(); return; }
-    carousel.addEventListener("pointerenter", stopCampaignCarousel);
-    carousel.addEventListener("pointerleave", startCampaignCarousel);
-    carousel.addEventListener("focusin", stopCampaignCarousel);
-    carousel.addEventListener("focusout", (event) => {
-      if (!carousel.contains(event.relatedTarget)) startCampaignCarousel();
-    });
-    startCampaignCarousel();
   }
 
   function captureAuthFormState() {
@@ -727,7 +634,6 @@
       <section class="page tasks-page">
         <div class="workspace-layout">
         <div class="workspace-main">
-        ${campaignSlidesMarkup()}
         <div class="page-heading">
           <div>
             <div class="eyebrow">创作工作台</div>
@@ -778,7 +684,6 @@
     if (batchActions) [...batchActions.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).forEach((node) => node.remove());
     if (previousListHeight) $(".task-list").style.minHeight = `${Math.ceil(previousListHeight)}px`;
     restoreListViewport(viewport);
-    setupCampaignCarousel();
   }
 
   function pipeline(task) {
@@ -1709,7 +1614,6 @@
     if (action === "request-code") { await requestCode(); return; }
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "points") { await openPointsModal(); return; }
-    if (action === "campaign-slide") { setCampaignSlide(actionElement.dataset.slide); return; }
     if (action === "task-page") { state.taskPage = Number(actionElement.dataset.page) || 0; renderList(); return; }
     if (action === "toggle-batch") { const batchId = actionElement.dataset.id; state.expandedBatches[batchId] = !state.expandedBatches[batchId]; renderList(); return; }
     if (action === "search") { state.keyword = $("#keyword")?.value.trim() || ""; state.taskPage = 0; await refreshList(); return; }
