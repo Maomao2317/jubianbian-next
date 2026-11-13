@@ -170,16 +170,16 @@ def _decode_audio_ffmpeg(path: Path) -> Any:
     return np.frombuffer(_decode_audio_pcm(path), dtype="<i2").astype(np.float32) / 32768.0
 
 
-def _local_asr_items(path: Path, language: str | None = None) -> list[dict[str, Any]]:
+def _local_asr_items(path: Path) -> list[dict[str, Any]]:
     """Return time-anchored transcript segments from the local ASR model."""
     audio = _decode_audio_ffmpeg(path)
-    return _asr_items_from_audio(audio, path.name, language)
+    return _asr_items_from_audio(audio, path.name)
 
 
-def _asr_items_from_audio(audio: Any, source_name: str, language: str | None = None) -> list[dict[str, Any]]:
+def _asr_items_from_audio(audio: Any, source_name: str) -> list[dict[str, Any]]:
     """Shared CPU/GPU decoding settings and word-anchor serialization."""
     model = _get_local_asr_model()
-    language = language or LOCAL_ASR_LANGUAGE or None
+    language = LOCAL_ASR_LANGUAGE or None
     items: list[dict[str, Any]] = []
     captured_chars = 0
     # Default to one host-wide inference; a controlled two-worker experiment
@@ -254,7 +254,6 @@ def _audio_evidence(
     path: Path,
     duration_sec: float,
     transcribe: Callable[[Path], str] | None = None,
-    source_language: str = "zh",
 ) -> dict[str, Any]:
     """Run the configured ASR provider once and preserve its raw transcript."""
     if transcribe is not None:
@@ -271,7 +270,7 @@ def _audio_evidence(
         return _source("audio", "unavailable", reason="原始视频文件不存在")
 
     failures: list[str] = []
-    if source_language != "en" and ASR_REMOTE_URL and LOCAL_ASR_MODEL:
+    if ASR_REMOTE_URL and LOCAL_ASR_MODEL:
         try:
             from .remote_asr import request_asr
             source = request_asr(_decode_audio_pcm(path), duration_sec)
@@ -283,7 +282,7 @@ def _audio_evidence(
             logger.warning("evidence_asr_cpu_fallback file=%s error_type=%s", path.name, type(exc).__name__)
     if LOCAL_ASR_MODEL:
         try:
-            items = _local_asr_items(path, source_language)
+            items = _local_asr_items(path)
             if items:
                 return _source("audio", "available", provider=f"faster-whisper:{LOCAL_ASR_MODEL}", items=items)
             failures.append("本地 ASR 未识别到可确认语音")
@@ -650,7 +649,6 @@ def collect_evidence(
     *,
     transcribe: Callable[[Path], str] | None = None,
     cached_evidence: dict[str, Any] | None = None,
-    source_language: str = "zh",
 ) -> dict[str, Any]:
     """Collect independent evidence and return a JSON-safe record."""
     del title  # reserved for future provider metadata; never used to infer content
@@ -666,7 +664,7 @@ def collect_evidence(
     # Requeuing a task must not recollect it just because a remote URL exists.
     if len(cached_sources) == 3:
         logger.info("evidence_step file=%s kind=all operation=cache_hit", path.name)
-        return {**cached_evidence, "sourceLanguage": source_language, "cacheHitSources": sorted(cached_sources),
+        return {**cached_evidence, "cacheHitSources": sorted(cached_sources),
                 "summary": evidence_summary(cached_evidence),
                 "timingsMs": {"queue": 0, "audioQueue": 0, "ocrQueue": 0, "audio": 0, "ocr": 0, "total": 0}}
     for kind in cached_sources:
@@ -680,9 +678,7 @@ def collect_evidence(
         logger.info("evidence_step file=%s kind=%s status=%s items=%s queue_ms=%.1f duration_ms=%.1f", path.name, kind, source.get("status"), len(source.get("items") or []), queue_ms, elapsed_ms)
         return source, elapsed_ms, queue_ms
 
-    audio_future = None if "audio" in cached_sources else _audio_executor.submit(
-        timed_source, "audio", _audio_evidence, transcribe=transcribe, source_language=source_language,
-    )
+    audio_future = None if "audio" in cached_sources else _audio_executor.submit(timed_source, "audio", _audio_evidence, transcribe=transcribe)
     ocr_future = None
     try:
         if "ocr" not in cached_sources:
@@ -704,7 +700,6 @@ def collect_evidence(
     unavailable = [source["kind"] for source in sources if source.get("status") != "available"]
     result: dict[str, Any] = {
         "version": EVIDENCE_VERSION,
-        "sourceLanguage": source_language,
         "status": "available" if available else "unavailable",
         "availableSources": available,
         "unavailableSources": unavailable,

@@ -22,8 +22,6 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
     task["title"] = display_title
     raw_result_json = task.pop("result_json", None)
     raw_result = json.loads(raw_result_json) if include_result and raw_result_json else None
-    raw_delivery_json = task.pop("delivery_json", None)
-    task["delivery"] = json.loads(raw_delivery_json) if include_result and raw_delivery_json else None
     quality_json = task.pop("quality_json", None)
     task["quality"] = json.loads(quality_json) if include_result and quality_json else None
     raw_evidence = task.pop("evidence_json", None)
@@ -41,8 +39,6 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
     else:
         task["result"] = None
     task["fileName"] = file_name
-    task["sourceLanguage"] = task.pop("source_language", "zh") or "zh"
-    task["outputLanguage"] = task.pop("output_language", "zh") or "zh"
     task["episodeNumber"] = episode_from_filename(file_name)
     task["fileSize"] = task.pop("file_size", 0)
     task["mimeType"] = task.pop("mime_type", "video/mp4")
@@ -165,8 +161,8 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
     Recognition runs independently per episode and may finish out of order.
     Reconcile once, after every task in the batch is terminal, so the O(batch
     size) parse/merge pass does not become O(batch size squared).
-    The source result and its delivery copy are kept in lockstep; source
-    evidence and QA records remain untouched for auditability.
+    Only result JSON is changed here—the source evidence and QA records remain
+    untouched for auditability.
     """
     if not batch_id:
         return 0
@@ -179,7 +175,7 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
             return 0
         rows = connection.execute(
             """
-            SELECT id, result_json, delivery_json
+            SELECT id, result_json
             FROM tasks
             WHERE batch_id = ? AND status IN ('done', 'review') AND result_json IS NOT NULL
             ORDER BY COALESCE(batch_index, 2147483647), created_at ASC, id ASC
@@ -189,7 +185,6 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
         if not rows:
             return 0
         scripts: list[dict[str, Any]] = []
-        deliveries: list[dict[str, Any] | None] = []
         usable_rows: list[sqlite3.Row] = []
         for row in rows:
             try:
@@ -200,33 +195,18 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
                 continue
             usable_rows.append(row)
             scripts.append(value)
-            delivery = None
-            try:
-                candidate = json.loads(row["delivery_json"] or "")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                candidate = None
-            if isinstance(candidate, dict):
-                delivery = candidate
-            deliveries.append(delivery)
         if len(scripts) < 2:
             return 0
         changed = apply_batch_character_continuity(scripts)
-        delivery_changed = apply_batch_character_continuity(
-            [delivery for delivery in deliveries if delivery is not None]
-        ) if any(delivery is not None for delivery in deliveries) else 0
-        if not changed and not delivery_changed:
+        if not changed:
             return 0
         timestamp = now_iso()
-        for row, script, delivery in zip(usable_rows, scripts, deliveries):
-            values = {"result_json": json.dumps(script, ensure_ascii=False), "updated_at": timestamp}
-            if delivery is not None:
-                values["delivery_json"] = json.dumps(delivery, ensure_ascii=False)
-            assignments = ", ".join(f"{key} = ?" for key in values)
+        for row, script in zip(usable_rows, scripts):
             connection.execute(
-                f"UPDATE tasks SET {assignments} WHERE id = ?",
-                (*values.values(), row["id"]),
+                "UPDATE tasks SET result_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(script, ensure_ascii=False), timestamp, row["id"]),
             )
-        return changed + delivery_changed
+        return changed
 
 
 def record_task_event(

@@ -277,10 +277,6 @@
     async createTask(payload) {
       await delay(180);
       const { title, files, estimatedMinutes, durationSec } = payload;
-      if (!["zh", "en"].includes(payload.sourceLanguage)
-          || !["zh", "en", "both"].includes(payload.outputLanguage)) {
-        throw new Error("请先选择原剧语言和生成语言");
-      }
       const selected = (files && files.length ? files : [payload.file]).filter(Boolean);
       const file = selected[0];
       if (!file) throw new Error("请选择视频文件");
@@ -309,8 +305,6 @@
         durationSec: Math.round(Number(durationSec || 0) / selected.length),
         estimatedMinutes: perFileMinutes,
         creditsUsed: baseBilling + (index < remainder ? 1 : 0),
-        sourceLanguage: payload.sourceLanguage,
-        outputLanguage: payload.outputLanguage,
         createdAt,
         result: null,
       }));
@@ -459,18 +453,12 @@
       return this.request(this.url(cfg().api.endpoints.task, { id }));
     },
     async createTask(payload) {
-      if (!payload || !["zh", "en"].includes(payload.sourceLanguage)
-          || !["zh", "en", "both"].includes(payload.outputLanguage)) {
-        throw new Error("请先选择原剧语言和生成语言");
-      }
       const files = (payload.files || [payload.file]).filter(Boolean);
       const durations = Array.isArray(payload.durations) ? payload.durations : [];
       const reservation = await this.request(this.url("/uploads/batch"), {
         method: "POST",
         body: JSON.stringify({
           title: payload.title || "",
-          sourceLanguage: payload.sourceLanguage,
-          outputLanguage: payload.outputLanguage,
           files: files.map((file, index) => ({
             name: file.name,
             size: file.size,

@@ -3,7 +3,6 @@ import asyncio
 from collections import Counter
 import gc
 from io import BytesIO
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -44,19 +43,14 @@ class RouteQueueTests(unittest.TestCase):
     def seed(self, status):
         with auth_store.db() as c:
             c.execute("""INSERT INTO tasks(id,user_id,title,file_name,stored_path,status,stage,
-                estimated_minutes,credits_used,created_at,updated_at,result_json,delivery_json)
-                VALUES ('task','owner','Episode','1.mp4','fixture.mp4',?,?,1,1,?,?,'{"scenes":[]}','{"delivery":"previous"}')""",
+                estimated_minutes,credits_used,created_at,updated_at,result_json)
+                VALUES ('task','owner','Episode','1.mp4','fixture.mp4',?,?,1,1,?,?,'{"scenes":[]}')""",
                 (status, status, auth_store.now_iso(), auth_store.now_iso()))
-
-    def assert_delivery_cleared(self):
-        with auth_store.db() as c:
-            row = c.execute("SELECT delivery_json FROM tasks WHERE id = 'task'").fetchone()
-        self.assertIsNone(row["delivery_json"])
 
     def test_legacy_single_upload_is_only_started_by_worker(self):
         background = BackgroundTasks()
         result = asyncio.run(routes.create_task(None, background,
-            UploadFile(filename="1.mp4", file=BytesIO(b"fixture")), "Episode", 60, "zh", "zh"))
+            UploadFile(filename="1.mp4", file=BytesIO(b"fixture")), "Episode", 60))
         self.assert_queued_once(result["id"], background)
 
     def test_owner_retry_is_only_started_by_worker(self):
@@ -70,7 +64,6 @@ class RouteQueueTests(unittest.TestCase):
         background = BackgroundTasks()
         asyncio.run(routes.admin_retry_task(None, "task", background))
         self.assert_queued_once("task", background)
-        self.assert_delivery_cleared()
 
     def test_admin_review_retry_is_only_started_by_worker(self):
         self.seed("review")
@@ -78,7 +71,6 @@ class RouteQueueTests(unittest.TestCase):
         result = asyncio.run(routes.admin_retry_task(None, "task", background))
         self.assertFalse(result["charged"])
         self.assert_queued_once("task", background)
-        self.assert_delivery_cleared()
 
     def test_admin_done_recheck_is_only_started_by_worker(self):
         self.seed("done")
@@ -86,10 +78,6 @@ class RouteQueueTests(unittest.TestCase):
         result = asyncio.run(routes.admin_retry_task(None, "task", background))
         self.assertTrue(result["previousVersionPreserved"])
         self.assert_queued_once("task", background)
-        self.assert_delivery_cleared()
-        with auth_store.db() as c:
-            snapshot = c.execute("SELECT snapshot_json FROM task_recheck_snapshots WHERE task_id = 'task'").fetchone()
-        self.assertEqual(json.loads(snapshot["snapshot_json"])["delivery_json"], '{"delivery":"previous"}')
 
     def check_stale_retry_rolls_back_charge(self, handler):
         self.seed("failed")

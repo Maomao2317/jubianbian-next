@@ -88,16 +88,6 @@ from .storage import (
     object_uri,
     presigned_put,
 )
-
-
-def _required_languages(source_language: Any, output_language: Any) -> tuple[str, str]:
-    source = str(source_language or "").strip()
-    output = str(output_language or "").strip()
-    if source not in {"zh", "en"}:
-        raise HTTPException(status_code=400, detail="请选择原剧语言")
-    if output not in {"zh", "en", "both"}:
-        raise HTTPException(status_code=400, detail="请选择生成剧本语言")
-    return source, output
 from .task_store import (
     get_task,
     record_task_event,
@@ -892,7 +882,7 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
                 """
                 UPDATE tasks
                 SET status = 'queued', stage = 'queued', progress_percent = 4,
-                    error = NULL, result_json = NULL, delivery_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
+                    error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                     model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                     api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
                 WHERE id = ? AND status = ?
@@ -924,7 +914,7 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
             """
             UPDATE tasks
             SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
-                error = NULL, result_json = NULL, delivery_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
+                error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                 model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                 api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
             WHERE id = ? AND user_id = ? AND status = 'failed'
@@ -1092,10 +1082,6 @@ async def create_upload_batch(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="上传批次参数不是合法 JSON") from exc
     raw_files = payload.get("files") if isinstance(payload, dict) else None
     title = str(payload.get("title") or "").strip() if isinstance(payload, dict) else ""
-    source_language, output_language = _required_languages(
-        payload.get("sourceLanguage") if isinstance(payload, dict) else None,
-        payload.get("outputLanguage") if isinstance(payload, dict) else None,
-    )
     if not isinstance(raw_files, list) or not raw_files or len(raw_files) > 999:
         raise HTTPException(status_code=400, detail="一次最多上传 999 个视频")
 
@@ -1125,8 +1111,6 @@ async def create_upload_batch(request: Request) -> dict[str, Any]:
             "minutes": max(1, math.ceil(duration / 60)),
             "input_index": input_index,
             "stored_path": stored_path,
-            "source_language": source_language,
-            "output_language": output_language,
         })
 
     total_duration = sum(float(item["duration"]) for item in prepared)
@@ -1166,14 +1150,13 @@ async def create_upload_batch(request: Request) -> dict[str, Any]:
             connection.execute(
                 """INSERT INTO tasks
                 (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec,
-                 estimated_minutes, credits_used, source_language, output_language, status, stage, progress_percent, created_at, updated_at,
+                 estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at,
                  batch_id, batch_title, batch_index, batch_total)
-                VALUES (?, ?, ?, ?, ?, ?, 'video/mp4', ?, ?, ?, ?, ?, 'queued', 'uploading', 1, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, 'video/mp4', ?, ?, ?, 'queued', 'uploading', 1, ?, ?, ?, ?, ?, ?)""",
                 (
                     item["id"], user["id"], title_with_episode(title or title_from_filename(item["name"]), item["name"]),
                     item["name"], item["stored_path"], item["size"], item["duration"], item["minutes"],
-                    item["billing_minutes"], item["source_language"], item["output_language"], created, created,
-                    batch_id, batch_title, index, len(prepared),
+                    item["billing_minutes"], created, created, batch_id, batch_title, index, len(prepared),
                 ),
             )
         # Initial upload reservations and their first timeline event share the
@@ -1321,11 +1304,8 @@ async def create_task(
     file: UploadFile = File(...),
     title: str = Form(""),
     durationSec: float = Form(0),
-    sourceLanguage: str = Form(""),
-    outputLanguage: str = Form(""),
 ) -> dict[str, Any]:
     user = current_user(request)
-    source_language, output_language = _required_languages(sourceLanguage, outputLanguage)
     file_name = safe_filename(file.filename or "video.mp4")
     if not file_name.lower().endswith(".mp4"):
         raise HTTPException(status_code=400, detail="目前只支持 MP4 视频")
@@ -1354,9 +1334,9 @@ async def create_task(
             """
             INSERT INTO tasks
               (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec,
-               estimated_minutes, credits_used, source_language, output_language, status, stage, progress_percent,
+               estimated_minutes, credits_used, status, stage, progress_percent,
                created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)
             """,
             (
                 task_id,
@@ -1369,8 +1349,6 @@ async def create_task(
                 duration,
                 estimated,
                 estimated,
-                source_language,
-                output_language,
                 created,
                 created,
             ),
@@ -1398,12 +1376,9 @@ async def create_tasks_batch(
     request: Request,
     files: list[UploadFile] = File(...),
     title: str = Form(""),
-    sourceLanguage: str = Form(""),
-    outputLanguage: str = Form(""),
 ) -> dict[str, Any]:
     """Persist up to 999 independent MP4 jobs for the durable worker queue."""
     user = current_user(request)
-    source_language, output_language = _required_languages(sourceLanguage, outputLanguage)
     if not files or len(files) > 999:
         raise HTTPException(status_code=400, detail="一次最多上传 999 个视频")
     prepared: list[dict[str, Any]] = []
@@ -1459,7 +1434,7 @@ async def create_tasks_batch(
             available = int(current["credits"] or 0) if current else 0
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
         for index, item in enumerate(prepared, start=1):
-            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, source_language, output_language, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["billing_minutes"], source_language, output_language, created, created, batch_id, batch_title, index, len(prepared)))
+            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["billing_minutes"], created, created, batch_id, batch_title, index, len(prepared)))
         _, balance = charged
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))
@@ -1490,7 +1465,7 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
             """
             UPDATE tasks
             SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
-                error = NULL, result_json = NULL, delivery_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
+                error = NULL, result_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                 model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                 api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
             WHERE id = ? AND user_id = ? AND status = 'failed'

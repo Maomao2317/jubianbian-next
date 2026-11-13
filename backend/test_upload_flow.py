@@ -159,8 +159,7 @@ class ParallelUploadFlowTests(unittest.TestCase):
                         stored_path TEXT NOT NULL, file_size INTEGER NOT NULL,
                         mime_type TEXT, duration_sec REAL, estimated_minutes INTEGER,
                         credits_used INTEGER, status TEXT, stage TEXT, progress_percent INTEGER, stage_progress_percent INTEGER,
-                        error TEXT, result_json TEXT, delivery_json TEXT, source_language TEXT NOT NULL DEFAULT 'zh',
-                        output_language TEXT NOT NULL DEFAULT 'zh', quality_json TEXT, evidence_json TEXT,
+                        error TEXT, result_json TEXT, quality_json TEXT, evidence_json TEXT,
                         provider TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
                         total_tokens INTEGER, api_cost_rmb REAL DEFAULT 0, attempts INTEGER DEFAULT 0,
                         created_at TEXT, updated_at TEXT, completed_at TEXT, batch_id TEXT,
@@ -181,8 +180,6 @@ class ParallelUploadFlowTests(unittest.TestCase):
             file_bytes = b"small-test-video"
             payload = {
                 "title": "测试短剧",
-                "sourceLanguage": "zh",
-                "outputLanguage": "zh",
                 "files": [{"name": "第01集.mp4", "size": len(file_bytes), "durationSec": 10}],
             }
             user = {"id": "user-1", "credits": 100}
@@ -203,23 +200,13 @@ class ParallelUploadFlowTests(unittest.TestCase):
             self.assertEqual(reservation["storage"], "local")
             self.assertEqual(result["status"], "queued")
             with open_db() as connection:
-                row = connection.execute("SELECT stage, progress_percent, stored_path, source_language, output_language FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                row = connection.execute("SELECT stage, progress_percent, stored_path FROM tasks WHERE id = ?", (task_id,)).fetchone()
             self.assertEqual((row["stage"], row["progress_percent"]), ("queued", 4))
-            self.assertEqual((row["source_language"], row["output_language"]), ("zh", "zh"))
             self.assertEqual(Path(row["stored_path"]).read_bytes(), file_bytes)
         finally:
             keeper.close()
             if target_path is not None:
                 target_path.unlink(missing_ok=True)
-
-    def test_upload_batch_requires_both_languages(self):
-        request = FakeRequest(payload={"files": [{"name": "episode.mp4", "size": 10}]})
-        with patch.object(routes, "current_user", return_value={"id": "user-1"}):
-            with self.assertRaises(HTTPException) as caught:
-                asyncio.run(routes.create_upload_batch(request))
-
-        self.assertEqual(caught.exception.status_code, 400)
-        self.assertEqual(caught.exception.detail, "请选择原剧语言")
 
 
 if __name__ == "__main__":

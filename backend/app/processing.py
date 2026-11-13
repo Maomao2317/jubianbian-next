@@ -63,7 +63,6 @@ from .script import (
 )
 from .storage import cleanup_materialized, is_object_uri, materialize_media
 from .task_store import batch_character_context, mark_task_stage, reconcile_batch_character_continuity, record_task_event, task_row, update_task
-from .translation import translate_delivery
 
 
 # Collectors wait for CPU evidence queues. Give them their own bounded pool so
@@ -762,8 +761,6 @@ def _is_non_retryable_provider_error(error: BaseException) -> bool:
         "profit_budget_guard",
     }:
         return True
-    if str(getattr(error, "provider_code", "")).startswith("translation_"):
-        return True
     # Once a provider has accepted a paid generation, replaying the whole task
     # can only increase cost and may repeat the same quality failure. Preserve
     # the usage for accounting and require an explicit human retry instead.
@@ -878,14 +875,9 @@ def _media_progress_callback(task_id: str):
     return progress
 
 
-def _collect_task_evidence(
-    path: Path, title: str, duration: float, cache: RecognitionCache | None, source_language: str = "zh",
-) -> dict[str, Any]:
+def _collect_task_evidence(path: Path, title: str, duration: float, cache: RecognitionCache | None) -> dict[str, Any]:
     cached = cache.load("evidence") if cache is not None else None
-    evidence = collect_evidence(
-        path, title, duration, source_language=source_language,
-        **({"cached_evidence": cached} if cached else {}),
-    )
+    evidence = collect_evidence(path, title, duration, **({"cached_evidence": cached} if cached else {}))
     if cache is not None:
         cache.save("evidence", evidence)
     return evidence
@@ -916,7 +908,6 @@ async def run_recognizer(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, An
         evidence_task = asyncio.get_running_loop().run_in_executor(
             _evidence_collector_executor, copy_context().run,
             _collect_task_evidence, path, row["title"], duration, cache,
-            str(row["source_language"] or "zh") if "source_language" in row.keys() else "zh",
         )
 
         async def prepare_media() -> dict[str, Any]:
@@ -1624,32 +1615,7 @@ async def process_task(task_id: str) -> None:
             # Stop before persistence. Failed rechecks use the existing snapshot
             # restore path; initial failures refund once without paid retries.
             raise ArkError("未生成可用剧本正文，已停止交付并保留原始视频和已有版本。", provider_code="empty_screenplay")
-        task = task_row(task_id)
-        source_language = task.get("sourceLanguage", "zh")
-        output_language = task.get("outputLanguage", "zh")
-        mark_task_stage(task_id, status="running", stage="exporting", progress_percent=91,
-                        message="正在生成所选语言的交付剧本")
-        try:
-            delivery, translation_usage = await _run_model_call(
-                translate_delivery, script, source_language, output_language,
-            )
-        except Exception as exc:
-            prior_usage = usage if isinstance(usage, dict) else {}
-            error_usage = getattr(exc, "usage", {})
-            if not isinstance(error_usage, dict):
-                error_usage = {}
-            exc.usage = _merge_usage(prior_usage, error_usage)
-            if isinstance(exc, ArkError) and not exc.provider_code.startswith("translation_"):
-                exc.provider_code = "translation_provider_error"
-            raise
-        usage = _merge_usage(usage, {**translation_usage, "calls": []})
-        quality["translation"] = {
-            "sourceLanguage": source_language,
-            "outputLanguage": output_language,
-            "provider": translation_usage.get("provider"),
-            "model": translation_usage.get("model"),
-            "callCount": translation_usage.get("callCount", 0),
-        }
+        mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
         # Keep P0 findings visible and send unresolved candidates for owner review.
@@ -1677,7 +1643,6 @@ async def process_task(task_id: str) -> None:
             stage=final_stage,
             progress_percent=100,
             result_json=json.dumps(script, ensure_ascii=False),
-            delivery_json=json.dumps(delivery, ensure_ascii=False),
             quality_json=json.dumps(quality, ensure_ascii=False),
             evidence_json=evidence_json(evidence),
             provider=usage.get("provider", "ark" if ARK_API_KEYS else "local-fallback"),

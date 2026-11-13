@@ -112,8 +112,7 @@ def user_result(script: Any) -> Any:
 def user_task(task: dict[str, Any]) -> dict[str, Any]:
     fields = {"id", "title", "status", "stage", "fileName", "episodeNumber", "fileSize", "mimeType",
               "durationSec", "estimatedMinutes", "creditsUsed", "progressPercent", "stageProgressPercent",
-              "createdAt", "updatedAt", "completedAt", "batchId", "batchTitle", "batchIndex", "batchTotal",
-              "sourceLanguage", "outputLanguage"}
+              "createdAt", "updatedAt", "completedAt", "batchId", "batchTitle", "batchIndex", "batchTotal"}
     result = {key: value for key, value in task.items() if key in fields}
     status = task.get("status")
     result["status"] = status if status in {"queued", "running", "review", "done", "failed"} else "running"
@@ -142,15 +141,12 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
     # delivery that bypasses the P0 gate. Only completed and explicit review
     # states may return screenplay content to the owner.
     result["result"] = (
-        user_result(task.get("delivery") or task.get("result"))
+        user_result(task.get("result"))
         if task.get("status") in {"done", "review"}
         else None
     )
-    if isinstance(result["result"], dict):
-        result["result"]["outputLanguage"] = task.get("outputLanguage", "zh")
-    delivered = task.get("delivery") or task.get("result")
-    if task.get("status") == "done" and delivered is not None:
-        result["downloadable"] = has_screenplay_body(delivered)
+    if task.get("status") == "done" and task.get("result") is not None:
+        result["downloadable"] = has_screenplay_body(task.get("result"))
     if task.get("error"):
         result["error"] = "本次未能生成可用剧本，请重试或联系管理员查看处理详情。"
     if "events" in task:

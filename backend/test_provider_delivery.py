@@ -473,7 +473,7 @@ class ProviderDeliveryTests(unittest.TestCase):
     def test_batch_continuity_waits_until_terminal_and_persists_script_labels(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
-        connection.execute("CREATE TABLE tasks(id, batch_id, batch_index, created_at, status, result_json, delivery_json, updated_at)")
+        connection.execute("CREATE TABLE tasks(id, batch_id, batch_index, created_at, status, result_json, updated_at)")
         first = {
             "characters": ["晓晨"],
             "characterProfiles": [{"name": "晓晨", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}],
@@ -484,9 +484,9 @@ class ProviderDeliveryTests(unittest.TestCase):
             "characterProfiles": [{"name": "黑衣男子", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}],
             "scenes": [{"characters": ["黑衣男子"], "blocks": [{"type": "dialogue", "speaker": "黑衣男子", "text": "我回来了"}]}],
         }
-        connection.executemany("INSERT INTO tasks(id,batch_id,batch_index,created_at,status,result_json,delivery_json) VALUES(?,?,?,?,?,?,?)", [
-            ("one", "batch", 1, "1", "done", json.dumps(first, ensure_ascii=False), json.dumps(first, ensure_ascii=False)),
-            ("two", "batch", 2, "2", "running", json.dumps(later, ensure_ascii=False), json.dumps(later, ensure_ascii=False)),
+        connection.executemany("INSERT INTO tasks(id,batch_id,batch_index,created_at,status,result_json) VALUES(?,?,?,?,?,?)", [
+            ("one", "batch", 1, "1", "done", json.dumps(first, ensure_ascii=False)),
+            ("two", "batch", 2, "2", "running", json.dumps(later, ensure_ascii=False)),
         ])
 
         with patch.object(task_store, "db", return_value=connection):
@@ -498,10 +498,6 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual(saved["characters"], ["晓晨"])
         self.assertEqual(saved["scenes"][0]["blocks"][0]["speaker"], "晓晨")
         self.assertEqual(saved["scenes"][0]["blocks"][0]["text"], "我回来了")
-        delivered = json.loads(connection.execute("SELECT delivery_json FROM tasks WHERE id='two'").fetchone()[0])
-        self.assertEqual(delivered["characters"], ["晓晨"])
-        self.assertEqual(delivered["scenes"][0]["blocks"][0]["speaker"], "晓晨")
-        self.assertEqual(delivered["scenes"][0]["blocks"][0]["text"], "我回来了")
         connection.close()
 
     def test_indexed_review_preserves_all_other_dialogue_and_emotion(self):

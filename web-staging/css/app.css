@@ -776,7 +776,7 @@ a { color: inherit; text-decoration: none; }
 .script-paper { padding: 40px 48px 56px; border: 1px solid var(--line); border-radius: 8px; background: #fff; box-shadow: var(--shadow); }
 .script-title { padding-bottom: 26px; border-bottom: 2px solid var(--ink); }
 .script-title span { color: var(--gold-strong); font-size: 11px; font-weight: 800; }
-.script-title h2 { margin: 8px 0 0; font-size: 25px; white-space: pre-line; }
+.script-title h2 { margin: 8px 0 0; font-size: 25px; }
 .character-profiles { margin: 0 0 28px; padding: 14px 16px; border: 1px solid var(--line); background: #fbfbfa; }
 .character-profiles h3 { margin: 0 0 10px; font-size: 16px; }
 .character-profiles p { display: flex; gap: 12px; margin: 0 0 6px; color: #515763; font-size: 13px; line-height: 1.65; }
@@ -785,13 +785,13 @@ a { color: inherit; text-decoration: none; }
 .character-profiles span { flex: 1; }
 .scene { padding: 29px 0 5px; }
 .scene + .scene { margin-top: 18px; border-top: 1px solid #e8e5de; }
-.scene h3 { margin: 0 0 13px; font-size: 17px; white-space: pre-line; }
+.scene h3 { margin: 0 0 13px; font-size: 17px; }
 .scene-cast { margin: 0 0 13px; color: #4f5662; font-size: 13px; }
 .scene-location { margin: 0 0 8px; color: #4f5662; font-size: 13px; }
 .scene-summary { margin: 0 0 12px; color: #4f5662; font-size: 13px; line-height: 1.7; }
 .environment { margin: 0 0 18px; padding: 11px 13px; border-left: 3px solid var(--gold); color: #515763; background: #faf8f1; font-size: 13px; line-height: 1.7; }
 .environment b { margin-right: 10px; color: #8b6707; }
-.scene-blocks p { margin: 0 0 12px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; }
+.scene-blocks p { margin: 0 0 12px; font-size: 14px; line-height: 1.8; }
 .action-line { color: #3c424c; }
 .action-line i { margin-right: 9px; color: var(--gold-strong); font-style: normal; font-size: 10px; }
 .action-line em { margin-right: 8px; color: #7c5a00; font-size: 12px; font-style: normal; }

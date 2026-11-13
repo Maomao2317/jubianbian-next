@@ -30,7 +30,7 @@
     authCooldownTimer: null,
     authEmail: "",
     menuTaskId: "",
-    upload: { files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "", sourceLanguage: "", outputLanguage: "" },
+    upload: { files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "" },
     pollTimer: null,
     rateLimitNotified: false,
     adminTab: "overview",
@@ -706,15 +706,8 @@
     </div>`;
   }
 
-  function scriptPreview(script, outputLanguage = null) {
+  function scriptPreview(script) {
     if (!script) return "";
-    outputLanguage = outputLanguage || script.outputLanguage || "zh";
-    const english = outputLanguage === "en";
-    const bilingual = outputLanguage === "both";
-    const label = (chinese, englishLabel) => bilingual
-      ? `${chinese} / ${englishLabel}`
-      : english ? englishLabel : chinese;
-    const scriptText = (value) => escapeHtml(value || "").replace(/\r?\n/g, "<br>");
     const sceneCounts = new Map();
     // Keep caption evidence in task data, but do not print an empty heading
     // when every block was suppressed. Match screenplay export numbering.
@@ -742,48 +735,39 @@
       const time = "";
       if (block.type === "dialogue") {
         const performance = block.performance ? `<em>${escapeHtml(block.performance)}</em>` : "";
-        const defaultSpeaker = english ? "Unknown speaker" : "未知说话人";
-        const speaker = english ? ({ "人物": "Character", "未知说话人": "Unknown speaker", "旁白": "Narrator", "内心独白": "Inner monologue" }[block.speaker] || block.speaker || defaultSpeaker) : (block.speaker || defaultSpeaker);
-        return `<p class="dialogue">${time}<strong>${escapeHtml(speaker)}</strong>${performance}<span>${english ? ": " : "："}${scriptText(block.text)}</span></p>`;
+        return `<p class="dialogue">${time}<strong>${escapeHtml(block.speaker || "未知说话人")}</strong>${performance}<span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "vo" || block.type === "os") {
         const isOs = block.type === "os" || block.voKind === "os" || block.isInnerMonologue;
-        const genericSpeakers = ["旁白", "未知说话人", "OS", "内心独白"];
-        const speaker = block.speaker && !genericSpeakers.includes(block.speaker)
-          ? `${escapeHtml(block.speaker)}${english ? ` (${isOs ? "OS" : "VO"})` : ` ${isOs ? "OS" : "VO"}`}`
+        const speaker = block.speaker && !["旁白", "未知说话人", "OS", "内心独白"].includes(block.speaker)
+          ? `${escapeHtml(block.speaker)} ${isOs ? "OS" : "VO"}`
           : (isOs ? "OS" : "VO");
-        return `<p class="os-line">${time}<strong>${speaker}</strong><span>${english ? ": " : "："}${scriptText(block.text)}</span></p>`;
+        return `<p class="os-line">${time}<strong>${speaker}</strong><span>：${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "sound") {
-        const soundLabel = block.category === "music" ? label("背景音乐", "Music")
-          : block.category === "ambience" ? label("环境音", "Ambience") : label("音效", "SFX");
-        return `<p class="sound-line">${time}<strong>${english ? `[${escapeHtml(soundLabel)}]` : `【${escapeHtml(soundLabel)}】`}</strong><span>${scriptText(block.text)}</span></p>`;
+        const label = block.category === "music" ? "背景音乐" : block.category === "ambience" ? "环境声" : "音效";
+        return `<p class="sound-line">${time}<strong>【${label}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "emotion") {
-        const emotionLabel = label("情绪", "Emotion");
-        return `<p class="action-line">${time}<strong>${english ? `[${escapeHtml(emotionLabel)}]` : `【${escapeHtml(emotionLabel)}】`}</strong><span>${scriptText(block.text)}</span></p>`;
+        return `<p class="action-line">${time}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
       }
       if (block.type === "screen_text") {
-        const screenLabel = label("字幕", "On-screen text");
-        return `<p class="sound-line">${time}<strong>${english ? `[${escapeHtml(screenLabel)}]` : `【${escapeHtml(screenLabel)}】`}</strong><span>${scriptText(block.text)}</span></p>`;
+        return `<p class="sound-line">${time}<strong>【字幕】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
       if (block.type === "transition") {
-        const transitionType = String(block.transitionType || "").toLowerCase();
-        const transitionLabels = { flashback: ["闪回", "Flashback"], return: ["闪出", "Return"], flash: ["闪白", "Flash"] };
-        const transitionPair = transitionLabels[transitionType] || [block.transitionType || "转场", "Transition"];
-        const transitionLabel = label(...transitionPair);
-        return `<p class="sound-line">${time}<strong>${english ? `[${escapeHtml(transitionLabel)}]` : `【${escapeHtml(transitionLabel)}】`}</strong><span>${scriptText(block.text)}</span></p>`;
+        const transitionLabel = { flashback: "闪回", return: "闪出", flash: "闪白" }[String(block.transitionType || "").toLowerCase()] || block.transitionType || "转场";
+        return `<p class="sound-line">${time}<strong>【${escapeHtml(transitionLabel)}】</strong><span>${escapeHtml(block.text || "")}</span></p>`;
       }
-      return `<p class="action-line">${time}<i>▲</i>${scriptText(block.text)}</p>`;
+      return `<p class="action-line">${time}<i>▲</i>${escapeHtml(block.text || "")}</p>`;
     }
     return `<div class="script-paper">
       <div class="script-title">
-        <span>${escapeHtml(label("镜头剧本", "Screenplay"))}</span>
+        <span>镜头剧本</span>
         <h2>${escapeHtml(script.title)}</h2>
       </div>
       ${visibleScenes.map((scene) => `<section class="scene">
         <h3>${escapeHtml(scene.heading)}</h3>
-        ${(scene.characters || []).length ? `<p class="scene-cast">${escapeHtml(label("出场人物", "Cast"))}: ${escapeHtml([...new Set(scene.characters || [])].join(english ? ", " : "、"))}</p>` : ""}
+        ${(scene.characters || []).length ? `<p class="scene-cast">出场人物：${escapeHtml([...new Set(scene.characters || [])].join("、"))}</p>` : ""}
         <div class="scene-blocks">${(scene.blocks || []).map(renderBlock).join("")}</div>
       </section>`).join("")}
     </div>`;
@@ -831,7 +815,7 @@
           ${task.status === "review" ? `<p class="quality-note quality-warning">请核对正文和以下提示，复核确认后即可下载。</p>${reviewIssuesMarkup(task)}` : ""}
         </div>
       </aside>
-      <div class="result-main">${scriptPreview(task.result, task.outputLanguage)}</div>
+      <div class="result-main">${scriptPreview(task.result)}</div>
     </div>`;
   }
 
@@ -958,7 +942,7 @@
         ? `视频总时长 ${formatDuration(upload.durationSec)}`
         : "";
     const queueBlocked = Boolean(state.queue.blocked);
-    const canSubmit = upload.sourceLanguage && upload.outputLanguage && upload.files.length && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient && !queueBlocked;
+    const canSubmit = upload.files.length && upload.durationSec && !upload.reading && !upload.error && !overDuration && !insufficient && !queueBlocked;
     const fileBlock = upload.files.length ? `<div class="selected-file">
       <div class="file-thumb"><span></span></div>
       <div><strong>${escapeHtml(upload.file.name)}</strong><p>${formatSize(upload.file.size)} · ${upload.reading ? "正在读取时长..." : formatDuration(upload.durationSec)}</p></div>
@@ -985,23 +969,6 @@
           <input type="text" id="taskTitle" placeholder="默认使用视频文件名" />
         </div>
         <div class="field">
-          <label for="sourceLanguage">原剧语言</label>
-          <select id="sourceLanguage" data-upload-language="sourceLanguage" required>
-            <option value="" ${upload.sourceLanguage ? "" : "selected"} disabled>请选择原剧语言</option>
-            <option value="zh" ${upload.sourceLanguage === "zh" ? "selected" : ""}>中文剧</option>
-            <option value="en" ${upload.sourceLanguage === "en" ? "selected" : ""}>英文剧</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="outputLanguage">生成剧本语言</label>
-          <select id="outputLanguage" data-upload-language="outputLanguage" ${upload.sourceLanguage ? "" : "disabled"} required>
-            <option value="" ${upload.outputLanguage ? "" : "selected"} disabled>请选择交付语言</option>
-            <option value="zh" ${upload.outputLanguage === "zh" ? "selected" : ""}>中文</option>
-            <option value="en" ${upload.outputLanguage === "en" ? "selected" : ""}>英文</option>
-            <option value="both" ${upload.outputLanguage === "both" ? "selected" : ""}>中英文双语</option>
-          </select>
-        </div>
-        <div class="field">
           <label>视频文件</label>
           <div class="drop ${upload.file ? "has-file" : ""}" id="dropzone">
             ${upload.files.length ? selectedFilesMarkup(upload) : fileBlock}
@@ -1021,7 +988,7 @@
   }
 
   function openCreateModal() {
-    state.upload = { files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "", sourceLanguage: "", outputLanguage: "" };
+    state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" };
     $("#modalRoot").innerHTML = createModalMarkup();
   }
 
@@ -1097,20 +1064,19 @@
 
   async function setUploadFile(file) {
     if (!file) return;
-    const languages = { sourceLanguage: state.upload.sourceLanguage || "", outputLanguage: state.upload.outputLanguage || "" };
     const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
     const maxBytes = cfg.upload.maxSizeMB * 1024 * 1024;
     if (!/\.mp4$/i.test(file.name)) {
-      state.upload = { ...languages, file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "目前只支持 MP4 视频" };
+      state.upload = { file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "目前只支持 MP4 视频" };
       rerenderCreateModal(titleValue);
       return;
     }
     if (file.size > maxBytes) {
-      state.upload = { ...languages, file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: `文件超过 ${cfg.upload.maxSizeMB} MB` };
+      state.upload = { file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: `文件超过 ${cfg.upload.maxSizeMB} MB` };
       rerenderCreateModal(titleValue);
       return;
     }
-    state.upload = { ...languages, file, durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
+    state.upload = { file, durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
     rerenderCreateModal(titleValue);
     try {
       state.upload.durationSec = await readVideoDuration(file);
@@ -1134,10 +1100,10 @@
     const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
     const maxBytes = cfg.upload.maxSizeMB * 1024 * 1024;
     if (!files.length) return;
-    if (files.length > cfg.upload.maxFiles) { state.upload = { ...state.upload, files: existing, file: existing[0] || null, durationSec: state.upload.durationSec || 0, estimatedMinutes: state.upload.estimatedMinutes || 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
+    if (files.length > cfg.upload.maxFiles) { state.upload = { files: existing, file: existing[0] || null, durations: state.upload.durations || [], durationSec: state.upload.durationSec || 0, estimatedMinutes: state.upload.estimatedMinutes || 0, reading: false, error: `最多选择 ${cfg.upload.maxFiles} 个视频` }; rerenderCreateModal(titleValue); return; }
     const invalid = files.find((file) => !/\.mp4$/i.test(file.name) || file.size > maxBytes);
-    if (invalid) { state.upload = { ...state.upload, files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
-    const upload = { ...state.upload, files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
+    if (invalid) { state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: !/\.mp4$/i.test(invalid.name) ? "目前只支持 MP4 视频" : `${invalid.name} 超过 ${cfg.upload.maxSizeMB} MB` }; rerenderCreateModal(titleValue); return; }
+    const upload = { files, file: files[0], durationSec: 0, estimatedMinutes: 0, reading: true, error: "" };
     state.upload = upload;
     rerenderCreateModal(titleValue);
     try {
@@ -1696,7 +1662,6 @@
       if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; }
       const files = state.upload.files || (state.upload.file ? [state.upload.file] : []);
       const title = $("#taskTitle") ? $("#taskTitle").value.trim() : "";
-      if (!state.upload.sourceLanguage || !state.upload.outputLanguage) { toast("请先选择原剧语言和生成语言", "warning"); return; }
       if (!files.length || !state.upload.durationSec) return;
       state.upload.active = true;
       actionElement.disabled = true;
@@ -1705,8 +1670,6 @@
         const task = await api.createTask({
           title,
           files,
-          sourceLanguage: state.upload.sourceLanguage,
-          outputLanguage: state.upload.outputLanguage,
           durations: state.upload.durations || [],
           durationSec: Math.round(state.upload.durationSec),
           estimatedMinutes: uploadEstimate(),
@@ -1750,13 +1713,6 @@
   });
 
   document.addEventListener("change", (event) => {
-    if (event.target.matches?.("[data-upload-language]")) {
-      const titleValue = $("#taskTitle") ? $("#taskTitle").value : "";
-      state.upload[event.target.dataset.uploadLanguage] = event.target.value;
-      if (event.target.dataset.uploadLanguage === "sourceLanguage") state.upload.outputLanguage = "";
-      rerenderCreateModal(titleValue);
-      return;
-    }
     if (event.target.id !== "fileInput") return;
     if (state.upload.active) { toast("视频正在上传，请等待上传完成", "warning"); return; }
     setUploadFiles(event.target.files);

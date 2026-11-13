@@ -10,7 +10,6 @@ const appSource = fs.readFileSync(path.join(__dirname, "js/app.js"), "utf8");
 async function uploadBatch(count, behavior = {}) {
   const files = Array.from({ length: count }, (_, index) => ({ name: `${index + 1}.mp4`, size: 1024, type: "video/mp4" }));
   const puts = new Map(), completes = new Map(), aborts = [];
-  let reservationCalls = 0, reservationPayload;
   let active = 0, peak = 0;
   const delays = [];
   const context = vm.createContext({
@@ -29,14 +28,10 @@ async function uploadBatch(count, behavior = {}) {
   });
   vm.runInContext(apiSource, context);
   const api = context.window.AppAPI;
-  api.request = async (url, options = {}) => {
-    if (url.endsWith("/uploads/batch")) {
-      reservationCalls += 1;
-      reservationPayload = JSON.parse(options.body || "{}");
-      return { uploads: files.map((file, index) => ({
-        inputIndex: index, url: `/object/${index}`, mode: "object", completeUrl: `/complete/${index}`, abortUrl: `/abort/${index}`,
-      })) };
-    }
+  api.request = async url => {
+    if (url.endsWith("/uploads/batch")) return { uploads: files.map((file, index) => ({
+      inputIndex: index, url: `/object/${index}`, mode: "object", completeUrl: `/complete/${index}`, abortUrl: `/abort/${index}`,
+    })) };
     const index = Number(url.split("/").at(-1));
     if (url.startsWith("/abort/")) { aborts.push(index); return { status: "failed" }; }
     completes.set(index, (completes.get(index) || 0) + 1);
@@ -51,13 +46,9 @@ async function uploadBatch(count, behavior = {}) {
   };
   let error;
   const progress = [];
-  try {
-    await api.createTask({ files, durations: files.map(() => 10), onProgress: n => progress.push(n),
-      sourceLanguage: Object.hasOwn(behavior, "sourceLanguage") ? behavior.sourceLanguage : "zh",
-      outputLanguage: Object.hasOwn(behavior, "outputLanguage") ? behavior.outputLanguage : "en" });
-  }
+  try { await api.createTask({ files, durations: files.map(() => 10), onProgress: n => progress.push(n) }); }
   catch (failure) { error = failure; }
-  return { puts, completes, aborts, peak, progress, error, delays, reservationCalls, reservationPayload };
+  return { puts, completes, aborts, peak, progress, error, delays };
 }
 
 async function metadata() {
@@ -131,11 +122,6 @@ async function metadata() {
   assert.equal(forbidden.puts.get(0), 1, "deterministic 4xx must not waste bandwidth retrying");
   assert.equal(forbidden.aborts.length, 1);
   assert.equal(forbidden.error.failedCount, 1);
-  assert.equal(forbidden.reservationPayload.sourceLanguage, "zh");
-  assert.equal(forbidden.reservationPayload.outputLanguage, "en");
-  const missingLanguages = await uploadBatch(1, { sourceLanguage: "", outputLanguage: "" });
-  assert.match(missingLanguages.error.message, /选择原剧语言和生成语言/);
-  assert.equal(missingLanguages.reservationCalls, 0, "missing languages must be rejected before reserving uploads");
   await metadata();
   console.log("100/999 batch upload, retry isolation, metadata bounds/cache checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

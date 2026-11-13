@@ -3247,19 +3247,10 @@ def screenplay_output_scenes(script: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def script_to_markdown(task: dict[str, Any]) -> str:
-    script = task.get("delivery") or task.get("result") or {}
-    output_language = task.get("outputLanguage", "zh")
-    english = output_language == "en"
-    bilingual = output_language == "both"
-
-    def localized_label(chinese: str, english_label: str) -> str:
-        if bilingual:
-            return f"{chinese} / {english_label}"
-        return english_label if english else chinese
-
+    script = task.get("result") or {}
     if isinstance(script, dict) and script.get("scenes"):
         repaired = deepcopy(script)
-        if not task.get("delivery") and restore_spoken_subtitles(repaired, task.get("evidence")):
+        if restore_spoken_subtitles(repaired, task.get("evidence")):
             script = normalize_script(repaired, script.get("title") or task["title"])
     lines = [f"# {script.get('title') or task['title']}", ""]
 
@@ -3292,9 +3283,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         if not text:
             return ""
         text = text.strip("（）() ")
-        if not text:
-            return ""
-        return f"({text})" if english else f"（{text}）"
+        return f"（{text}）" if text else ""
 
     def uncertainty(block: dict[str, Any], block_type: str) -> str:
         """Keep QA uncertainty out of the screenplay body.
@@ -3311,8 +3300,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
         lines.extend([scene.get("heading", "未标注场景"), ""])
         cast = [str(name).strip() for name in (scene.get("characters") or []) if str(name).strip()]
         if cast:
-            separator = ", " if english else "、"
-            lines.append(f"{localized_label('出场人物', 'Cast')}: {separator.join(dict.fromkeys(cast))}")
+            lines.append(f"出场人物：{'、'.join(dict.fromkeys(cast))}")
             lines.append("")
         for block in scene.get("blocks", []):
             if block.get("suppressInOutput"):
@@ -3321,68 +3309,32 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             if block_type == "dialogue":
                 warning = uncertainty(block, "dialogue")
                 acting = parenthetical(block.get("performance"))
-                speaker = block.get("speaker") or ("Character" if english else "人物")
-                if english:
-                    speaker = {
-                        "人物": "Character", "未知说话人": "Unknown speaker",
-                        "旁白": "Narrator", "内心独白": "Inner monologue",
-                    }.get(speaker, speaker)
-                separator = ": " if english else "："
-                lines.append(f"{speaker}{warning}{acting}{separator}{dialogue_text(block.get('text', ''))}")
+                lines.append(f"{block.get('speaker', '人物')}{warning}{acting}：{dialogue_text(block.get('text', ''))}")
             elif block_type in {"vo", "os"}:
                 inferred = uncertainty(block, "vo")
                 speaker = block.get("speaker") or "旁白"
                 vo_kind = block.get("voKind")
-                is_os = vo_kind == "os" or block.get("isInnerMonologue") or block_type == "os"
-                if english:
-                    generic_speakers = {"旁白", "未知说话人", "OS", "内心独白"}
-                    if is_os:
-                        speaker_label = "OS" if speaker in generic_speakers else f"{speaker} (OS)"
-                    else:
-                        speaker_label = "VO" if speaker in generic_speakers else f"{speaker} (VO)"
-                    separator = ": "
+                if vo_kind == "os" or block.get("isInnerMonologue") or block_type == "os":
+                    label = "OS" if speaker in {"旁白", "未知说话人", "OS", "内心独白"} else f"{speaker}（OS）"
                 else:
-                    if is_os:
-                        speaker_label = "OS" if speaker in {"旁白", "未知说话人", "OS", "内心独白"} else f"{speaker}（OS）"
-                    else:
-                        speaker_label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker}（VO）"
-                    separator = "："
-                lines.append(f"{speaker_label}{inferred}{separator}{dialogue_text(block.get('text', ''))}")
+                    label = "VO" if speaker in {"旁白", "未知说话人", "OS"} else f"{speaker}（VO）"
+                lines.append(f"{label}{inferred}：{dialogue_text(block.get('text', ''))}")
             elif block_type == "sound":
-                category = localized_label("环境音", "Ambience") if block.get("category") == "ambience" else localized_label("音效", "SFX")
-                if english:
-                    lines.append(f"{uncertainty(block, 'sound')}[{category}: {block.get('text', '')}]")
-                else:
-                    lines.append(f"{uncertainty(block, 'sound')}【{category}：{block.get('text', '')}】")
+                category = "环境音" if block.get("category") == "ambience" else "音效"
+                lines.append(f"{uncertainty(block, 'sound')}【{category}：{block.get('text', '')}】")
             elif block_type == "emotion":
-                emotion = localized_label("情绪", "Emotion")
-                if english:
-                    lines.append(f"[{emotion}: {block.get('text', '')}]")
-                else:
-                    lines.append(f"【{emotion}：{block.get('text', '')}】")
+                lines.append(f"【情绪：{block.get('text', '')}】")
             elif block_type == "screen_text":
-                screen_text = localized_label("字幕", "On-screen text")
-                if english:
-                    lines.append(f"{uncertainty(block, 'screen_text')}[{screen_text}: {block.get('text', '')}]")
-                else:
-                    lines.append(f"{uncertainty(block, 'screen_text')}【{screen_text}：{block.get('text', '')}】")
+                lines.append(f"{uncertainty(block, 'screen_text')}【字幕：{block.get('text', '')}】")
             elif block_type == "transition":
-                transition_type = str(block.get("transitionType") or "").strip().lower()
-                transition_names = {
-                    "flashback": ("闪回", "Flashback"),
-                    "return": ("闪出", "Return"),
-                    "flash": ("闪白", "Flash"),
-                }
-                chinese_transition, english_transition = transition_names.get(
-                    transition_type, (block.get("transitionType") or "转场", "Transition")
-                )
-                transition_type = localized_label(str(chinese_transition), str(english_transition))
+                transition_type = {
+                    "flashback": "闪回",
+                    "return": "闪出",
+                    "flash": "闪白",
+                }.get(str(block.get("transitionType") or "").strip().lower(), block.get("transitionType") or "转场")
                 text = str(block.get("text") or "").strip()
                 marker = uncertainty(block, "transition")
-                if english:
-                    lines.append(f"{marker}[{transition_type}: {text}]" if text else f"{marker}[{transition_type}]")
-                else:
-                    lines.append(f"{marker}【{transition_type}：{text}】" if text else f"{marker}【{transition_type}】")
+                lines.append(f"{marker}【{transition_type}：{text}】" if text else f"{marker}【{transition_type}】")
             else:
                 acting = parenthetical(block.get("performance") or block.get("emotion"))
                 lines.append(f"{uncertainty(block, 'action')}▲ {block.get('text', '')}{acting}")
