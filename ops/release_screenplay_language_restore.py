@@ -56,6 +56,10 @@ def verify_config(old, new, image, build):
     assert adjusted == old, "Unrelated production Compose configuration changed"
 
 
+def assert_known_runtime_digest(path, actual, known):
+    assert actual in known, "Runtime differs from known revisions: " + path
+
+
 def verify_release_content(base):
     app = (base / "web-staging/js/app.js").read_text(encoding="utf-8")
     api = (base / "web-staging/js/api.js").read_text(encoding="utf-8")
@@ -100,9 +104,13 @@ def prepare(commit, build, base):
     common.health(PORT, "production", BASE_BUILD)
     common.health(STAGING_PORT, "staging", STAGING_BUILD)
 
-    common.verify_files(PROJECT, PORT, {
-        path: common.digest(common.git("show", BASELINE + ":" + path)) for path in APP_FILES
-    })
+    for path in APP_FILES:
+        live = common.output(["docker", "exec", PROJECT + "-app-1", "cat", "/app/" + path])
+        known = {
+            common.digest(common.git("show", revision + ":" + path))
+            for revision in (BASELINE, commit)
+        }
+        assert_known_runtime_digest(path, common.digest(live), known)
     translation = common.output(["docker", "exec", PROJECT + "-app-1", "cat", "/app/backend/app/translation.py"])
     assert common.digest(translation) == common.digest(common.git("show", BASELINE + ":backend/app/translation.py"))
 

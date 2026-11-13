@@ -41,6 +41,11 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             release.verify_config(old, new, "new-image", "new")
 
+    def test_runtime_guard_accepts_only_baseline_or_pushed_file_content(self):
+        release.assert_known_runtime_digest("backend/app/auth_store.py", "pushed", {"baseline", "pushed"})
+        with self.assertRaises(AssertionError):
+            release.assert_known_runtime_digest("backend/app/auth_store.py", "unknown", {"baseline", "pushed"})
+
     def test_content_guard_rejects_language_and_campaign_regressions(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
