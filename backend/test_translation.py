@@ -1,4 +1,7 @@
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
 from app.errors import ArkError
 from app.providers import ark_prompt
@@ -155,6 +158,41 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(usage["callCount"], 5)
         self.assertEqual(usage["total_tokens"], 25)
         self.assertTrue(all(block["text"].startswith("EN ") for block in delivery["scenes"][0]["blocks"]))
+
+    def test_provider_translation_chunks_run_concurrently_and_preserve_order(self):
+        original = sample_script()
+        original["scenes"][0]["blocks"] = [
+            {"type": "dialogue", "text": f"台词 {index}"} for index in range(95)
+        ]
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def translate(items, source, target):
+            nonlocal active, max_active
+            self.assertEqual((source, target), ("zh", "en"))
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.02)
+                return [{"id": item["id"], "text": f"EN {item['text']}"} for item in items], {
+                    "model": "doubao-lite", "input_tokens": 2, "output_tokens": 3,
+                    "total_tokens": 5, "api_cost_rmb": 0.001,
+                }
+            finally:
+                with lock:
+                    active -= 1
+
+        with patch("app.translation.ark_translate_items", side_effect=translate):
+            delivery, usage = translate_delivery(original, "zh", "en")
+
+        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(usage["callCount"], 4)
+        self.assertEqual(
+            [block["text"] for block in delivery["scenes"][0]["blocks"][:3]],
+            ["EN 台词 0", "EN 台词 1", "EN 台词 2"],
+        )
 
     def test_english_source_prompt_requires_original_language_transcription(self):
         prompt = ark_prompt("Episode", 60, {"sourceLanguage": "en", "sources": []})

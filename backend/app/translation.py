@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from typing import Any, Callable
 
@@ -81,15 +82,35 @@ def translate_delivery(
 
     translate = translate_items or ark_translate_items
     target = _target_language(source_language) if output_language == "both" else output_language
-    translations: dict[str, str] = {}
-    usages: list[dict[str, Any]] = []
+    chunks: list[tuple[int, list[dict[str, str]]]] = []
     for offset in range(0, len(fields), 32):
         chunk = fields[offset:offset + 32]
-        items = [{"id": f"t{offset + index}", "text": value}
-                 for index, (_owner, _key, value) in enumerate(chunk)]
-        returned, chunk_usages = _translate_chunk_with_retry(
-            translate, items, source_language, target,
-        )
+        chunks.append((
+            offset,
+            [{"id": f"t{offset + index}", "text": value}
+             for index, (_owner, _key, value) in enumerate(chunk)],
+        ))
+
+    # Each chunk is independent.  The real provider path can run a bounded
+    # number of requests concurrently, while injected test doubles stay
+    # serial so their call ordering remains deterministic.
+    if translate_items is None and len(chunks) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(chunks)), thread_name_prefix="jbb-translation") as executor:
+            results = list(executor.map(
+                lambda chunk: _translate_chunk_with_retry(
+                    translate, chunk[1], source_language, target,
+                ),
+                chunks,
+            ))
+    else:
+        results = [
+            _translate_chunk_with_retry(translate, items, source_language, target)
+            for _offset, items in chunks
+        ]
+
+    translations: dict[str, str] = {}
+    usages: list[dict[str, Any]] = []
+    for (_offset, items), (returned, chunk_usages) in zip(chunks, results):
         expected = {item["id"] for item in items}
         received = [item.get("id") for item in returned if isinstance(item, dict)]
         if len(received) != len(expected) or set(received) != expected:
