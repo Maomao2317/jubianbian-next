@@ -19,9 +19,9 @@ from release_gpu_transport import stop_when_compute_idle
 BASELINE = "5856c8e4f8d73713dddee4bb6796373691485e95"
 BASE_BUILD = "carousel-removal-20261113-5856c8e"
 REF = "codex/script-translation-language"
-APP_FILES = ["web-staging/css/app.css"]
+APP_FILES = ["backend/app/processing.py", "web-staging/css/app.css"]
 NEW_FILES = set()
-CHANGED_TEST_FILES = []
+CHANGED_TEST_FILES = ["backend/test_process_task_translation.py"]
 FRONTEND_TEST_FILES = []
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",

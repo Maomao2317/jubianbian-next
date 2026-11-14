@@ -22,8 +22,10 @@ remains unchanged and continues to use its existing configuration.
 
 The Git source must also be distinguished from the runtime labels. This
 incremental release is based on the observed staging commit above and changes
-only `web-staging/css/app.css` plus release-support files. It does not replace
-the already-tested multilingual application files with another branch.
+only the bilingual delivery fix in `backend/app/processing.py`, the related
+regression test, `web-staging/css/app.css`, and release-support files. It does
+not replace the already-tested multilingual application files with another
+branch.
 
 No private values or business data are part of this release.
 
