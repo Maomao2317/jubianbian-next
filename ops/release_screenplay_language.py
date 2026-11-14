@@ -16,31 +16,13 @@ import sys
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
-BASELINE = "8fc2337b5b04b291f023dbe503d9f7b0901d1ae6"
-BASE_BUILD = "dialogue-recovery-20261112-8fc2337"
+BASELINE = "5856c8e4f8d73713dddee4bb6796373691485e95"
+BASE_BUILD = "carousel-removal-20261113-5856c8e"
 REF = "codex/script-translation-language"
-APP_FILES = [
-    "backend/app/" + name + ".py"
-    for name in (
-        "auth_store", "evidence", "processing", "providers", "rechecks", "routes",
-        "script", "task_store", "translation", "user_view",
-    )
-]
-APP_FILES += [
-    "web-staging/index.html",
-    "web-staging/css/app.css",
-    "web-staging/js/api.js",
-    "web-staging/js/app.js",
-]
-NEW_FILES = {"backend/app/translation.py"}
-CHANGED_TEST_FILES = [
-    "backend/test_" + name + ".py"
-    for name in ("large_batch", "provider_delivery", "rechecks", "route_queue", "translation", "upload_flow")
-]
-FRONTEND_TEST_FILES = [
-    "web-staging/test-batch-upload.cjs",
-    "web-staging/test-campaign-carousel.cjs",
-]
+APP_FILES = ["web-staging/css/app.css"]
+NEW_FILES = set()
+CHANGED_TEST_FILES = []
+FRONTEND_TEST_FILES = []
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",
     "ops/test_release_screenplay_language.py",

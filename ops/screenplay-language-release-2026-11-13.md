@@ -2,33 +2,28 @@
 
 ## Version comparison
 
-At 2026-11-13 13:57 China Standard Time, the public health endpoints reported
-`dialogue-recovery-20261112-8fc2337` for both environments. Their environment
-labels were respectively `staging` and `production`. The runtime build label is
-not a substitute for comparing environment configuration or source trees.
+At 2026-11-14, the staging container was observed at build
+`carousel-removal-20261113-5856c8e` from commit `5856c8e4f8d73713dddee4bb6796373691485e95`.
+That baseline already contains the multilingual UI and the expired Double11
+carousel removal. The runtime build label is not a substitute for comparing
+environment configuration or source trees.
 
 | Area | Staging (test) | Production |
 | --- | --- | --- |
-| Runtime identity at observation | `jubianbian-staging`, build `dialogue-recovery-20261112-8fc2337`, label `staging` | `jubianbian`, same build label, environment `production` |
+| Runtime identity at observation | `jubianbian-staging`, build `carousel-removal-20261113-5856c8e`, label `staging` | Production was not queried or changed |
 | Network | port `18000` | loopback port `8000`, served externally by production Caddy |
 | CORS | test origins | production origins |
-| Default provider | GLM | Ark |
+| Default provider | GLM before this release; Ark in this release | Not changed |
 | Data/config | staging data volume and its own server-side `fangzhou.env` | separate production data volume and its own server-side `fangzhou.env` |
 
 The staging release explicitly switches the test container to `JBB_VIDEO_PROVIDER=ark`
 because its `fangzhou.env` contains `ARK_API_KEY` but no `GLM_API_KEY`. Production
 remains unchanged and continues to use its existing configuration.
 
-The Git source must also be distinguished from the runtime labels. The observed
-staging baseline is commit `8fc2337b5b04b291f023dbe503d9f7b0901d1ae6`. The
-multilingual feature commit `d547cb102f949656c5f16db0676e932e04bc80b4` is its
-direct child and changes 20 application/test files (643 insertions, 99
-deletions) relative to that baseline. At this comparison, `origin/main` pointed
-to `46dffb3e94d5a1073b037e296a88500b54b513b4`; the cumulative tree difference
-between it and the staging baseline is 164 files (22,324 insertions, 2,400
-deletions). That cumulative branch difference is not a change count for the
-single `origin/main` commit. This release therefore uses the verified staging
-baseline and does not substitute the current `main` tree.
+The Git source must also be distinguished from the runtime labels. This
+incremental release is based on the observed staging commit above and changes
+only `web-staging/css/app.css` plus release-support files. It does not replace
+the already-tested multilingual application files with another branch.
 
 No private values or business data are part of this release.
 

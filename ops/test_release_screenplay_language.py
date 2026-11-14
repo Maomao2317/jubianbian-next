@@ -18,26 +18,13 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
             spec.loader.exec_module(cls.release)
 
     def test_release_is_pinned_to_the_observed_staging_baseline(self):
-        self.assertEqual(self.release.BASELINE, "8fc2337b5b04b291f023dbe503d9f7b0901d1ae6")
-        self.assertEqual(self.release.BASE_BUILD, "dialogue-recovery-20261112-8fc2337")
+        self.assertEqual(self.release.BASELINE, "5856c8e4f8d73713dddee4bb6796373691485e95")
+        self.assertEqual(self.release.BASE_BUILD, "carousel-removal-20261113-5856c8e")
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
         self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
-        self.assertEqual(set(self.release.APP_FILES) & {
-            "web-staging/index.html",
-            "web-staging/css/app.css",
-            "web-staging/js/api.js",
-            "web-staging/js/app.js",
-        }, {
-            "web-staging/index.html",
-            "web-staging/css/app.css",
-            "web-staging/js/api.js",
-            "web-staging/js/app.js",
-        })
-        self.assertEqual(set(self.release.FRONTEND_TEST_FILES), {
-            "web-staging/test-batch-upload.cjs",
-            "web-staging/test-campaign-carousel.cjs",
-        })
-        self.assertEqual(self.release.NEW_FILES, {"backend/app/translation.py"})
+        self.assertEqual(self.release.APP_FILES, ["web-staging/css/app.css"])
+        self.assertEqual(self.release.FRONTEND_TEST_FILES, [])
+        self.assertEqual(self.release.NEW_FILES, set())
         self.assertNotIn("docker-compose.yml", self.release.ALLOWED)
         self.assertNotIn("fangzhou.env", self.release.ALLOWED)
         self.assertNotIn("backend/app/config.py", self.release.ALLOWED)
