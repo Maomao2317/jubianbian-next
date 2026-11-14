@@ -19,7 +19,7 @@ from release_gpu_transport import stop_when_compute_idle
 BASELINE = "1df350c3ab7b4efd9799d520a31e03de8c8be760"
 BASE_BUILD = "screenplay-language-20261113-1df350c"
 REF = "codex/script-translation-language"
-APP_FILES = ["backend/app/processing.py", "web-staging/css/app.css"]
+APP_FILES = ["backend/app/processing.py"]
 NEW_FILES = set()
 CHANGED_TEST_FILES = ["backend/test_process_task_translation.py"]
 FRONTEND_TEST_FILES = []
