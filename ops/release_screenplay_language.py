@@ -21,7 +21,7 @@ BASE_BUILD = "screenplay-language-20261113-d1a70c5"
 REF = "codex/script-translation-language"
 APP_FILES = ["backend/app/providers.py"]
 NEW_FILES = set()
-CHANGED_TEST_FILES = ["backend/test_provider_delivery.py"]
+CHANGED_TEST_FILES = ["backend/test_ark_cost_control.py", "backend/test_provider_delivery.py"]
 FRONTEND_TEST_FILES = []
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",

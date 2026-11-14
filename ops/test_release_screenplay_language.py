@@ -23,7 +23,7 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
         self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
         self.assertEqual(self.release.APP_FILES, ["backend/app/providers.py"])
-        self.assertEqual(self.release.CHANGED_TEST_FILES, ["backend/test_provider_delivery.py"])
+        self.assertEqual(self.release.CHANGED_TEST_FILES, ["backend/test_ark_cost_control.py", "backend/test_provider_delivery.py"])
         self.assertEqual(self.release.FRONTEND_TEST_FILES, [])
         self.assertEqual(self.release.NEW_FILES, set())
         self.assertNotIn("docker-compose.yml", self.release.ALLOWED)
