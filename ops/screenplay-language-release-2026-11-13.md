@@ -3,14 +3,14 @@
 ## Version comparison
 
 At 2026-11-14, the staging container was observed at build
-`carousel-removal-20261113-5856c8e` from commit `5856c8e4f8d73713dddee4bb6796373691485e95`.
-That baseline already contains the multilingual UI and the expired Double11
-carousel removal. The runtime build label is not a substitute for comparing
-environment configuration or source trees.
+`screenplay-language-20261113-1df350c` from commit
+`1df350c3ab7b4efd9799d520a31e03de8c8be760`. The active staging compose also
+keeps the prior Double11 carousel-removal overlay. The runtime build label is
+not a substitute for comparing environment configuration or source trees.
 
 | Area | Staging (test) | Production |
 | --- | --- | --- |
-| Runtime identity at observation | `jubianbian-staging`, build `carousel-removal-20261113-5856c8e`, label `staging` | Production was not queried or changed |
+| Runtime identity at observation | `jubianbian-staging`, build `screenplay-language-20261113-1df350c`, label `staging` | Production was not queried or changed |
 | Network | port `18000` | loopback port `8000`, served externally by production Caddy |
 | CORS | test origins | production origins |
 | Default provider | GLM before this release; Ark in this release | Not changed |
@@ -33,7 +33,8 @@ No private values or business data are part of this release.
 
 This release deploys only to `jubianbian-staging` and has no production command.
 The release guard requires the live staging build and affected runtime file
-hashes to match the baseline above, and accepts only the explicit application,
+hashes to match the baseline above, accepts an already-active screenplay
+language overlay, and accepts only the explicit application,
 test, and release-support files. It builds an offline image overlay, runs the
 backend regression suite in an isolated container, refuses active compute or
 local uploads, and verifies the exact app image, changed files, environment,

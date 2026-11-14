@@ -16,8 +16,8 @@ import sys
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
-BASELINE = "5856c8e4f8d73713dddee4bb6796373691485e95"
-BASE_BUILD = "carousel-removal-20261113-5856c8e"
+BASELINE = "1df350c3ab7b4efd9799d520a31e03de8c8be760"
+BASE_BUILD = "screenplay-language-20261113-1df350c"
 REF = "codex/script-translation-language"
 APP_FILES = ["backend/app/processing.py", "web-staging/css/app.css"]
 NEW_FILES = set()
@@ -62,6 +62,11 @@ def parse_args(argv):
     if not re.fullmatch(r"[0-9a-f]{40}", argv[2]):
         raise ValueError("SHA must be a full lowercase Git commit id")
     return argv[1], argv[2]
+
+
+def staging_compose_files(root, files):
+    overlay = str(root / "release-screenplay-language.yml")
+    return files if overlay in files else files + [overlay]
 
 
 def test_files(commit):
@@ -155,8 +160,8 @@ def deploy(commit, build, base):
     assert all(Path(path).parent == root for path in files), "Unexpected staging Compose path"
     compose = common.compose_args(PROJECT, root, files)
     overlay = root / "release-screenplay-language.yml"
-    assert str(overlay) not in files, "A release overlay is already active"
-    new_compose = common.compose_args(PROJECT, root, files + [str(overlay)])
+    active_files = staging_compose_files(root, files)
+    new_compose = common.compose_args(PROJECT, root, active_files)
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))
 
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")

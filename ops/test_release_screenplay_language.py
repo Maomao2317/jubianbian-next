@@ -18,8 +18,8 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
             spec.loader.exec_module(cls.release)
 
     def test_release_is_pinned_to_the_observed_staging_baseline(self):
-        self.assertEqual(self.release.BASELINE, "5856c8e4f8d73713dddee4bb6796373691485e95")
-        self.assertEqual(self.release.BASE_BUILD, "carousel-removal-20261113-5856c8e")
+        self.assertEqual(self.release.BASELINE, "1df350c3ab7b4efd9799d520a31e03de8c8be760")
+        self.assertEqual(self.release.BASE_BUILD, "screenplay-language-20261113-1df350c")
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
         self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
         self.assertEqual(self.release.APP_FILES, ["backend/app/processing.py", "web-staging/css/app.css"])
@@ -84,6 +84,14 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
         new["services"]["app"]["environment"]["JBB_VIDEO_PROVIDER"] = "glm"
         with self.assertRaises(AssertionError):
             self.release.verify_config(old, new, "verified-image", "new-build")
+
+    def test_existing_screenplay_overlay_is_reused_once(self):
+        root = Path("/opt/jubianbian-staging")
+        overlay = str(root / "release-screenplay-language.yml")
+        base = [str(root / "docker-compose.yml"), str(root / "release-carousel-removal.yml")]
+        self.assertEqual(self.release.staging_compose_files(root, base), base + [overlay])
+        active = [base[0], overlay, base[1]]
+        self.assertEqual(self.release.staging_compose_files(root, active), active)
 
 
 if __name__ == "__main__":
