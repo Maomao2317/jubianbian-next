@@ -21,14 +21,21 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
         self.assertEqual(self.release.BASELINE, "8fc2337b5b04b291f023dbe503d9f7b0901d1ae6")
         self.assertEqual(self.release.BASE_BUILD, "dialogue-recovery-20261112-8fc2337")
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
+        self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
         self.assertEqual(set(self.release.APP_FILES) & {
+            "web-staging/index.html",
             "web-staging/css/app.css",
             "web-staging/js/api.js",
             "web-staging/js/app.js",
         }, {
+            "web-staging/index.html",
             "web-staging/css/app.css",
             "web-staging/js/api.js",
             "web-staging/js/app.js",
+        })
+        self.assertEqual(set(self.release.FRONTEND_TEST_FILES), {
+            "web-staging/test-batch-upload.cjs",
+            "web-staging/test-campaign-carousel.cjs",
         })
         self.assertEqual(self.release.NEW_FILES, {"backend/app/translation.py"})
         self.assertNotIn("docker-compose.yml", self.release.ALLOWED)
@@ -54,12 +61,14 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
             "environment": {
                 "JBB_ENVIRONMENT": "staging",
                 "JBB_BUILD_VERSION": "old-build",
+                "JBB_VIDEO_PROVIDER": "glm",
                 "GLM_API_KEY": "fixture-secret",
             },
         }}}
         new = deepcopy(old)
         new["services"]["app"]["image"] = "verified-image"
         new["services"]["app"]["environment"]["JBB_BUILD_VERSION"] = "new-build"
+        new["services"]["app"]["environment"]["JBB_VIDEO_PROVIDER"] = "ark"
         return old, new
 
     def test_only_image_and_build_label_may_change(self):
@@ -81,6 +90,12 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
                     app["environment"]["JBB_ENVIRONMENT"] = "production"
                 with self.assertRaises(AssertionError):
                     self.release.verify_config(old, new, "verified-image", "new-build")
+
+    def test_video_provider_must_be_ark_for_staging(self):
+        old, new = self.config()
+        new["services"]["app"]["environment"]["JBB_VIDEO_PROVIDER"] = "glm"
+        with self.assertRaises(AssertionError):
+            self.release.verify_config(old, new, "verified-image", "new-build")
 
 
 if __name__ == "__main__":

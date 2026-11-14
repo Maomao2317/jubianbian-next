@@ -27,6 +27,7 @@ APP_FILES = [
     )
 ]
 APP_FILES += [
+    "web-staging/index.html",
     "web-staging/css/app.css",
     "web-staging/js/api.js",
     "web-staging/js/app.js",
@@ -36,7 +37,10 @@ CHANGED_TEST_FILES = [
     "backend/test_" + name + ".py"
     for name in ("large_batch", "provider_delivery", "rechecks", "route_queue", "translation", "upload_flow")
 ]
-FRONTEND_TEST_FILES = ["web-staging/test-batch-upload.cjs"]
+FRONTEND_TEST_FILES = [
+    "web-staging/test-batch-upload.cjs",
+    "web-staging/test-campaign-carousel.cjs",
+]
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",
     "ops/test_release_screenplay_language.py",
@@ -46,6 +50,7 @@ ALLOWED = set(APP_FILES + CHANGED_TEST_FILES + FRONTEND_TEST_FILES + RELEASE_SUP
 PROJECT = "jubianbian-staging"
 PORT = 18000
 SITE = "staging"
+STAGING_ENVIRONMENT_OVERRIDES = {"JBB_VIDEO_PROVIDER": "ark"}
 
 
 def image_id(image):
@@ -60,6 +65,12 @@ def verify_config(old, new, image, build):
     assert app["environment"]["JBB_BUILD_VERSION"] == build
     app["image"] = old_app["image"]
     app["environment"]["JBB_BUILD_VERSION"] = old_app["environment"]["JBB_BUILD_VERSION"]
+    for key, value in STAGING_ENVIRONMENT_OVERRIDES.items():
+        assert app["environment"].get(key) == value
+        if key in old_app["environment"]:
+            app["environment"][key] = old_app["environment"][key]
+        else:
+            app["environment"].pop(key, None)
     assert adjusted == old, "Unrelated staging Compose configuration changed"
 
 
@@ -183,7 +194,10 @@ def deploy(commit, build, base):
     try:
         overlay.write_text(json.dumps({"services": {"app": {
             "image": record["image"],
-            "environment": {"JBB_BUILD_VERSION": build},
+            "environment": {
+                "JBB_BUILD_VERSION": build,
+                **STAGING_ENVIRONMENT_OVERRIDES,
+            },
         }}}, indent=2))
         config = json.loads(common.output(new_compose + ["config", "--format", "json"]))
         verify_config(old_config, config, record["image"], build)
@@ -199,7 +213,11 @@ def deploy(commit, build, base):
         record["health"] = common.health(PORT, SITE, build)
         current = common.inspect(PROJECT)
         assert current["Image"] == record["imageId"]
-        assert common.environment(current) == dict(old_env, JBB_BUILD_VERSION=build)
+        assert common.environment(current) == dict(
+            old_env,
+            JBB_BUILD_VERSION=build,
+            **STAGING_ENVIRONMENT_OVERRIDES,
+        )
         assert common.mounts(current) == common.mounts(before)
         assert current["HostConfig"]["PortBindings"] == before["HostConfig"]["PortBindings"]
         common.verify_files(PROJECT, PORT, record["files"])

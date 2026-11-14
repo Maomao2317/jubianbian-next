@@ -15,6 +15,10 @@ not a substitute for comparing environment configuration or source trees.
 | Default provider | GLM | Ark |
 | Data/config | staging data volume and its own server-side `fangzhou.env` | separate production data volume and its own server-side `fangzhou.env` |
 
+The staging release explicitly switches the test container to `JBB_VIDEO_PROVIDER=ark`
+because its `fangzhou.env` contains `ARK_API_KEY` but no `GLM_API_KEY`. Production
+remains unchanged and continues to use its existing configuration.
+
 The Git source must also be distinguished from the runtime labels. The observed
 staging baseline is commit `8fc2337b5b04b291f023dbe503d9f7b0901d1ae6`. The
 multilingual feature commit `d547cb102f949656c5f16db0676e932e04bc80b4` is its
