@@ -238,6 +238,15 @@ def _row_number(row: Any, key: str, default: float = 0.0) -> float:
     return float(value) if isinstance(value, (int, float)) else default
 
 
+def _task_language(row: Any, column: str, payload_key: str) -> str:
+    """Read language fields from either a SQLite row or an API-shaped mapping."""
+    try:
+        value = row[column]
+    except (KeyError, TypeError, IndexError):
+        value = row.get(payload_key) if isinstance(row, dict) else None
+    return str(value or "zh")
+
+
 def _is_turbo_model(model: Any) -> bool:
     return "turbo" in str(model or "").casefold()
 
@@ -1625,8 +1634,8 @@ async def process_task(task_id: str) -> None:
             # restore path; initial failures refund once without paid retries.
             raise ArkError("未生成可用剧本正文，已停止交付并保留原始视频和已有版本。", provider_code="empty_screenplay")
         task = task_row(task_id)
-        source_language = task.get("sourceLanguage", "zh")
-        output_language = task.get("outputLanguage", "zh")
+        source_language = _task_language(task, "source_language", "sourceLanguage")
+        output_language = _task_language(task, "output_language", "outputLanguage")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=91,
                         message="正在生成所选语言的交付剧本")
         try:
