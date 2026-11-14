@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -363,6 +364,68 @@ class ProviderDeliveryTests(unittest.TestCase):
             requests[1]["input"][0]["content"][0],
         )
         self.assertTrue(script["scenes"])
+
+    def test_output_limit_falls_back_to_segments_and_restores_source_timeline(self):
+        limit = ArkError("output limit", provider_code="output_limit")
+        windows = []
+
+        def recognize_range(path, title, duration, evidence, model, window, **kwargs):
+            windows.append(window)
+            local_script = {
+                "version": "1.0",
+                "title": title,
+                "characters": ["A"],
+                "scenes": [{
+                    "heading": "1-1 INT. ROOM",
+                    "location": "ROOM",
+                    "timeOfDay": "DAY",
+                    "interiorExterior": "INT",
+                    "blocks": [{
+                        "type": "dialogue", "speaker": "A", "text": f"line-{len(windows)}",
+                        "startSec": 1, "endSec": 3,
+                    }],
+                }],
+            }
+            return local_script, {"calls": [{"input_tokens": 10, "output_tokens": 20,
+                                               "total_tokens": 30}]}, window["startSec"], window["endSec"] - window["startSec"]
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as source, \
+             patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2), \
+             patch.object(providers, "ark_stream_response", side_effect=[limit, limit]), \
+             patch.object(providers, "ark_recognize_range", side_effect=recognize_range), \
+             patch.object(providers.shutil, "which", return_value="ffmpeg"):
+            script, usage = providers.ark_recognize(
+                Path(source.name), "episode", 131,
+                prepared_video={"api_key": "key", "video_url": "https://cos.test/video"},
+            )
+
+        self.assertEqual(len(windows), 2)
+        self.assertEqual([block["text"].startswith(prefix)
+                          for prefix, scene in zip(("line-1", "line-2"), script["scenes"])
+                          for block in scene["blocks"]], [True, True])
+        starts = [block["startSec"] for scene in script["scenes"] for block in scene["blocks"]]
+        self.assertEqual(starts, [1.0, 66.5])
+        self.assertEqual(usage["total_tokens"], 60)
+
+    def test_segment_merge_discards_only_overlapping_duplicate_blocks(self):
+        first = {
+            "version": "1.0", "title": "episode", "characters": ["A"],
+            "scenes": [{"heading": "1-1 INT. ROOM", "location": "ROOM", "blocks": [
+                {"type": "dialogue", "speaker": "A", "text": "same", "startSec": 61, "endSec": 64},
+            ]}],
+        }
+        second = {
+            "version": "1.0", "title": "episode", "characters": ["A"],
+            "scenes": [{"heading": "1-1 INT. ROOM", "location": "ROOM", "blocks": [
+                {"type": "dialogue", "speaker": "A", "text": "same", "startSec": 0, "endSec": 3},
+                {"type": "dialogue", "speaker": "A", "text": "later", "startSec": 5, "endSec": 7},
+            ]}],
+        }
+
+        merged = providers._ark_merge_segment_scripts("episode", [(first, 0), (second, 62)])
+        blocks = [block for scene in merged["scenes"] for block in scene["blocks"]]
+        self.assertEqual([(block["startSec"], block["text"].startswith("same")) for block in blocks],
+                         [(61.0, True), (67.0, False)])
 
     def test_review_ranges_have_both_bounds_and_private_source_never_enters_prompt(self):
         script = json.loads(self.completed()["output_text"])

@@ -1891,6 +1891,124 @@ def _recognize_review_clip(path: Path, title: str, duration: float, evidence: di
                              model, review_context=local, prepared_video=clip_prepared)
 
 
+def _ark_shift_segment_times(script: dict[str, Any], offset: float) -> dict[str, Any]:
+    shifted = deepcopy(script)
+    for scene in shifted.get("scenes") or []:
+        for key in ("startSec", "endSec"):
+            if type(scene.get(key)) in {int, float}:
+                scene[key] = round(float(scene[key]) + offset, 3)
+        for block in scene.get("blocks") or []:
+            for key in ("startSec", "endSec"):
+                if type(block.get(key)) in {int, float}:
+                    block[key] = round(float(block[key]) + offset, 3)
+    return shifted
+
+
+def _ark_segment_block_duplicate(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if (left.get("type") != right.get("type")
+            or left.get("speaker") != right.get("speaker")
+            or str(left.get("text") or "").strip() != str(right.get("text") or "").strip()):
+        return False
+    values = (left.get("startSec"), left.get("endSec"), right.get("startSec"), right.get("endSec"))
+    if not all(type(value) in {int, float} for value in values):
+        return False
+    left_start, left_end, right_start, right_end = map(float, values)
+    overlap = min(left_end, right_end) - max(left_start, right_start)
+    if overlap > 0:
+        return True
+    return abs(left_start - right_start) <= 0.75 and abs(left_end - right_end) <= 0.75
+
+
+def _ark_merge_segment_scripts(title: str, parts: list[tuple[dict[str, Any], float]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {
+        "version": "1.0",
+        "title": title,
+        "characters": [],
+        "characterProfiles": [],
+        "scenes": [],
+    }
+    for script, offset in parts:
+        merged["characters"].extend(script.get("characters") or [])
+        merged["characterProfiles"].extend(script.get("characterProfiles") or [])
+        shifted = _ark_shift_segment_times(script, offset)
+        for scene in shifted.get("scenes") or []:
+            scene = deepcopy(scene)
+            blocks = []
+            for block in sorted(scene.get("blocks") or [], key=lambda item: (
+                    float(item.get("startSec", 0)), float(item.get("endSec", item.get("startSec", 0))))):
+                if any(_ark_segment_block_duplicate(block, previous)
+                       for previous in (item for item in merged["scenes"] for item in item.get("blocks") or [])
+                       ):
+                    continue
+                blocks.append(block)
+            if blocks:
+                scene["blocks"] = blocks
+                merged["scenes"].append(scene)
+    return normalize_script(merged, title)
+
+
+def _ark_recognize_in_segments(
+    path: Path,
+    title: str,
+    duration_sec: float,
+    evidence: dict[str, Any],
+    model: str,
+    *,
+    segment_depth: int,
+    prior_records: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Recover an oversized full-video response with bounded physical clips."""
+    if not path.is_file() or not shutil.which("ffmpeg"):
+        raise ArkError("方舟识别输出达到长度上限，无法切分原视频", provider_code="output_limit")
+    max_span = 90.0 if segment_depth <= 1 else 45.0
+    min_span = 30.0 if segment_depth <= 1 else 20.0
+    span = min(max_span, max(min_span, duration_sec / 2.0))
+    windows = []
+    start = 0.0
+    while start < duration_sec:
+        end = min(duration_sec, start + span)
+        windows.append({"startSec": start, "endSec": end})
+        if end >= duration_sec:
+            break
+        start = end
+    logger.warning(
+        "provider_step provider=ark operation=segmented_recognition file=%s duration_sec=%.1f segments=%d depth=%d",
+        path.name, duration_sec, len(windows), segment_depth,
+    )
+    parts: list[tuple[dict[str, Any], float]] = []
+    records = list(prior_records)
+
+    def recognize_segment(segment_path, segment_title, segment_duration, segment_evidence, segment_model, *, prepared_video=None, **kwargs):
+        return ark_recognize(
+            segment_path,
+            segment_title,
+            segment_duration,
+            segment_evidence,
+            segment_model,
+            prepared_video=prepared_video,
+            _segment_depth=segment_depth + 1,
+        )
+
+    for window in windows:
+        try:
+            script, usage, offset, _ = ark_recognize_range(
+                path,
+                title,
+                duration_sec,
+                evidence,
+                model,
+                window,
+                recognize_fn=recognize_segment,
+            )
+        except ArkError as exc:
+            exc.usage = _ark_call_usage(records, model, "initial", duration_sec, ark_sampling_fps(duration_sec))
+            raise
+        parts.append((script, offset))
+        records.extend(usage.get("calls") or [])
+    merged = _ark_merge_segment_scripts(title, parts)
+    return merged, _ark_call_usage(records, model, "initial", duration_sec, ark_sampling_fps(duration_sec))
+
+
 def ark_recognize(
     path: Path,
     title: str,
@@ -1900,6 +2018,7 @@ def ark_recognize(
     *,
     review_context: dict[str, Any] | None = None,
     prepared_video: dict[str, Any] | None = None,
+    _segment_depth: int = 0,
 ) -> tuple[dict[str, Any], dict[str, int | None]]:
     selected_model = (model or ARK_MODEL).strip() or ARK_MODEL
     bounds = _review_clip_bounds(review_context, duration_sec) if review_context else None
@@ -2083,6 +2202,30 @@ def ark_recognize(
                 )
                 logger.info("provider_step provider=ark operation=compact_prompt_retry file=%s", path.name)
                 continue
+            if (not patch_review and exc.provider_code == "output_limit"
+                    and _segment_depth < 2 and duration_sec > 30):
+                segmented_script, segmented_usage = _ark_recognize_in_segments(
+                    path,
+                    title,
+                    duration_sec,
+                    evidence or {},
+                    selected_model,
+                    segment_depth=_segment_depth,
+                    prior_records=response_usages,
+                )
+                if audit_cache is not None:
+                    audit_cache.save("model_" + audit_kind, {
+                        "model": selected_model,
+                        "normalizedScript": segmented_script,
+                    })
+                logger.info(
+                    "provider_done provider=ark operation=video_recognize file=%s model=%s duration_ms=%.1f scenes=%s",
+                    path.name,
+                    selected_model,
+                    (time.perf_counter() - started) * 1000,
+                    len(segmented_script.get("scenes") or []),
+                )
+                return segmented_script, segmented_usage
             # A response with an ID is already recovered inside
             # ``ark_stream_response``.  Only retry creation when the socket
             # failed before an ID was received; reuse the prepared file so a
