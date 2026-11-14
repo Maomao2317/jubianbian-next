@@ -2089,6 +2089,12 @@ def ark_recognize(
             # transient disconnect never forces another upload/transcode.
             if (exc.provider_code not in {"transient_network", "invalid_script_response", "empty_screenplay"} and exc.status_code != 429) or attempt >= create_attempts:
                 raise
+            if (exc.provider_code in {"invalid_script_response", "empty_screenplay"}
+                    and (review_context or {}).get("requirePhysicalClip")):
+                # A physical review clip has already consumed its bounded
+                # review budget. Do not turn an invalid response into a
+                # second paid request; surface the provider error instead.
+                raise
             if exc.provider_code in {"invalid_script_response", "empty_screenplay"}:
                 # Regenerate once with the same source. Never turn a truncated
                 # prefix into an apparently successful empty screenplay.
