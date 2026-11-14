@@ -3,14 +3,14 @@
 ## Version comparison
 
 At 2026-11-14, the staging container was observed at build
-`screenplay-language-20261113-d1a70c5` from commit
-`d1a70c57014245db49273043b7b15ae201025443`. The active staging compose also
+`screenplay-language-20261113-8a22e0c` from commit
+`8a22e0c97c2d102ec8b99441658b9df06ab73aab`. The active staging compose also
 keeps the prior Double11 carousel-removal overlay. The runtime build label is
 not a substitute for comparing environment configuration or source trees.
 
 | Area | Staging (test) | Production |
 | --- | --- | --- |
-| Runtime identity at observation | `jubianbian-staging`, build `screenplay-language-20261113-1df350c`, label `staging` | Production was not queried or changed |
+| Runtime identity at observation | `jubianbian-staging`, build `screenplay-language-20261113-8a22e0c`, label `staging` | Production is only fingerprint-checked for no change |
 | Network | port `18000` | loopback port `8000`, served externally by production Caddy |
 | CORS | test origins | production origins |
 | Default provider | GLM before this release; Ark in this release | Not changed |
@@ -22,8 +22,8 @@ remains unchanged and continues to use its existing configuration.
 
 The Git source must also be distinguished from the runtime labels. This
 incremental release is based on the observed staging commit above and changes
-only Ark screenplay recognition retry logic in `backend/app/providers.py`, its
-regression test, and release-support files. The already-deployed bilingual
+only Ark output-limit retry logic in `backend/app/providers.py`, its regression
+test, and release-support files. The already-deployed bilingual
 delivery code and button styling remain in the staging baseline and are
 preserved unchanged by this release. It does not replace the tested
 multilingual application files with another branch.

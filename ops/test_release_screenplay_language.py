@@ -18,12 +18,12 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
             spec.loader.exec_module(cls.release)
 
     def test_release_is_pinned_to_the_observed_staging_baseline(self):
-        self.assertEqual(self.release.BASELINE, "d1a70c57014245db49273043b7b15ae201025443")
-        self.assertEqual(self.release.BASE_BUILD, "screenplay-language-20261113-d1a70c5")
+        self.assertEqual(self.release.BASELINE, "8a22e0c97c2d102ec8b99441658b9df06ab73aab")
+        self.assertEqual(self.release.BASE_BUILD, "screenplay-language-20261113-8a22e0c")
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
         self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
         self.assertEqual(self.release.APP_FILES, ["backend/app/providers.py"])
-        self.assertEqual(self.release.CHANGED_TEST_FILES, ["backend/test_ark_cost_control.py", "backend/test_provider_delivery.py"])
+        self.assertEqual(self.release.CHANGED_TEST_FILES, ["backend/test_ark_cost_control.py"])
         self.assertEqual(self.release.FRONTEND_TEST_FILES, [])
         self.assertEqual(self.release.NEW_FILES, set())
         self.assertNotIn("docker-compose.yml", self.release.ALLOWED)
