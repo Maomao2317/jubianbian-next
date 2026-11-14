@@ -9,6 +9,29 @@ from .errors import ArkError
 from .providers import ark_translate_items
 
 
+def _translate_chunk_with_retry(
+    translate: Callable[..., tuple[list[dict[str, str]], dict[str, Any]]],
+    items: list[dict[str, str]],
+    source_language: str,
+    target_language: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """Retry an oversized translation response with smaller request batches."""
+    try:
+        returned, usage = translate(items, source_language, target_language)
+        return returned, [usage if isinstance(usage, dict) else {}]
+    except ArkError as exc:
+        if exc.provider_code != "output_limit" or len(items) <= 1:
+            raise
+        midpoint = max(1, len(items) // 2)
+        left, left_usage = _translate_chunk_with_retry(
+            translate, items[:midpoint], source_language, target_language,
+        )
+        right, right_usage = _translate_chunk_with_retry(
+            translate, items[midpoint:], source_language, target_language,
+        )
+        return [*left, *right], [*left_usage, *right_usage]
+
+
 def _text_fields(script: dict[str, Any]) -> list[tuple[dict[str, Any], str, str]]:
     fields: list[tuple[dict[str, Any], str, str]] = []
     if isinstance(script.get("title"), str) and script["title"].strip():
@@ -64,7 +87,9 @@ def translate_delivery(
         chunk = fields[offset:offset + 32]
         items = [{"id": f"t{offset + index}", "text": value}
                  for index, (_owner, _key, value) in enumerate(chunk)]
-        returned, usage = translate(items, source_language, target)
+        returned, chunk_usages = _translate_chunk_with_retry(
+            translate, items, source_language, target,
+        )
         expected = {item["id"] for item in items}
         received = [item.get("id") for item in returned if isinstance(item, dict)]
         if len(received) != len(expected) or set(received) != expected:
@@ -74,7 +99,7 @@ def translate_delivery(
             if not isinstance(value, str) or not value.strip():
                 raise ArkError("豆包翻译结果为空，未开放交付", provider_code="translation_incomplete")
             translations[item["id"]] = value.strip()
-        usages.append(usage if isinstance(usage, dict) else {})
+        usages.extend(chunk_usages)
 
     for offset, (owner, key, original) in enumerate(fields):
         translated = translations[f"t{offset}"]

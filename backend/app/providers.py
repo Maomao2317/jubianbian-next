@@ -1354,7 +1354,10 @@ def ark_translate_items(
     )
     payload = {
         "model": model,
-        "max_output_tokens": 8192,
+        # Translation can contain every screenplay string in the batch. Keep
+        # the same bounded ceiling as recognition; the caller splits a batch
+        # further when the provider still reports an output-length limit.
+        "max_output_tokens": ARK_MAX_OUTPUT_TOKENS,
         "text": {"format": {"type": "json_schema", "name": "screenplay_translation",
                              "strict": True, "schema": schema}},
         "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],

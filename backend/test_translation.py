@@ -133,6 +133,29 @@ class TranslationTests(unittest.TestCase):
                     )
                 self.assertEqual(caught.exception.provider_code, "translation_incomplete")
 
+    def test_output_limit_splits_translation_batch_and_merges_usage(self):
+        original = sample_script()
+        original["scenes"][0]["blocks"] = [
+            {"type": "dialogue", "text": f"台词 {index}"} for index in range(3)
+        ]
+        calls = []
+
+        def translate(items, source, target):
+            calls.append(len(items))
+            if len(items) > 1:
+                raise ArkError("output limit", provider_code="output_limit")
+            return [{"id": items[0]["id"], "text": f"EN {items[0]['text']}"}], {
+                "model": "doubao-lite", "input_tokens": 2, "output_tokens": 3,
+                "total_tokens": 5, "api_cost_rmb": 0.001,
+            }
+
+        delivery, usage = translate_delivery(original, "zh", "en", translate_items=translate)
+
+        self.assertEqual(calls, [5, 2, 1, 1, 3, 1, 2, 1, 1])
+        self.assertEqual(usage["callCount"], 5)
+        self.assertEqual(usage["total_tokens"], 25)
+        self.assertTrue(all(block["text"].startswith("EN ") for block in delivery["scenes"][0]["blocks"]))
+
     def test_english_source_prompt_requires_original_language_transcription(self):
         prompt = ark_prompt("Episode", 60, {"sourceLanguage": "en", "sources": []})
         review_prompt = ark_prompt(
