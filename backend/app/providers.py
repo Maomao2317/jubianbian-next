@@ -1083,12 +1083,42 @@ def _review_evidence(evidence: dict[str, Any] | None, context: dict[str, Any]) -
     }
 
 
+def _ark_compact_prompt(
+    title: str,
+    duration_sec: float,
+    evidence: dict[str, Any] | None = None,
+) -> str:
+    """Reduce optional model prose after an initial screenplay hits the limit."""
+    source_language = (evidence or {}).get("sourceLanguage", "zh")
+    language_name = "English" if source_language == "en" else "Chinese"
+    evidence_fragment = evidence_summary(evidence)
+    return (
+        "Return one complete JSON screenplay object for the entire video. "
+        f"The source language is {language_name}; preserve every spoken line verbatim in text. "
+        f"Video title: {title}. Duration: {duration_sec:.1f} seconds. "
+        "Do not summarize, omit dialogue, subtitles, or timed events, and do not invent content. "
+        "Use the original timeline from 0 to the video duration. "
+        "Required top-level fields: version, title, characters, characterProfiles, scenes. "
+        "Each scene needs heading and blocks. Each block needs type, text, startSec, and endSec; "
+        "allowed types are action, dialogue, vo, sound, screen_text, and transition. "
+        "For dialogue/vo keep speaker and original wording; for action use concise, observable "
+        "descriptions (one or two sentences) and avoid repeating metadata. "
+        "Keep characterProfiles and optional fields minimal: include only evidence-based values and "
+        "omit empty fields. Return JSON only, with no Markdown or explanation.\n"
+        + evidence_fragment
+    )
+
+
 def ark_prompt(
     title: str,
     duration_sec: float,
     evidence: dict[str, Any] | None = None,
     review_context: dict[str, Any] | None = None,
+    *,
+    compact: bool = False,
 ) -> str:
+    if compact and not review_context:
+        return _ark_compact_prompt(title, duration_sec, evidence)
     evidence_fragment = evidence_summary(
         _review_evidence(evidence, review_context)
         if isinstance(review_context, dict) and review_context.get("scope") == "issue_patches"
@@ -2001,6 +2031,16 @@ def ark_recognize(
                 # Retry the prepared video with the original allowance.
                 response_payload["max_output_tokens"] = ARK_MAX_OUTPUT_TOKENS
                 logger.info("provider_step provider=ark operation=review_budget_retry file=%s", path.name)
+                continue
+            if (not patch_review and exc.provider_code == "output_limit"
+                    and attempt < create_attempts):
+                # A full screenplay can exhaust the output budget on optional
+                # metadata and verbose action prose. Reuse the prepared video
+                # once with a compact prompt before surfacing the failure.
+                response_payload["input"][0]["content"][1]["text"] = ark_prompt(
+                    title, duration_sec, evidence, compact=True,
+                )
+                logger.info("provider_step provider=ark operation=compact_prompt_retry file=%s", path.name)
                 continue
             # A response with an ID is already recovered inside
             # ``ark_stream_response``.  Only retry creation when the socket

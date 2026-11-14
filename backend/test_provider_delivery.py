@@ -328,6 +328,42 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual(usage["total_tokens"], 42)
         self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "今天，我决定，我要留下。")
 
+    def test_initial_output_limit_retries_with_compact_prompt_without_upload(self):
+        requests = []
+        limit = ArkError("output limit", provider_code="output_limit")
+
+        def model(payload, _api_key):
+            requests.append(deepcopy(payload))
+            if len(requests) == 1:
+                raise limit
+            return self.completed()
+
+        with (
+            patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+            patch.object(providers, "ark_prepare_video") as upload,
+            patch.object(providers, "ark_stream_response", side_effect=model),
+        ):
+            script, _ = providers.ark_recognize(
+                Path("source.mp4"), "episode", 131,
+                prepared_video={"api_key": "key", "video_url": "https://cos.test/video"},
+            )
+
+        upload.assert_not_called()
+        self.assertEqual(len(requests), 2)
+        self.assertIn(
+            "Keep characterProfiles and optional fields minimal",
+            requests[1]["input"][0]["content"][1]["text"],
+        )
+        self.assertNotEqual(
+            requests[0]["input"][0]["content"][1]["text"],
+            requests[1]["input"][0]["content"][1]["text"],
+        )
+        self.assertEqual(
+            requests[0]["input"][0]["content"][0],
+            requests[1]["input"][0]["content"][0],
+        )
+        self.assertTrue(script["scenes"])
+
     def test_review_ranges_have_both_bounds_and_private_source_never_enters_prompt(self):
         script = json.loads(self.completed()["output_text"])
         script["privateAuditMarker"] = "source-only-marker"

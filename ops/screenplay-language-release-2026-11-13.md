@@ -3,8 +3,8 @@
 ## Version comparison
 
 At 2026-11-14, the staging container was observed at build
-`screenplay-language-20261113-1df350c` from commit
-`1df350c3ab7b4efd9799d520a31e03de8c8be760`. The active staging compose also
+`screenplay-language-20261113-d1a70c5` from commit
+`d1a70c57014245db49273043b7b15ae201025443`. The active staging compose also
 keeps the prior Double11 carousel-removal overlay. The runtime build label is
 not a substitute for comparing environment configuration or source trees.
 
@@ -22,11 +22,11 @@ remains unchanged and continues to use its existing configuration.
 
 The Git source must also be distinguished from the runtime labels. This
 incremental release is based on the observed staging commit above and changes
-only the bilingual delivery fix in `backend/app/processing.py`, the related
-regression test, and release-support files. The button styling is already in
-the observed staging baseline and is preserved unchanged by this release. It
-does not replace the already-tested multilingual application files with another
-branch.
+only Ark screenplay recognition retry logic in `backend/app/providers.py`, its
+regression test, and release-support files. The already-deployed bilingual
+delivery code and button styling remain in the staging baseline and are
+preserved unchanged by this release. It does not replace the tested
+multilingual application files with another branch.
 
 No private values or business data are part of this release.
 

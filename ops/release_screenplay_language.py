@@ -16,12 +16,12 @@ import sys
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
-BASELINE = "1df350c3ab7b4efd9799d520a31e03de8c8be760"
-BASE_BUILD = "screenplay-language-20261113-1df350c"
+BASELINE = "d1a70c57014245db49273043b7b15ae201025443"
+BASE_BUILD = "screenplay-language-20261113-d1a70c5"
 REF = "codex/script-translation-language"
-APP_FILES = ["backend/app/processing.py"]
+APP_FILES = ["backend/app/providers.py"]
 NEW_FILES = set()
-CHANGED_TEST_FILES = ["backend/test_process_task_translation.py"]
+CHANGED_TEST_FILES = ["backend/test_provider_delivery.py"]
 FRONTEND_TEST_FILES = []
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",
