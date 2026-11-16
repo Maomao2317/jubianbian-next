@@ -72,6 +72,42 @@ class ArkCostControlTests(unittest.TestCase):
         self.assertNotIn("我等你", content[1]["text"])
         self.assertEqual(usage["calls"][0]["video_duration_sec"], 8)
 
+    def test_physical_review_retries_output_limit_with_compact_prompt(self):
+        _, context = self.fixture()
+        context["requirePhysicalClip"] = True
+        limit = ArkError("output limit", provider_code="output_limit")
+        success = {"output_text": '{"corrections":[]}',
+                   "usage": {"input_tokens": 100, "output_tokens": 20}}
+        snapshots = []
+
+        def capture(payload, *args, **kwargs):
+            snapshots.append(deepcopy(payload))
+            if len(snapshots) == 1:
+                raise limit
+            return success
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.mp4"
+            path.touch()
+            with (patch.object(providers, "DATA_DIR", Path(directory)),
+                  patch.object(providers.shutil, "which", return_value="ffmpeg"),
+                  patch.object(providers.subprocess, "run"),
+                  patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+                  patch.object(providers, "ark_prepare_video",
+                               return_value={"api_key": "key", "video_url": "https://test/clip"}),
+                  patch.object(providers, "ark_stream_response", side_effect=capture) as create):
+                providers.ark_recognize(
+                    path, "episode", 100, model="doubao-seed-2-1-turbo-260628",
+                    review_context=context,
+                    prepared_video={"api_key": "key", "video_url": "https://test/full"},
+                )
+        self.assertEqual(create.call_count, 2)
+        first, second = snapshots
+        self.assertLess(first["max_output_tokens"], second["max_output_tokens"])
+        self.assertEqual(second["max_output_tokens"], providers.ARK_MAX_OUTPUT_TOKENS)
+        self.assertNotIn("bounded retry after an output-length limit", first["input"][0]["content"][1]["text"])
+        self.assertIn("bounded retry after an output-length limit", second["input"][0]["content"][1]["text"])
+
     def test_full_or_wide_review_reuses_full_video(self):
         _, context = self.fixture()
         for changed in ({**context, "scope": "full_video_with_issue_ranges"},

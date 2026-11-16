@@ -30,7 +30,8 @@ class LargeBatchTests(unittest.TestCase):
             CREATE TABLE tasks (
                 id TEXT PRIMARY KEY, user_id TEXT, title TEXT, file_name TEXT,
                 stored_path TEXT, file_size INTEGER, mime_type TEXT, duration_sec REAL,
-                estimated_minutes INTEGER, credits_used INTEGER, status TEXT, stage TEXT,
+                estimated_minutes INTEGER, credits_used INTEGER, source_language TEXT,
+                output_language TEXT, status TEXT, stage TEXT,
                 progress_percent INTEGER, error TEXT, created_at TEXT, updated_at TEXT,
                 batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER
             );
@@ -59,7 +60,11 @@ class LargeBatchTests(unittest.TestCase):
                     with connection:
                         yield connection
 
-                payload = {"files": [{"name": f"{index}.mp4", "size": 1024, "durationSec": 10} for index in range(count, 0, -1)]}
+                payload = {
+                    "sourceLanguage": "zh",
+                    "outputLanguage": "zh",
+                    "files": [{"name": f"{index}.mp4", "size": 1024, "durationSec": 10} for index in range(count, 0, -1)],
+                }
                 with (patch.object(routes, "db", database),
                       patch.object(routes, "current_user", return_value={"id": "owner", "credits": 100000}),
                       patch.object(routes, "object_storage_enabled", return_value=False),

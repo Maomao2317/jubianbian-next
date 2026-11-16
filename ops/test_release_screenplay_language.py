@@ -18,19 +18,31 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
             spec.loader.exec_module(cls.release)
 
     def test_release_is_pinned_to_the_observed_staging_baseline(self):
-        self.assertEqual(self.release.BASELINE, "8fc2337b5b04b291f023dbe503d9f7b0901d1ae6")
-        self.assertEqual(self.release.BASE_BUILD, "dialogue-recovery-20261112-8fc2337")
+        self.assertEqual(self.release.BASELINE, "7de015cf64673d13342b95bb01f867279cd7ec69")
+        self.assertEqual(self.release.BASE_BUILD, "screenplay-language-20261114-7de015c")
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
-        self.assertEqual(set(self.release.APP_FILES) & {
+        self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
+        self.assertEqual(self.release.APP_FILES, [
+            "backend/app/processing.py",
+            "backend/app/providers.py",
+            "backend/app/routes.py",
+            "backend/app/script.py",
+            "backend/app/translation.py",
+            "backend/app/user_view.py",
             "web-staging/css/app.css",
-            "web-staging/js/api.js",
             "web-staging/js/app.js",
-        }, {
-            "web-staging/css/app.css",
-            "web-staging/js/api.js",
-            "web-staging/js/app.js",
-        })
-        self.assertEqual(self.release.NEW_FILES, {"backend/app/translation.py"})
+            "web-staging/js/config.js",
+        ])
+        self.assertEqual(self.release.CHANGED_TEST_FILES, [
+            "backend/test_provider_delivery.py",
+            "backend/test_script_quality.py",
+            "backend/test_translation.py",
+            "backend/test_user_review.py",
+            "backend/test_visual_description.py",
+        ])
+        self.assertEqual(self.release.FRONTEND_TEST_FILES, ["web-staging/test-user-review.cjs"])
+        self.assertEqual(self.release.BUILD_PREFIX, "review-download-20261116-")
+        self.assertEqual(self.release.NEW_FILES, set())
         self.assertNotIn("docker-compose.yml", self.release.ALLOWED)
         self.assertNotIn("fangzhou.env", self.release.ALLOWED)
         self.assertNotIn("backend/app/config.py", self.release.ALLOWED)
@@ -54,12 +66,14 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
             "environment": {
                 "JBB_ENVIRONMENT": "staging",
                 "JBB_BUILD_VERSION": "old-build",
+                "JBB_VIDEO_PROVIDER": "glm",
                 "GLM_API_KEY": "fixture-secret",
             },
         }}}
         new = deepcopy(old)
         new["services"]["app"]["image"] = "verified-image"
         new["services"]["app"]["environment"]["JBB_BUILD_VERSION"] = "new-build"
+        new["services"]["app"]["environment"]["JBB_VIDEO_PROVIDER"] = "ark"
         return old, new
 
     def test_only_image_and_build_label_may_change(self):
@@ -81,6 +95,20 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
                     app["environment"]["JBB_ENVIRONMENT"] = "production"
                 with self.assertRaises(AssertionError):
                     self.release.verify_config(old, new, "verified-image", "new-build")
+
+    def test_video_provider_must_be_ark_for_staging(self):
+        old, new = self.config()
+        new["services"]["app"]["environment"]["JBB_VIDEO_PROVIDER"] = "glm"
+        with self.assertRaises(AssertionError):
+            self.release.verify_config(old, new, "verified-image", "new-build")
+
+    def test_existing_screenplay_overlay_is_reused_once(self):
+        root = Path("/opt/jubianbian-staging")
+        overlay = str(root / "release-screenplay-language.yml")
+        base = [str(root / "docker-compose.yml"), str(root / "release-carousel-removal.yml")]
+        self.assertEqual(self.release.staging_compose_files(root, base), base + [overlay])
+        active = [base[0], overlay, base[1]]
+        self.assertEqual(self.release.staging_compose_files(root, active), active)
 
 
 if __name__ == "__main__":

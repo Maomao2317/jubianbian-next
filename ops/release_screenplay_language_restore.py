@@ -1,12 +1,13 @@
-"""Promote the pushed compact-character-introduction patch without language delivery.
+"""Promote compact character introductions with environment-specific language delivery.
 
 Run on the application host:
     python3 release_screenplay_language_restore.py prepare SHA
     python3 release_screenplay_language_restore.py staging SHA
     python3 release_screenplay_language_restore.py production SHA
 
-Preparation builds and tests isolated images for both environments. Production
-deployment is rejected until the same pushed revision is verified on staging.
+The pushed merge revision contains the bilingual staging source, while its
+first parent is the production source without language delivery. Preparation
+builds and tests both variants. Production is rejected until staging verifies.
 """
 import copy
 import datetime
@@ -20,7 +21,9 @@ import release_quality_ledger as common
 
 
 REF = "codex/production-language-restore-20261113"
-BUILD_PREFIX = "character-intro-no-language-20261116-"
+BUILD_PREFIX = "character-intro-split-20261116-"
+PRODUCTION_SOURCE_COMMIT = "fb8e304decfa9b4d927975aa3e0e11bc85c57836"
+STAGING_LANGUAGE_COMMIT = "ec0fe613e07e6692c11b7a589c7961cb83508ad1"
 SITES = {
     "staging": {
         "project": "jubianbian-staging",
@@ -48,14 +51,56 @@ APP_FILES += [
     "web-staging/js/app.js",
     "web-staging/js/config.js",
 ]
-REMOVE_FILES = ["backend/app/translation.py"]
-CHANGED_FILES = {
+TRANSLATION_FILE = "backend/app/translation.py"
+SITE_FILES = {
+    "staging": APP_FILES + [TRANSLATION_FILE],
+    "production": APP_FILES,
+}
+REMOVE_FILES = {
+    "staging": [],
+    "production": [TRANSLATION_FILE],
+}
+PRODUCTION_CHANGED_FILES = {
     "backend/app/providers.py",
     "backend/app/script.py",
     "backend/test_provider_delivery.py",
     "backend/test_visual_description.py",
     "ops/release_screenplay_language_restore.py",
     "ops/test_release_screenplay_language_restore.py",
+}
+STAGING_CHANGED_FILES = {
+    "backend/app/auth_store.py",
+    "backend/app/evidence.py",
+    "backend/app/processing.py",
+    "backend/app/providers.py",
+    "backend/app/rechecks.py",
+    "backend/app/routes.py",
+    "backend/app/script.py",
+    "backend/app/task_store.py",
+    "backend/app/translation.py",
+    "backend/app/user_view.py",
+    "backend/test_ark_cost_control.py",
+    "backend/test_large_batch.py",
+    "backend/test_process_task_translation.py",
+    "backend/test_provider_delivery.py",
+    "backend/test_rechecks.py",
+    "backend/test_route_queue.py",
+    "backend/test_translation.py",
+    "backend/test_upload_flow.py",
+    "backend/test_visual_description.py",
+    "ops/release_screenplay_language.py",
+    "ops/release_screenplay_language_restore.py",
+    "ops/screenplay-language-release-2026-11-13.md",
+    "ops/test_release_screenplay_language.py",
+    "ops/test_release_screenplay_language_restore.py",
+    "web-staging/css/app.css",
+    "web-staging/js/api.js",
+    "web-staging/js/app.js",
+    "web-staging/test-batch-upload.cjs",
+}
+CHANGED_FILES = {
+    "staging": STAGING_CHANGED_FILES,
+    "production": PRODUCTION_CHANGED_FILES,
 }
 
 
@@ -78,14 +123,12 @@ def assert_known_runtime_digest(path, actual, expected):
     assert actual == expected, "Runtime baseline differs: " + path
 
 
-def verify_release_content(base):
+def verify_release_content(base, site):
     sources = {
         path: (base / path).read_text(encoding="utf-8")
-        for path in APP_FILES
+        for path in SITE_FILES[site]
     }
     combined = "\n".join(sources.values())
-    assert "sourceLanguage" not in combined and "outputLanguage" not in combined
-    assert "translate_delivery" not in combined and "/translation" not in combined
     assert "20261111double11" not in combined and "double11Offer" not in combined
     assert "campaignSlidesMarkup" not in combined
     assert "确认复核并开放下载" not in sources["web-staging/js/app.js"]
@@ -95,7 +138,15 @@ def verify_release_content(base):
     assert "只保留一个最能识别的核心穿搭" in sources["backend/app/providers.py"]
     assert "正文不要罗列发型、五官、年龄外观" in sources["backend/app/providers.py"]
     assert "完整保留原话" in sources["backend/app/providers.py"]
-    assert not (base / "backend/app/translation.py").exists()
+    translation = base / TRANSLATION_FILE
+    if site == "staging":
+        assert "sourceLanguage" in combined and "outputLanguage" in combined
+        assert "translate_delivery" in combined and "/translation" in combined
+        assert translation.exists()
+    else:
+        assert "sourceLanguage" not in combined and "outputLanguage" not in combined
+        assert "translate_delivery" not in combined and "/translation" not in combined
+        assert not translation.exists()
 
 
 def parse_args(argv):
@@ -138,23 +189,32 @@ def _assert_translation_state(site, project):
     assert actual == b"__ABSENT__", site.capitalize() + " unexpectedly contains translation.py"
 
 
-def _validate_image(image):
+def _validate_image(image, site):
     validation = (
         "from pathlib import Path\n"
         "paths = [\n"
-        + "".join("    '/app/" + path + "',\n" for path in APP_FILES)
+        + "".join("    '/app/" + path + "',\n" for path in SITE_FILES[site])
         + "]\n"
         "combined = '\\n'.join(Path(path).read_text() for path in paths)\n"
-        "assert 'sourceLanguage' not in combined and 'outputLanguage' not in combined\n"
-        "assert 'translate_delivery' not in combined and '/translation' not in combined\n"
         "assert '确认复核并开放下载' not in combined\n"
         "assert 'renderReviewSummary' in combined\n"
         "assert 'compact_clothing_detail' in combined\n"
         "assert 'compact_action_character_introductions' in combined\n"
         "assert '只保留一个最能识别的核心穿搭' in combined\n"
         "assert '完整保留原话' in combined\n"
-        "assert not Path('/app/backend/app/translation.py').exists()\n"
     )
+    if site == "staging":
+        validation += (
+            "assert 'sourceLanguage' in combined and 'outputLanguage' in combined\n"
+            "assert 'translate_delivery' in combined and '/translation' in combined\n"
+            "assert Path('/app/backend/app/translation.py').exists()\n"
+        )
+    else:
+        validation += (
+            "assert 'sourceLanguage' not in combined and 'outputLanguage' not in combined\n"
+            "assert 'translate_delivery' not in combined and '/translation' not in combined\n"
+            "assert not Path('/app/backend/app/translation.py').exists()\n"
+        )
     common.run([
         "docker", "run", "--rm", "--network=none", "--memory=256m", "--cpus=1",
         "--entrypoint", "python", image, "-c", validation,
@@ -163,12 +223,19 @@ def _validate_image(image):
 
 def prepare(commit, build, base):
     fetch_revision(commit)
-    changed = set(common.git(
-        "diff", "--name-only", SITES["production"]["baseline"], commit
-    ).decode().splitlines())
-    assert changed == CHANGED_FILES, "Unexpected release files: " + str(
-        changed.symmetric_difference(CHANGED_FILES)
-    )
+    assert common.git("rev-parse", commit + "^1").decode().strip() == PRODUCTION_SOURCE_COMMIT
+    assert common.git("rev-parse", commit + "^2").decode().strip() == STAGING_LANGUAGE_COMMIT
+    source_commits = {
+        "staging": commit,
+        "production": PRODUCTION_SOURCE_COMMIT,
+    }
+    for site, source_commit in source_commits.items():
+        changed = set(common.git(
+            "diff", "--name-only", SITES[site]["baseline"], source_commit
+        ).decode().splitlines())
+        assert changed == CHANGED_FILES[site], site + " unexpected release files: " + str(
+            changed.symmetric_difference(CHANGED_FILES[site])
+        )
 
     fingerprints = {}
     live = {}
@@ -189,40 +256,46 @@ def prepare(commit, build, base):
             )
         _assert_translation_state(site, project)
 
-    checks = test_files(commit)
-    digests = {}
-    for path in APP_FILES + checks:
-        data = common.normalized(common.git("show", commit + ":" + path))
-        target = base / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        if path in APP_FILES:
-            digests[path] = common.digest(data)
-    verify_release_content(base)
-
     images = {}
+    digests = {}
+    checks_by_site = {}
     for site in SITES:
+        source_commit = source_commits[site]
+        site_base = base / site
+        checks = test_files(source_commit)
+        checks_by_site[site] = checks
+        digests[site] = {}
+        for path in SITE_FILES[site] + checks:
+            data = common.normalized(common.git("show", source_commit + ":" + path))
+            target = site_base / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if path in SITE_FILES[site]:
+                digests[site][path] = common.digest(data)
+        verify_release_content(site_base, site)
+
         image = "jubianbian-release:" + site + "-" + build
         before_image = image + "-before"
         common.run(["docker", "tag", live[site]["Image"], before_image])
-        dockerfile = base / ("Dockerfile." + site)
+        dockerfile = site_base / ("Dockerfile." + site)
+        cleanup = "RUN rm -f /app/backend/app/translation.py\n" if site == "production" else ""
         dockerfile.write_text(
             "FROM " + before_image + "\n"
-            + "".join("COPY " + path + " /app/" + path + "\n" for path in APP_FILES)
-            + "RUN rm -f /app/backend/app/translation.py\n"
+            + "".join("COPY " + path + " /app/" + path + "\n" for path in SITE_FILES[site])
+            + cleanup
         )
         common.run([
             "docker", "build", "--network=none", "--pull=false", "-q", "-t", image,
-            "-f", dockerfile, base,
+            "-f", dockerfile, site_base,
         ])
-        _validate_image(image)
+        _validate_image(image, site)
 
         command = [
             "docker", "run", "--rm", "--network=none", "--memory=1g", "--cpus=1",
             "-e", "JBB_DATA_DIR=/tmp/jbb-release-tests",
         ]
         for path in checks:
-            command += ["-v", str(base / path) + ":/app/" + path + ":ro"]
+            command += ["-v", str(site_base / path) + ":/app/" + path + ":ro"]
         modules = [Path(path).stem for path in checks]
         common.run(command + [
             "-w", "/app/backend", "--entrypoint", "python", image,
@@ -237,8 +310,10 @@ def prepare(commit, build, base):
     record = {
         "commit": commit,
         "build": build,
+        "sourceCommits": source_commits,
         "files": digests,
         "removedFiles": REMOVE_FILES,
+        "checks": checks_by_site,
         "images": images,
         "fingerprintsBefore": fingerprints,
         "fullIsolatedRegressionPassed": True,
@@ -266,6 +341,9 @@ def deploy(site, commit, build, base):
     record = json.loads((base / "release-prepared.json").read_text())
     assert record["commit"] == commit and record["build"] == build
     assert record["fullIsolatedRegressionPassed"]
+    assert record["sourceCommits"][site] == (
+        commit if site == "staging" else PRODUCTION_SOURCE_COMMIT
+    )
     image_record = record["images"][site]
     assert image_record["regressionPassed"]
     assert image_record["id"] == image_id(image_record["name"]), "Prepared image changed"
@@ -295,7 +373,7 @@ def deploy(site, commit, build, base):
     files = before["Config"]["Labels"]["com.docker.compose.project.config_files"].split(",")
     assert all(Path(path).parent == root for path in files), "Unexpected Compose path"
     compose = common.compose_args(project, root, files)
-    overlay = root / "release-character-intro-no-language.yml"
+    overlay = root / "release-character-intro-split.yml"
     assert str(overlay) not in files, "Character-introduction release overlay is already active"
     new_compose = common.compose_args(project, root, files + [str(overlay)])
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))
@@ -303,7 +381,10 @@ def deploy(site, commit, build, base):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = base / ("backup-" + site + "-" + stamp)
     backup.mkdir(mode=0o700)
-    paths = [overlay, *(root / path for path in APP_FILES + REMOVE_FILES)]
+    paths = [
+        overlay,
+        *(root / path for path in SITE_FILES[site] + REMOVE_FILES[site]),
+    ]
     hold = root / ".staging-deploy-hold"
     if site == "staging":
         paths.append(hold)
@@ -314,7 +395,12 @@ def deploy(site, commit, build, base):
         shutil.copy2(path, target)
 
     deployment = copy.deepcopy(record)
-    deployment.update(site=site, backup=str(backup), previousBuild=old_env["JBB_BUILD_VERSION"])
+    deployment.update(
+        site=site,
+        sourceCommit=record["sourceCommits"][site],
+        backup=str(backup),
+        previousBuild=old_env["JBB_BUILD_VERSION"],
+    )
     stopped = False
     try:
         overlay.write_text(json.dumps({"services": {"app": {
@@ -328,10 +414,11 @@ def deploy(site, commit, build, base):
 
         deployment["tasksAtSwitch"] = common.stop_only_when_idle(project)
         stopped = True
-        for path in APP_FILES:
-            assert common.digest((base / path).read_bytes()) == record["files"][path]
-            shutil.copy2(base / path, root / path)
-        for path in REMOVE_FILES:
+        site_base = base / site
+        for path in SITE_FILES[site]:
+            assert common.digest((site_base / path).read_bytes()) == record["files"][site][path]
+            shutil.copy2(site_base / path, root / path)
+        for path in REMOVE_FILES[site]:
             (root / path).unlink(missing_ok=True)
         common.run(new_compose + ["up", "-d", "--no-build", "--no-deps", "app"])
 
@@ -341,12 +428,17 @@ def deploy(site, commit, build, base):
         assert common.environment(current) == dict(old_env, JBB_BUILD_VERSION=build)
         assert common.mounts(current) == common.mounts(before)
         assert current["HostConfig"]["PortBindings"] == before["HostConfig"]["PortBindings"]
-        common.verify_files(project, port, record["files"])
+        common.verify_files(project, port, record["files"][site])
+        translation_check = (
+            "test -f /app/backend/app/translation.py && echo present"
+            if site == "staging"
+            else "test ! -f /app/backend/app/translation.py && echo absent"
+        )
+        expected_translation = "present" if site == "staging" else "absent"
         assert common.output([
-            "docker", "exec", project + "-app-1", "sh", "-c",
-            "test ! -f /app/backend/app/translation.py && echo absent",
-        ]).decode().strip() == "absent"
-        _validate_image(image_record["name"])
+            "docker", "exec", project + "-app-1", "sh", "-c", translation_check,
+        ]).decode().strip() == expected_translation
+        _validate_image(image_record["name"], site)
 
         protected_project = (
             SITES["production"]["project"] if site == "staging"
@@ -360,7 +452,8 @@ def deploy(site, commit, build, base):
             configurationPreserved=True,
             mountsPreserved=True,
             portsPreserved=True,
-            noLanguageDeliveryVerified=True,
+            languageDeliveryVerified=(site == "staging"),
+            noLanguageDeliveryVerified=(site == "production"),
             fingerprint=common.fingerprint(project),
             protectedFingerprint=common.fingerprint(protected_project),
             tasksAfter=common.counts(project),

@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -328,6 +329,104 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual(usage["total_tokens"], 42)
         self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "今天，我决定，我要留下。")
 
+    def test_initial_output_limit_retries_with_compact_prompt_without_upload(self):
+        requests = []
+        limit = ArkError("output limit", provider_code="output_limit")
+
+        def model(payload, _api_key):
+            requests.append(deepcopy(payload))
+            if len(requests) == 1:
+                raise limit
+            return self.completed()
+
+        with (
+            patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
+            patch.object(providers, "ark_prepare_video") as upload,
+            patch.object(providers, "ark_stream_response", side_effect=model),
+        ):
+            script, _ = providers.ark_recognize(
+                Path("source.mp4"), "episode", 131,
+                prepared_video={"api_key": "key", "video_url": "https://cos.test/video"},
+            )
+
+        upload.assert_not_called()
+        self.assertEqual(len(requests), 2)
+        self.assertIn(
+            "Keep characterProfiles and optional fields minimal",
+            requests[1]["input"][0]["content"][1]["text"],
+        )
+        self.assertNotEqual(
+            requests[0]["input"][0]["content"][1]["text"],
+            requests[1]["input"][0]["content"][1]["text"],
+        )
+        self.assertEqual(
+            requests[0]["input"][0]["content"][0],
+            requests[1]["input"][0]["content"][0],
+        )
+        self.assertTrue(script["scenes"])
+
+    def test_output_limit_falls_back_to_segments_and_restores_source_timeline(self):
+        limit = ArkError("output limit", provider_code="output_limit")
+        windows = []
+
+        def recognize_range(path, title, duration, evidence, model, window, **kwargs):
+            windows.append(window)
+            local_script = {
+                "version": "1.0",
+                "title": title,
+                "characters": ["A"],
+                "scenes": [{
+                    "heading": "1-1 INT. ROOM",
+                    "location": "ROOM",
+                    "timeOfDay": "DAY",
+                    "interiorExterior": "INT",
+                    "blocks": [{
+                        "type": "dialogue", "speaker": "A", "text": f"line-{len(windows)}",
+                        "startSec": 1, "endSec": 3,
+                    }],
+                }],
+            }
+            return local_script, {"calls": [{"input_tokens": 10, "output_tokens": 20,
+                                               "total_tokens": 30}]}, window["startSec"], window["endSec"] - window["startSec"]
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as source, \
+             patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2), \
+             patch.object(providers, "ark_stream_response", side_effect=[limit, limit]), \
+             patch.object(providers, "ark_recognize_range", side_effect=recognize_range), \
+             patch.object(providers.shutil, "which", return_value="ffmpeg"):
+            script, usage = providers.ark_recognize(
+                Path(source.name), "episode", 131,
+                prepared_video={"api_key": "key", "video_url": "https://cos.test/video"},
+            )
+
+        self.assertEqual(len(windows), 2)
+        self.assertEqual([block["text"].startswith(prefix)
+                          for prefix, scene in zip(("line-1", "line-2"), script["scenes"])
+                          for block in scene["blocks"]], [True, True])
+        starts = [block["startSec"] for scene in script["scenes"] for block in scene["blocks"]]
+        self.assertEqual(starts, [1.0, 66.5])
+        self.assertEqual(usage["total_tokens"], 60)
+
+    def test_segment_merge_discards_only_overlapping_duplicate_blocks(self):
+        first = {
+            "version": "1.0", "title": "episode", "characters": ["A"],
+            "scenes": [{"heading": "1-1 INT. ROOM", "location": "ROOM", "blocks": [
+                {"type": "dialogue", "speaker": "A", "text": "same", "startSec": 61, "endSec": 64},
+            ]}],
+        }
+        second = {
+            "version": "1.0", "title": "episode", "characters": ["A"],
+            "scenes": [{"heading": "1-1 INT. ROOM", "location": "ROOM", "blocks": [
+                {"type": "dialogue", "speaker": "A", "text": "same", "startSec": 0, "endSec": 3},
+                {"type": "dialogue", "speaker": "A", "text": "later", "startSec": 5, "endSec": 7},
+            ]}],
+        }
+
+        merged = providers._ark_merge_segment_scripts("episode", [(first, 0), (second, 62)])
+        blocks = [block for scene in merged["scenes"] for block in scene["blocks"]]
+        self.assertEqual([(block["startSec"], block["text"].startswith("same")) for block in blocks],
+                         [(61.0, True), (67.0, False)])
+
     def test_review_ranges_have_both_bounds_and_private_source_never_enters_prompt(self):
         script = json.loads(self.completed()["output_text"])
         script["privateAuditMarker"] = "source-only-marker"
@@ -472,15 +571,19 @@ class ProviderDeliveryTests(unittest.TestCase):
 
     def test_generation_prompts_keep_clothing_brief_without_weakening_dialogue(self):
         prompt = providers.ark_prompt("第1集", 60)
+        compact = providers._ark_compact_prompt("第1集", 60)
         self.assertIn("只保留一个最能识别的核心穿搭", prompt)
         self.assertIn("不得写成长串人物形象或服饰清单", prompt)
         self.assertIn("正文不要罗列发型、五官、年龄外观", prompt)
         self.assertIn("完整保留原话", prompt)
+        self.assertIn("only one core identifying outfit", compact)
+        self.assertIn("Do not list hair, facial details, age", compact)
+        self.assertIn("preserve every spoken line verbatim", compact)
 
     def test_batch_continuity_waits_until_terminal_and_persists_script_labels(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
-        connection.execute("CREATE TABLE tasks(id, batch_id, batch_index, created_at, status, result_json, updated_at)")
+        connection.execute("CREATE TABLE tasks(id, batch_id, batch_index, created_at, status, result_json, delivery_json, updated_at)")
         first = {
             "characters": ["晓晨"],
             "characterProfiles": [{"name": "晓晨", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}],
@@ -491,9 +594,9 @@ class ProviderDeliveryTests(unittest.TestCase):
             "characterProfiles": [{"name": "黑衣男子", "appearance": "黑色短发，戴帽子", "clothing": "黑色外套"}],
             "scenes": [{"characters": ["黑衣男子"], "blocks": [{"type": "dialogue", "speaker": "黑衣男子", "text": "我回来了"}]}],
         }
-        connection.executemany("INSERT INTO tasks(id,batch_id,batch_index,created_at,status,result_json) VALUES(?,?,?,?,?,?)", [
-            ("one", "batch", 1, "1", "done", json.dumps(first, ensure_ascii=False)),
-            ("two", "batch", 2, "2", "running", json.dumps(later, ensure_ascii=False)),
+        connection.executemany("INSERT INTO tasks(id,batch_id,batch_index,created_at,status,result_json,delivery_json) VALUES(?,?,?,?,?,?,?)", [
+            ("one", "batch", 1, "1", "done", json.dumps(first, ensure_ascii=False), json.dumps(first, ensure_ascii=False)),
+            ("two", "batch", 2, "2", "running", json.dumps(later, ensure_ascii=False), json.dumps(later, ensure_ascii=False)),
         ])
 
         with patch.object(task_store, "db", return_value=connection):
@@ -505,6 +608,10 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertEqual(saved["characters"], ["晓晨"])
         self.assertEqual(saved["scenes"][0]["blocks"][0]["speaker"], "晓晨")
         self.assertEqual(saved["scenes"][0]["blocks"][0]["text"], "我回来了")
+        delivered = json.loads(connection.execute("SELECT delivery_json FROM tasks WHERE id='two'").fetchone()[0])
+        self.assertEqual(delivered["characters"], ["晓晨"])
+        self.assertEqual(delivered["scenes"][0]["blocks"][0]["speaker"], "晓晨")
+        self.assertEqual(delivered["scenes"][0]["blocks"][0]["text"], "我回来了")
         connection.close()
 
     def test_indexed_review_preserves_all_other_dialogue_and_emotion(self):

@@ -1,4 +1,4 @@
-"""Prepare and deploy the pushed screenplay-language patch to staging only.
+"""Prepare and deploy the pushed screenplay delivery patch to staging only.
 
 Run on the application host:
 python3 release_screenplay_language.py prepare|deploy SHA
@@ -16,27 +16,29 @@ import sys
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
-BASELINE = "8fc2337b5b04b291f023dbe503d9f7b0901d1ae6"
-BASE_BUILD = "dialogue-recovery-20261112-8fc2337"
+BASELINE = "7de015cf64673d13342b95bb01f867279cd7ec69"
+BASE_BUILD = "screenplay-language-20261114-7de015c"
 REF = "codex/script-translation-language"
 APP_FILES = [
-    "backend/app/" + name + ".py"
-    for name in (
-        "auth_store", "evidence", "processing", "providers", "rechecks", "routes",
-        "script", "task_store", "translation", "user_view",
-    )
-]
-APP_FILES += [
+    "backend/app/processing.py",
+    "backend/app/providers.py",
+    "backend/app/routes.py",
+    "backend/app/script.py",
+    "backend/app/translation.py",
+    "backend/app/user_view.py",
     "web-staging/css/app.css",
-    "web-staging/js/api.js",
     "web-staging/js/app.js",
+    "web-staging/js/config.js",
 ]
-NEW_FILES = {"backend/app/translation.py"}
+NEW_FILES = set()
 CHANGED_TEST_FILES = [
-    "backend/test_" + name + ".py"
-    for name in ("large_batch", "provider_delivery", "rechecks", "route_queue", "translation", "upload_flow")
+    "backend/test_provider_delivery.py",
+    "backend/test_script_quality.py",
+    "backend/test_translation.py",
+    "backend/test_user_review.py",
+    "backend/test_visual_description.py",
 ]
-FRONTEND_TEST_FILES = ["web-staging/test-batch-upload.cjs"]
+FRONTEND_TEST_FILES = ["web-staging/test-user-review.cjs"]
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",
     "ops/test_release_screenplay_language.py",
@@ -46,6 +48,8 @@ ALLOWED = set(APP_FILES + CHANGED_TEST_FILES + FRONTEND_TEST_FILES + RELEASE_SUP
 PROJECT = "jubianbian-staging"
 PORT = 18000
 SITE = "staging"
+STAGING_ENVIRONMENT_OVERRIDES = {"JBB_VIDEO_PROVIDER": "ark"}
+BUILD_PREFIX = "review-download-20261116-"
 
 
 def image_id(image):
@@ -60,6 +64,12 @@ def verify_config(old, new, image, build):
     assert app["environment"]["JBB_BUILD_VERSION"] == build
     app["image"] = old_app["image"]
     app["environment"]["JBB_BUILD_VERSION"] = old_app["environment"]["JBB_BUILD_VERSION"]
+    for key, value in STAGING_ENVIRONMENT_OVERRIDES.items():
+        assert app["environment"].get(key) == value
+        if key in old_app["environment"]:
+            app["environment"][key] = old_app["environment"][key]
+        else:
+            app["environment"].pop(key, None)
     assert adjusted == old, "Unrelated staging Compose configuration changed"
 
 
@@ -69,6 +79,11 @@ def parse_args(argv):
     if not re.fullmatch(r"[0-9a-f]{40}", argv[2]):
         raise ValueError("SHA must be a full lowercase Git commit id")
     return argv[1], argv[2]
+
+
+def staging_compose_files(root, files):
+    overlay = str(root / "release-screenplay-language.yml")
+    return files if overlay in files else files + [overlay]
 
 
 def test_files(commit):
@@ -162,8 +177,8 @@ def deploy(commit, build, base):
     assert all(Path(path).parent == root for path in files), "Unexpected staging Compose path"
     compose = common.compose_args(PROJECT, root, files)
     overlay = root / "release-screenplay-language.yml"
-    assert str(overlay) not in files, "A release overlay is already active"
-    new_compose = common.compose_args(PROJECT, root, files + [str(overlay)])
+    active_files = staging_compose_files(root, files)
+    new_compose = common.compose_args(PROJECT, root, active_files)
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))
 
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -183,7 +198,10 @@ def deploy(commit, build, base):
     try:
         overlay.write_text(json.dumps({"services": {"app": {
             "image": record["image"],
-            "environment": {"JBB_BUILD_VERSION": build},
+            "environment": {
+                "JBB_BUILD_VERSION": build,
+                **STAGING_ENVIRONMENT_OVERRIDES,
+            },
         }}}, indent=2))
         config = json.loads(common.output(new_compose + ["config", "--format", "json"]))
         verify_config(old_config, config, record["image"], build)
@@ -199,7 +217,11 @@ def deploy(commit, build, base):
         record["health"] = common.health(PORT, SITE, build)
         current = common.inspect(PROJECT)
         assert current["Image"] == record["imageId"]
-        assert common.environment(current) == dict(old_env, JBB_BUILD_VERSION=build)
+        assert common.environment(current) == dict(
+            old_env,
+            JBB_BUILD_VERSION=build,
+            **STAGING_ENVIRONMENT_OVERRIDES,
+        )
         assert common.mounts(current) == common.mounts(before)
         assert current["HostConfig"]["PortBindings"] == before["HostConfig"]["PortBindings"]
         common.verify_files(PROJECT, PORT, record["files"])
@@ -232,7 +254,7 @@ def deploy(commit, build, base):
 
 def main(argv=None):
     mode, commit = parse_args(sys.argv if argv is None else argv)
-    build = "screenplay-language-20261113-" + commit[:7]
+    build = BUILD_PREFIX + commit[:7]
     base = Path("/opt/jubianbian-" + build)
     with Path("/run/lock/jubianbian-quality-release.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
