@@ -219,6 +219,20 @@ def compact_character_detail(text: Any, *, max_chars: int = 42) -> str:
     return result
 
 
+def compact_clothing_detail(text: Any, *, max_parts: int = 2) -> str:
+    """Keep only the core garments needed to recognize a character.
+
+    Clothing is supporting identification metadata, not a costume inventory.
+    Preserve complete phrases and their colors/styles, but drop a third and
+    later comma-separated accessory so screenplay introductions stay light.
+    """
+    value = compact_character_detail(text, max_chars=96)
+    if not value:
+        return ""
+    parts = [part.strip("，、；：: ") for part in re.split(r"[，、；：:]+", value) if part.strip()]
+    return "、".join(parts[:max_parts])
+
+
 def evidence_comparison_text(text: Any) -> str:
     """Reduce recovered speech/OCR to comparable characters only.
 
@@ -1534,7 +1548,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
         name = str(profile.get("name") or "").strip()
         details = [
             clean_detail(profile.get("appearance")),
-            clean_detail(profile.get("clothing")),
+            compact_clothing_detail(profile.get("clothing")),
         ]
         # Compare individual visible facts, not an entire comma-joined field.
         # Appearance and clothing often repeat the same garment in a different
@@ -1852,7 +1866,7 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
                 continue
             aliases = names(value.get("aliases"))
             appearance = compact_character_detail(value.get("appearance"))
-            clothing = compact_character_detail(value.get("clothing"))
+            clothing = compact_clothing_detail(value.get("clothing"))
             first_appearance = str(
                 value.get("firstAppearance")
                 or value.get("introduction")

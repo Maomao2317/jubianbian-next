@@ -45,7 +45,7 @@ window.APP_CONFIG = {
   statusText: {
     queued: "待开始",
     running: "进行中",
-    review: "待复核",
+    review: "已完成（有检查提示）",
     done: "已完成",
     failed: "失败",
   },
@@ -70,7 +70,7 @@ window.APP_CONFIG = {
     reviewing: "复核台词和画面内容",
     merging: "整理字幕与画面",
     exporting: "生成导出文件",
-    review: "等待用户复核",
+    review: "内容检查完成",
     done: "识别完成",
     failed: "识别失败",
   },

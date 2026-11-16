@@ -52,7 +52,7 @@ STAGE_MESSAGES = {
     "vision": "正在整理人物和画面内容", "repairing": "正在核对并补全内容",
     "reviewing": "正在核对台词和画面内容", "merging": "正在整理剧本内容",
     "exporting": "正在生成下载文件", "done": "处理完成，剧本可下载",
-    "review": "内容检查完成，请查看提示并手动确认复核", "failed": "本次处理未完成，请查看任务详情",
+    "review": "处理完成，剧本可下载；内容检查提示见详情底部", "failed": "本次处理未完成，请查看任务详情",
 }
 
 
@@ -79,16 +79,20 @@ def user_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for event in events:
         raw_status = event.get("status")
-        status = "failed" if raw_status == "quality_blocked" else raw_status
-        status = status if status in {"queued", "running", "review", "done", "failed"} else "running"
+        status = "failed" if raw_status == "quality_blocked" else "done" if raw_status == "review" else raw_status
+        status = status if status in {"queued", "running", "done", "failed"} else "running"
         stage = event.get("stage")
         if stage == "quality_blocked":
             stage = "failed"
+        elif stage == "review":
+            stage = "done"
         if stage not in STAGE_MESSAGES:
-            stage = {"queued": "queued", "review": "review", "done": "done", "failed": "failed"}.get(status, "reviewing")
+            stage = {"queued": "queued", "done": "done", "failed": "failed"}.get(status, "reviewing")
         message = STAGE_MESSAGES[stage]
-        if event.get("type") == "user_approved":
-            message = "已确认查看检查提示，剧本可下载"
+        if event.get("type") in {"review_required", "completed_with_findings"}:
+            message = "处理完成，剧本可下载；内容检查提示见详情底部"
+        elif event.get("type") == "user_approved":
+            message = "处理完成，剧本可下载"
         elif event.get("type") in {"admin_recheck_failed_restored", "admin_recheck_restored"}:
             message = "已恢复上次完成的剧本"
         result.append({"type": "stage", "status": status,
@@ -114,16 +118,19 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
               "durationSec", "estimatedMinutes", "creditsUsed", "progressPercent", "stageProgressPercent",
               "createdAt", "updatedAt", "completedAt", "batchId", "batchTitle", "batchIndex", "batchTotal"}
     result = {key: value for key, value in task.items() if key in fields}
-    status = task.get("status")
-    result["status"] = status if status in {"queued", "running", "review", "done", "failed"} else "running"
+    internal_status = task.get("status")
+    status = "done" if internal_status == "review" else internal_status
+    result["status"] = status if status in {"queued", "running", "done", "failed"} else "running"
     quality_blocked = task.get("status") == "failed" and task.get("stage") == "quality_blocked"
     if quality_blocked:
         # This is an internal gate/audit state. Customers only need the public
         # failure state; revealing the gate name would expose implementation
         # details that are intentionally confined to the admin console.
         result["stage"] = "failed"
+    elif task.get("stage") == "review":
+        result["stage"] = "done"
     elif task.get("stage") not in STAGE_MESSAGES:
-        result["stage"] = {"queued": "queued", "review": "review", "done": "done", "failed": "failed"}.get(
+        result["stage"] = {"queued": "queued", "done": "done", "failed": "failed"}.get(
             result["status"], "reviewing"
         )
     quality = task.get("quality") if isinstance(task.get("quality"), dict) else {}
@@ -134,18 +141,17 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
         public = user_issue(issue)
         if public not in issues:
             issues.append(public)
-    result["reviewAvailable"] = task.get("status") == "review"
+    result["reviewAvailable"] = False
     result["quality"] = {"issues": [] if quality_blocked else issues}
-    # Failed quality candidates are retained for admin audit and accounting,
-    # but exposing their body in the customer detail API would be an implicit
-    # delivery that bypasses the P0 gate. Only completed and explicit review
-    # states may return screenplay content to the owner.
+    # Internal ``review`` rows are completed screenplays with quality hints.
+    # They remain distinguishable to administrators, but no longer gate owner
+    # access or downloads.
     result["result"] = (
         user_result(task.get("result"))
         if task.get("status") in {"done", "review"}
         else None
     )
-    if task.get("status") == "done" and task.get("result") is not None:
+    if task.get("status") in {"done", "review"} and task.get("result") is not None:
         result["downloadable"] = has_screenplay_body(task.get("result"))
     if task.get("error"):
         result["error"] = "本次未能生成可用剧本，请重试或联系管理员查看处理详情。"

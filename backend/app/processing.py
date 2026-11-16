@@ -47,7 +47,7 @@ from .media import probe_duration
 from .providers import ark_fallback_message, ark_prepare_video, ark_recognize, ark_recognize_range, ark_review_target_text, ark_task_id, openai_script, openai_transcribe
 from .glm_provider import glm_prepare_video, glm_recognize, glm_recognize_range
 from .recognition_cache import RecognitionCache, recognition_cache, discard_local_proxy
-from .rechecks import has_pending_recheck, restore_recheck_snapshot
+from .rechecks import has_pending_recheck, mark_recheck_resolved, restore_recheck_snapshot
 from .script import (
     apply_batch_character_context,
     has_screenplay_body,
@@ -1618,29 +1618,26 @@ async def process_task(task_id: str) -> None:
         mark_task_stage(task_id, status="running", stage="merging", progress_percent=82, message="正在整理字幕和画面文字")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000
-        # Keep P0 findings visible and send unresolved candidates for owner review.
+        # Keep P0 findings visible without turning them into a download gate.
         approved, blocking = quality_gate(quality)
-        quality["deliveryStatus"] = "approved" if approved else "review_required"
+        quality["deliveryStatus"] = "downloadable" if approved else "downloadable_with_findings"
         quality["automaticQualityStatus"] = "passed" if approved else "review_required"
         quality["blockingIssues"] = blocking
         completed_recheck = has_pending_recheck(task_id)
         if completed_recheck:
-            # Even a clean automatic gate cannot replace a version that was
-            # already delivered. The owner must compare the candidate
-            # with the preserved snapshot and explicitly accept it.
-            quality["deliveryStatus"] = "review_required"
+            # The previous version remains in snapshot history, while the
+            # completed candidate is published immediately like any other
+            # generated screenplay.
             quality["recheck"] = {
                 "previousVersionPreserved": True,
-                "userApprovalRequired": True,
+                "userApprovalRequired": False,
+                "autoPublished": True,
             }
-        can_deliver = approved and not completed_recheck
-        final_status = "done" if can_deliver else "review"
-        final_stage = "done" if can_deliver else "review"
-        final_message = "识别完成" if can_deliver else "识别完成，等待用户复核"
+        final_message = "识别完成，剧本可下载" if approved else "识别完成，剧本可下载；请查看内容检查提示"
         update_task(
             task_id,
-            status=final_status,
-            stage=final_stage,
+            status="done",
+            stage="done",
             progress_percent=100,
             result_json=json.dumps(script, ensure_ascii=False),
             quality_json=json.dumps(quality, ensure_ascii=False),
@@ -1653,6 +1650,9 @@ async def process_task(task_id: str) -> None:
             api_cost_rmb=usage.get("api_cost_rmb", 0),
             completed_at=now_iso(),
         )
+        if completed_recheck:
+            with db() as connection:
+                mark_recheck_resolved(connection, task_id, "approved")
         await asyncio.to_thread(discard_local_proxy, task_id)
         if batch_id:
             try:
@@ -1676,10 +1676,10 @@ async def process_task(task_id: str) -> None:
                 )
         record_task_event(
             task_id,
-            "completed" if can_deliver else "review_required",
+            "completed" if approved else "completed_with_findings",
             final_message,
-            status=final_status,
-            stage=final_stage,
+            status="done",
+            stage="done",
             progress_percent=100,
             duration_ms=elapsed_ms,
         )
@@ -1695,7 +1695,7 @@ async def process_task(task_id: str) -> None:
         failure_quality = getattr(exc, "quality", {})
         failure_candidate = getattr(exc, "candidate", None)
         quality_failure = _is_quality_gate_failure(exc)
-        review_required = quality_failure and isinstance(failure_candidate, dict)
+        review_required = quality_failure and isinstance(failure_candidate, dict) and has_screenplay_body(failure_candidate)
         attempts = int(row["attempts"] or 0) + 1
         if not quality_failure and attempts <= 2 and not _is_non_retryable_provider_error(exc):
             update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试：{_task_error_message(exc)}")
@@ -1703,7 +1703,7 @@ async def process_task(task_id: str) -> None:
             logger.warning("task_retry_auto task_id=%s attempt=%s error=%s", task_id, attempts, safe_error_text(exc))
             return
         message = (
-            f"自动质量检查未通过，候选稿已保存并进入待复核：{_task_error_message(exc)}"
+            f"自动质量检查未通过，候选稿已保存并开放下载；请查看内容检查提示：{_task_error_message(exc)}"
             if review_required else (
                 f"自动质量门禁未通过：{_task_error_message(exc)}；没有可供复核的候选稿"
                 if quality_failure else f"处理失败：{_task_error_message(exc)}"
@@ -1751,12 +1751,12 @@ async def process_task(task_id: str) -> None:
         if isinstance(failure_quality, dict) and failure_quality:
             failure_quality["providerUsage"] = failure_usage
             failure_quality["deliveryStatus"] = (
-                "review_required" if review_required else "failed_quality_guard" if quality_failure else "failed"
+                "downloadable_with_findings" if review_required else "failed_quality_guard" if quality_failure else "failed"
             )
             if quality_failure:
                 failure_quality["automatedResolution"] = {
-                    "status": "review_required" if review_required else "quality_blocked",
-                    "manualReview": review_required,
+                    "status": "downloadable_with_findings" if review_required else "quality_blocked",
+                    "manualReview": False,
                     "qualityRefund": False,
                 }
             failure_accounting["quality_json"] = json.dumps(failure_quality, ensure_ascii=False)
@@ -1764,8 +1764,8 @@ async def process_task(task_id: str) -> None:
             failure_accounting["result_json"] = json.dumps(failure_candidate, ensure_ascii=False)
         update_task(
             task_id,
-            status="review" if review_required else "failed",
-            stage="review" if review_required else "quality_blocked" if quality_failure else "failed",
+            status="done" if review_required else "failed",
+            stage="done" if review_required else "quality_blocked" if quality_failure else "failed",
             progress_percent=100,
             error=None if review_required else message,
             completed_at=now_iso(),
@@ -1773,10 +1773,10 @@ async def process_task(task_id: str) -> None:
         )
         record_task_event(
             task_id,
-            "review_required" if review_required else "quality_blocked" if quality_failure else "failed",
+            "completed_with_findings" if review_required else "quality_blocked" if quality_failure else "failed",
             message,
-            status="review" if review_required else "failed",
-            stage="review" if review_required else "quality_blocked" if quality_failure else "failed",
+            status="done" if review_required else "failed",
+            stage="done" if review_required else "quality_blocked" if quality_failure else "failed",
             progress_percent=100,
             duration_ms=(time.perf_counter() - started) * 1000,
         )
@@ -1791,7 +1791,7 @@ async def process_task(task_id: str) -> None:
                     safe_error_text(continuity_error),
                 )
         if review_required:
-            logger.info("task_review_required task_id=%s duration_ms=%.1f blockers=%s", task_id,
+            logger.info("task_completed_with_findings task_id=%s duration_ms=%.1f blockers=%s", task_id,
                         (time.perf_counter() - started) * 1000,
                         len((failure_quality or {}).get("blockingIssues", [])))
         elif quality_failure:

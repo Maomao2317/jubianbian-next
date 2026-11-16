@@ -470,6 +470,12 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertIn("visibleSpeaker", prompt)
         self.assertIn("小晨", prompt)
 
+    def test_generation_prompts_keep_clothing_brief_without_weakening_dialogue(self):
+        prompt = providers.ark_prompt("第1集", 60)
+        self.assertIn("穿搭只保留一至两个", prompt)
+        self.assertIn("不得写成长串服饰清单", prompt)
+        self.assertIn("完整保留原话", prompt)
+
     def test_batch_continuity_waits_until_terminal_and_persists_script_labels(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
