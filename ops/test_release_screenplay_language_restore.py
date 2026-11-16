@@ -70,6 +70,10 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
             "f8a67d050a7cd1f0fea48b70ac3ec7f0d119d698",
         )
         self.assertEqual(
+            release.RELEASE_SOURCE_COMMIT,
+            "92defc8580c9bdb41711ac823f6eab9e80eef2fd",
+        )
+        self.assertEqual(
             release.RELEASE_BASE_COMMIT,
             "d3e4ab222cde0a359cab89c264e110e9f94f7ff7",
         )
@@ -86,6 +90,22 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
         self.assertNotIn(release.TRANSLATION_FILE, release.PRODUCTION_CHANGED_FILES)
         self.assertEqual(release.REMOVE_FILES["staging"], [])
         self.assertEqual(release.REMOVE_FILES["production"], [release.TRANSLATION_FILE])
+
+    def test_release_ancestry_allows_release_guard_commits_on_pushed_source(self):
+        expected = [
+            release.RELEASE_SOURCE_COMMIT.encode(),
+            release.RELEASE_BASE_COMMIT.encode(),
+            release.RELEASE_BASE_PARENT_COMMIT.encode(),
+            release.RELEASE_MERGE_COMMIT.encode(),
+            release.PRODUCTION_SOURCE_COMMIT.encode(),
+            release.STAGING_LANGUAGE_COMMIT.encode(),
+        ]
+        with patch.object(release.common, "git", side_effect=expected):
+            release.verify_release_ancestry("a" * 40)
+
+        with patch.object(release.common, "git", side_effect=[b"not-the-source"]):
+            with self.assertRaises(AssertionError):
+                release.verify_release_ancestry("a" * 40)
 
     def test_parse_args_requires_action_and_full_sha(self):
         sha = "a" * 40
