@@ -141,6 +141,36 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(normalized_again["scenes"][0]["blocks"][0], blocks[0])
         self.assertEqual(normalized_again["scenes"][0]["blocks"][1]["text"], blocks[1]["text"])
 
+    def test_only_clothing_is_compacted_while_appearance_action_and_dialogue_stay_complete(self):
+        appearance = "梳双丸子头、脸颊圆润、眼神明亮、个子娇小"
+        action_text = "希希先扶住缸沿，再谨慎探身向内观察，确认奶奶的位置后才伸出右手。"
+        raw = {
+            "characterProfiles": [{
+                "name": "希希",
+                "appearance": appearance,
+                "clothing": "红色碎花棉袄、黑色长裤、白色布鞋、银色手镯",
+            }],
+            "scenes": [{
+                "heading": "1-1 日 外 农家院子",
+                "characters": ["希希"],
+                "blocks": [
+                    {"type": "action", "text": action_text},
+                    {"type": "dialogue", "speaker": "希希", "text": "奶奶，我来帮你！"},
+                ],
+            }],
+        }
+        script = normalize_script(raw, "第1集")
+        profile = script["characterProfiles"][0]
+        self.assertEqual(profile["appearance"], appearance)
+        self.assertEqual(profile["clothing"], "红色碎花棉袄、黑色长裤")
+        action, dialogue = script["scenes"][0]["blocks"]
+        self.assertTrue(action["text"].endswith(action_text))
+        self.assertIn("红色碎花棉袄", action["text"])
+        self.assertIn("黑色长裤", action["text"])
+        self.assertNotIn("白色布鞋", action["text"])
+        self.assertNotIn("银色手镯", action["text"])
+        self.assertEqual(dialogue["text"], "奶奶，我来帮你！")
+
     def test_scene_only_names_delimit_mentions_in_other_scenes_too(self):
         raw = {"characters": ["周青"], "characterProfiles": [
             {"name": "周青", "appearance": "留着黑色长发"}], "scenes": [

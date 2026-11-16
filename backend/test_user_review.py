@@ -3,8 +3,8 @@ import asyncio
 import gc
 import json
 from pathlib import Path
-import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -22,9 +22,9 @@ class JsonRequest:
 
 class UserReviewTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.db_patch = patch.object(auth_store, "DB_PATH", Path(self.temp.name) / "review.sqlite3")
+        self.db_path = Path(__file__).parent / f".test-user-review-{uuid.uuid4().hex}.sqlite3"
+        self.addCleanup(self.db_path.unlink, missing_ok=True)
+        self.db_patch = patch.object(auth_store, "DB_PATH", self.db_path)
         self.db_patch.start()
         self.addCleanup(self.db_patch.stop)
         self.user_patch = patch.object(routes, "current_user", return_value={"id": "owner", "role": "user"})
@@ -55,18 +55,15 @@ class UserReviewTests(unittest.TestCase):
     def approve(self, ids):
         return asyncio.run(routes.approve_tasks_batch(JsonRequest({"taskIds": ids})))
 
-    def test_single_review_unlocks_download_and_preserves_findings_and_credits(self):
-        with self.assertRaises(HTTPException) as caught:
-            routes.download_task(None, "one", "md")
-        self.assertEqual(caught.exception.status_code, 409)
-        asyncio.run(routes.approve_task(None, "one"))
+    def test_single_review_is_immediately_downloadable_and_preserves_findings_and_credits(self):
+        detail = routes.task_detail(None, "one")
+        self.assertEqual((detail["status"], detail["stage"]), ("done", "done"))
+        self.assertFalse(detail["reviewAvailable"])
+        self.assertTrue(detail["downloadable"])
         row = self.row("one")
-        self.assertEqual((row["status"], row["stage"], row["progress_percent"], row["credits_used"]), ("done", "done", 100, 2))
+        self.assertEqual((row["status"], row["stage"], row["credits_used"]), ("review", "review", 2))
         quality = json.loads(row["quality_json"])
         self.assertEqual(quality["issues"], [self.issue])
-        self.assertEqual((quality["approvedBy"], quality["approvalRole"]), ("owner", "user"))
-        self.assertEqual(quality["automaticQualityStatus"], "review_required")
-        self.assertFalse(quality["recheck"]["adminApprovalRequired"])
         for fmt in ("md", "txt"):
             self.assertIn("我们出发吧", routes.download_task(None, "one", fmt).body.decode())
 
@@ -81,20 +78,14 @@ class UserReviewTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT count(*) FROM credit_ledger").fetchone()[0], 0)
         self.assertIn("我们出发吧", routes.download_batch(None, "batch", "txt").body.decode())
 
-    def test_bulk_download_requires_all_pending_reviews_and_never_approves(self):
-        asyncio.run(routes.approve_task(None, "one"))
+    def test_bulk_download_includes_pending_review_rows_without_approving_them(self):
         self.add_task("foreign-review", user="other", index=3)
         for download in (lambda: routes.download_batch(None, "batch", "txt"),
                          lambda: routes.download_all_tasks(None, "md")):
-            with self.assertRaises(HTTPException) as caught:
-                download()
-            self.assertEqual(caught.exception.status_code, 409)
+            self.assertIn("我们出发吧", download().body.decode())
+        self.assertEqual(self.row("one")["status"], "review")
         self.assertEqual(self.row("two")["status"], "review")
-        with self.assertRaises(HTTPException):
-            routes.download_task(None, "two", "md")
-        asyncio.run(routes.approve_task(None, "two"))
-        self.assertIn("我们出发吧", routes.download_batch(None, "batch", "txt").body.decode())
-        self.assertIn("我们出发吧", routes.download_all_tasks(None, "md").body.decode())
+        self.assertIn("我们出发吧", routes.download_task(None, "two", "md").body.decode())
 
     def test_cross_owner_or_missing_task_rolls_back_whole_batch(self):
         self.add_task("foreign", user="other")
@@ -193,6 +184,8 @@ class UserReviewTests(unittest.TestCase):
         self.add_task("active", status="running")
         self.assertEqual([task["id"] for task in routes.list_tasks(None, status="running")], ["active"])
         self.assertEqual({task["id"] for task in routes.list_tasks(None, status="review")}, {"one", "two"})
+        self.assertEqual({task["id"] for task in routes.list_tasks(None, status="done")}, {"one", "two"})
+        self.assertTrue(all(task["status"] == "done" for task in routes.list_tasks(None, status="done")))
 
     def test_customer_copy_hides_internal_diagnostics_and_admin_retains_them(self):
         issue = {"severity": "P0", "tag": "疑似漏台词片段", "description": "独立 ASR OCR 模型覆盖率 0%",
@@ -207,7 +200,9 @@ class UserReviewTests(unittest.TestCase):
         task_store.record_task_event("one", "review_required", leaked_message, status="review", stage="review",
                                      duration_ms=1125125)
         detail = routes.task_detail(None, "one")
-        self.assertEqual(detail["status"], "review")
+        self.assertEqual((detail["status"], detail["stage"]), ("done", "done"))
+        self.assertFalse(detail["reviewAvailable"])
+        self.assertTrue(detail["downloadable"])
         self.assertEqual(len(detail["quality"]["issues"]), 1)
         self.assertIn("00:32–00:38", detail["quality"]["issues"][0]["description"])
         self.assertIn("第 1 场第 2 段", detail["quality"]["issues"][0]["description"])
@@ -227,9 +222,6 @@ class UserReviewTests(unittest.TestCase):
             self.assertEqual(admin["model"], "internal-model")
             self.assertEqual(admin["events"][0]["message"], leaked_message)
             self.assertEqual(admin["events"][0]["durationMs"], 1125125)
-        with self.assertRaises(HTTPException):
-            routes.download_task(None, "one", "md")
-        asyncio.run(routes.approve_task(None, "one"))
         self.assertIn("我们出发吧", routes.download_task(None, "one", "md").body.decode())
 
     def test_quality_blocked_candidate_is_admin_only(self):

@@ -1,4 +1,4 @@
-"""Prepare and deploy the pushed screenplay-language patch to staging only.
+"""Prepare and deploy the pushed screenplay delivery patch to staging only.
 
 Run on the application host:
 python3 release_screenplay_language.py prepare|deploy SHA
@@ -19,10 +19,27 @@ from release_gpu_transport import stop_when_compute_idle
 BASELINE = "8a22e0c97c2d102ec8b99441658b9df06ab73aab"
 BASE_BUILD = "screenplay-language-20261113-8a22e0c"
 REF = "codex/script-translation-language"
-APP_FILES = ["backend/app/providers.py"]
+APP_FILES = [
+    "backend/app/processing.py",
+    "backend/app/providers.py",
+    "backend/app/routes.py",
+    "backend/app/script.py",
+    "backend/app/translation.py",
+    "backend/app/user_view.py",
+    "web-staging/css/app.css",
+    "web-staging/js/app.js",
+    "web-staging/js/config.js",
+]
 NEW_FILES = set()
-CHANGED_TEST_FILES = ["backend/test_ark_cost_control.py"]
-FRONTEND_TEST_FILES = []
+CHANGED_TEST_FILES = [
+    "backend/test_ark_cost_control.py",
+    "backend/test_provider_delivery.py",
+    "backend/test_script_quality.py",
+    "backend/test_translation.py",
+    "backend/test_user_review.py",
+    "backend/test_visual_description.py",
+]
+FRONTEND_TEST_FILES = ["web-staging/test-user-review.cjs"]
 RELEASE_SUPPORT_FILES = [
     "ops/release_screenplay_language.py",
     "ops/test_release_screenplay_language.py",
@@ -33,6 +50,7 @@ PROJECT = "jubianbian-staging"
 PORT = 18000
 SITE = "staging"
 STAGING_ENVIRONMENT_OVERRIDES = {"JBB_VIDEO_PROVIDER": "ark"}
+BUILD_PREFIX = "review-download-20261116-"
 
 
 def image_id(image):
@@ -237,7 +255,7 @@ def deploy(commit, build, base):
 
 def main(argv=None):
     mode, commit = parse_args(sys.argv if argv is None else argv)
-    build = "screenplay-language-20261113-" + commit[:7]
+    build = BUILD_PREFIX + commit[:7]
     base = Path("/opt/jubianbian-" + build)
     with Path("/run/lock/jubianbian-quality-release.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

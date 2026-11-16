@@ -22,9 +22,27 @@ class ScreenplayLanguageReleaseTests(unittest.TestCase):
         self.assertEqual(self.release.BASE_BUILD, "screenplay-language-20261113-8a22e0c")
         self.assertEqual(self.release.PROJECT, "jubianbian-staging")
         self.assertEqual(self.release.STAGING_ENVIRONMENT_OVERRIDES, {"JBB_VIDEO_PROVIDER": "ark"})
-        self.assertEqual(self.release.APP_FILES, ["backend/app/providers.py"])
-        self.assertEqual(self.release.CHANGED_TEST_FILES, ["backend/test_ark_cost_control.py"])
-        self.assertEqual(self.release.FRONTEND_TEST_FILES, [])
+        self.assertEqual(self.release.APP_FILES, [
+            "backend/app/processing.py",
+            "backend/app/providers.py",
+            "backend/app/routes.py",
+            "backend/app/script.py",
+            "backend/app/translation.py",
+            "backend/app/user_view.py",
+            "web-staging/css/app.css",
+            "web-staging/js/app.js",
+            "web-staging/js/config.js",
+        ])
+        self.assertEqual(self.release.CHANGED_TEST_FILES, [
+            "backend/test_ark_cost_control.py",
+            "backend/test_provider_delivery.py",
+            "backend/test_script_quality.py",
+            "backend/test_translation.py",
+            "backend/test_user_review.py",
+            "backend/test_visual_description.py",
+        ])
+        self.assertEqual(self.release.FRONTEND_TEST_FILES, ["web-staging/test-user-review.cjs"])
+        self.assertEqual(self.release.BUILD_PREFIX, "review-download-20261116-")
         self.assertEqual(self.release.NEW_FILES, set())
         self.assertNotIn("docker-compose.yml", self.release.ALLOWED)
         self.assertNotIn("fangzhou.env", self.release.ALLOWED)

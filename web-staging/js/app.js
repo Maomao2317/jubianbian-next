@@ -21,7 +21,6 @@
     status: "all",
     tasks: [],
     current: null,
-    reviewIds: [],
     profile: null,
     rechargeTier: "personal",
     authMode: "login",
@@ -164,7 +163,9 @@
   }
 
   function normalizeUserTask(task) {
-    return task;
+    if (task?.status !== "review") return task;
+    return { ...task, status: "done", stage: "done", reviewAvailable: false,
+      downloadable: Boolean(task.result) };
   }
 
   function renderHeader() {
@@ -248,11 +249,11 @@
   }
 
   function adminTaskStatus(item) {
-    const labels = { done: "成功", review: "待用户复核", failed: "失败", running: "进行中", queued: "排队中" };
+    const labels = { done: "成功", review: "有检查提示", failed: "失败", running: "进行中", queued: "排队中" };
     const partial = item.status === "failed" && Number(item.failed_count) < Number(item.task_count);
     const label = partial ? "部分失败" : Object.hasOwn(labels, item.status) ? labels[item.status] : "状态未知";
     const tone = item.status === "done" ? "on" : item.status === "failed" ? "off" : "wait";
-    const counts = [["done_count", "完成"], ["running_count", "进行中"], ["queued_count", "排队"], ["review_count", "待复核"], ["failed_count", "失败"]];
+    const counts = [["done_count", "完成"], ["running_count", "进行中"], ["queued_count", "排队"], ["review_count", "有检查提示"], ["failed_count", "失败"]];
     const detail = Number(item.task_count) > 1 ? counts.filter(([key]) => Number(item[key]) > 0).map(([key, text]) => `${text} ${Number(item[key])}`).join(" · ") : "";
     return `<span class="admin-status ${tone}">${label}</span>${detail ? `<small class="admin-task-counts">${detail}</small>` : ""}`;
   }
@@ -340,13 +341,13 @@
       }
       const nav = tabs.map(item => `<button class="admin-tab ${tab === item.id ? "active" : ""}" aria-pressed="${tab === item.id}" data-action="admin-tab" data-tab="${item.id}">${item.label}</button>`).join("");
       const billing = overview.apiCostSource === "provider_billing";
-      let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total || 0}</strong><small>正常账号 ${overview.users.active || 0}</small></article><article><span>用户积分余额合计</span><strong>${Number(overview.users.credits || 0).toFixed(1)}</strong><small>积分</small></article><article><span>视频任务总数</span><strong>${overview.tasks.total || 0}</strong><small>进行中 ${overview.tasks.running || 0} · 排队 ${overview.tasks.queued || 0}</small><small>完成 ${overview.tasks.done || 0} · 待复核 ${overview.tasks.review || 0} · 失败 ${overview.tasks.failed || 0}</small></article><article><span>${billing ? "本月 API 账单" : "API 调用成本"}</span><strong>¥ ${Number(overview.apiCostRmb || 0).toFixed(2)}</strong><small>${billing ? `${escapeHtml(overview.apiCostMonth || "")} · 服务商账单有延迟` : "累计本地记录 · 本月账单暂未获取"}</small></article></div>`;
+      let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total || 0}</strong><small>正常账号 ${overview.users.active || 0}</small></article><article><span>用户积分余额合计</span><strong>${Number(overview.users.credits || 0).toFixed(1)}</strong><small>积分</small></article><article><span>视频任务总数</span><strong>${overview.tasks.total || 0}</strong><small>进行中 ${overview.tasks.running || 0} · 排队 ${overview.tasks.queued || 0}</small><small>完成 ${overview.tasks.done || 0} · 有检查提示 ${overview.tasks.review || 0} · 失败 ${overview.tasks.failed || 0}</small></article><article><span>${billing ? "本月 API 账单" : "API 调用成本"}</span><strong>¥ ${Number(overview.apiCostRmb || 0).toFixed(2)}</strong><small>${billing ? `${escapeHtml(overview.apiCostMonth || "")} · 服务商账单有延迟` : "累计本地记录 · 本月账单暂未获取"}</small></article></div>`;
       if (tab === "users") {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>人民币充值与账号启停；1 分钟 = ${POINTS_PER_MINUTE} 积分</p></div><span>${users.total} 个账号</span></div><div class="admin-toolbar"><input id="adminUserKeyword" aria-label="搜索用户名称或邮箱" value="${escapeHtml(state.adminUserKeyword)}" placeholder="搜索用户名称或邮箱" /><select id="adminUserStatus" aria-label="账号状态"><option value="all" ${state.adminUserStatus === "all" ? "selected" : ""}>全部账号</option><option value="active" ${state.adminUserStatus === "active" ? "selected" : ""}>正常</option><option value="disabled" ${state.adminUserStatus === "disabled" ? "selected" : ""}>已停用</option></select><button class="admin-action admin-search-btn" data-action="admin-user-search">筛选</button><button class="admin-action" data-action="admin-user-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>角色</th><th>状态</th><th>剩余积分</th><th>累计计费 / 可用时长</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td>${adminUserIdentity(user)}</td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${Number(user.credits || 0).toFixed(1)}</strong> 积分</td><td><strong>已用 ${Number(user.totalUsed || 0).toFixed(1)} 分钟</strong><small>可用 ${(Number(user.credits || 0) / POINTS_PER_MINUTE).toFixed(1)} 分钟</small></td><td><button class="admin-action" data-action="admin-credit" data-id="${escapeHtml(user.id)}">人民币充值</button><button class="admin-action ${user.isActive ? "admin-danger" : ""}" data-action="admin-status" data-id="${escapeHtml(user.id)}" data-active="${user.isActive ? "0" : "1"}" ${user.id === state.profile.id ? 'disabled title="不能停用当前登录账号"' : ""}>${user.id === state.profile.id ? "当前账号" : user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无匹配用户，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-user-page", state.adminUserPage, users.total, 20)}</div>`;
       } else if (tab === "credits") {
         body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>充值与积分流水</h2><p>充值按 1 元 = 12.8 积分入账；退费为积分退回，扣款为积分消费。为用户充值请前往“用户管理”。</p></div><span>${rechargePage.total} 笔流水</span></div><div class="ledger-legend" aria-label="流水类型说明">${["recharge", "refund", "consume", "grant", "adjustment"].map(ledgerBadge).join("")}<span class="ledger-legend-note">＋ 积分增加 / − 积分减少</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" aria-label="搜索用户账号或备注" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户名称、账号或备注" /><select id="adminRechargeType" aria-label="流水类型"><option value="all">全部类型</option>${Object.entries(ledgerTypes).map(([key, value]) => `<option value="${key}" ${state.adminRechargeType === key ? "selected" : ""}>${value.symbol} ${value.label}</option>`).join("")}</select><label class="admin-date-label">开始日期<input id="adminRechargeFrom" aria-label="流水开始日期" title="开始日期" type="date" value="${state.adminRechargeFrom}" /></label><label class="admin-date-label">结束日期<input id="adminRechargeTo" aria-label="流水结束日期" title="结束日期" type="date" value="${state.adminRechargeTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div>${adminLedgerSummary(rechargePage.summary)}<div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>流水类型</th><th>充值金额（元）</th><th>积分变动</th><th>变动后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(adminLedgerRow).join("") || `<tr><td colspan="7">暂无匹配的流水，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-recharge-page", state.adminRechargePage, rechargePage.total, 10)}</div>`;
       } else if (tab === "tasks" || tab === "usage") {
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按批次汇总；默认 Lite 优先，质量检查未通过的候选稿进入待复核。</p></div><span>${tasks.total} 个批次</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" aria-label="搜索任务、用户名称或账号" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务、用户名称或账号" /><select id="adminTaskUser" aria-label="任务所属用户"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${escapeHtml(user.id)}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.name || "未命名用户")} · ${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus" aria-label="任务状态"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>待用户复核</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><label class="admin-date-label">开始日期<input id="adminTaskFrom" type="date" aria-label="任务开始日期" title="开始日期" value="${state.adminTaskFrom}" /></label><label class="admin-date-label">结束日期<input id="adminTaskTo" type="date" aria-label="任务结束日期" title="结束日期" value="${state.adminTaskTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button><button class="admin-action" data-action="admin-task-reset">重置</button></div><div class="admin-table-wrap"><table class="admin-task-table"><thead><tr><th>任务 / 用户</th><th>状态</th><th>计费 / 模型</th><th>收益</th><th>时间 / 操作</th></tr></thead><tbody>${tasks.items.map(item => {
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按批次汇总；默认 Lite 优先，质量检查提示不影响用户下载。</p></div><span>${tasks.total} 个批次</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" aria-label="搜索任务、用户名称或账号" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务、用户名称或账号" /><select id="adminTaskUser" aria-label="任务所属用户"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${escapeHtml(user.id)}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.name || "未命名用户")} · ${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus" aria-label="任务状态"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>有检查提示</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><label class="admin-date-label">开始日期<input id="adminTaskFrom" type="date" aria-label="任务开始日期" title="开始日期" value="${state.adminTaskFrom}" /></label><label class="admin-date-label">结束日期<input id="adminTaskTo" type="date" aria-label="任务结束日期" title="结束日期" value="${state.adminTaskTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button><button class="admin-action" data-action="admin-task-reset">重置</button></div><div class="admin-table-wrap"><table class="admin-task-table"><thead><tr><th>任务 / 用户</th><th>状态</th><th>计费 / 模型</th><th>收益</th><th>时间 / 操作</th></tr></thead><tbody>${tasks.items.map(item => {
           const reviewId = (Array.isArray(item.review_task_ids) && item.review_task_ids[0]) || item.id;
           const actions = `<button class="admin-action" data-action="admin-review" data-id="${escapeHtml(reviewId)}">查看详情</button>` + (item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${escapeHtml(item.id)}" title="重试失败任务通常会重新扣费，已有免费复核任务除外">重试</button>` : "");
           return `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(reviewId)}">${escapeHtml(item.title || item.id)}</button><small>${escapeHtml(item.file_name || "")}</small><span class="admin-task-user">${adminUserIdentity(item)}</span></td><td>${adminTaskStatus(item)}</td><td>${adminTaskBilling(item)}${adminModelUsage(item)}</td><td>${adminEconomics(item)}</td><td><span class="admin-task-time"><small>创建 ${formatDate(item.created_at)}</small><small>完成 ${item.completed_at ? formatDate(item.completed_at) : "—"}</small></span><span class="admin-task-actions">${actions}</span></td></tr>`;
@@ -466,8 +467,7 @@
     const quickAction = isCompletedTask(task)
       ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>`
       : task.status === "failed"
-        ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>`
-        : task.status === "review" ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看并复核</button>` : "";
+        ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>` : "";
     return `<article class="task-row" data-open="${task.id}" data-scroll-key="task:${escapeHtml(task.id)}">
       <div class="file-mark" aria-hidden="true"><span></span></div>
       <div class="task-main">
@@ -526,18 +526,17 @@
   // Batch rows intentionally keep each episode action available after expansion.
   function batchRow(group) {
     const done = group.tasks.filter((task) => isCompletedTask(task)).length;
-    const review = group.tasks.filter((task) => task.status === "review").length;
     const running = group.tasks.filter((task) => task.status === "running").length;
     const compressing = group.tasks.filter((task) => task.status === "running" && task.stage === "compressing").length;
     const compressionQueued = group.tasks.filter((task) => task.status === "running" && task.stage === "compression_queued").length;
     const failed = group.tasks.filter((task) => task.status === "failed").length;
     const expanded = Boolean(state.expandedBatches[group.id]);
     const remaining = group.tasks.reduce((sum, task) => !["queued", "running"].includes(task.status) ? sum : sum + Number(task.estimatedMinutes || 1) * Math.max(0.05, 1 - Number(task.progressPercent || 0) / 100), 0);
-    const eta = remaining ? formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8)))) : review ? "等待用户复核" : failed ? "请检查失败任务" : "已完成";
-    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : review ? "待复核" : "待开始";
-    const downloads = `<span class="batch-downloads">${review ? `<button class="row-link" type="button" data-action="review-batch" data-id="${group.id}">批量复核（${review}集）</button>` : ""}${done && !review ? `<button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button>` : ""}</span>`;
+    const eta = remaining ? formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8)))) : failed ? "请检查失败任务" : "已完成";
+    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    const downloads = `<span class="batch-downloads">${done ? `<button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button>` : ""}</span>`;
     const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (task.status === "failed" ? 0 : isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
-    const compressionSummary = `${review ? ` · 待复核 ${review} 集` : ""}${compressing ? ` · 压缩中 ${compressing} 集` : ""}${compressionQueued ? ` · 等待压缩 ${compressionQueued} 集` : ""}`;
+    const compressionSummary = `${compressing ? ` · 压缩中 ${compressing} 集` : ""}${compressionQueued ? ` · 等待压缩 ${compressionQueued} 集` : ""}`;
     const totalDurationSec = group.tasks.reduce((sum, task) => sum + Math.max(0, Number(task.durationSec) || 0), 0);
     const durationSummary = totalDurationSec > 0 ? ` · 视频总时长 ${formatDuration(totalDurationSec)}` : "";
     return `<div class="batch-group ${expanded ? "is-expanded" : ""}" data-scroll-key="batch:${escapeHtml(group.id)}"><div class="batch-row"><button class="batch-toggle" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""}${compressionSummary} · ${percent}% · ${eta}${durationSummary}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${downloads}</div>${expanded ? `<div class="batch-children">${group.tasks.slice().sort((a, b) => { const ae = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.POSITIVE_INFINITY; const be = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.POSITIVE_INFINITY; return ae - be || Number(a.batchIndex || 0) - Number(b.batchIndex || 0); }).map(taskRow).join("")}</div>` : ""}</div>`;
@@ -644,7 +643,7 @@
         </div>
         <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
           <p class="mobile-upload-note">手机端可查看已有任务。上传视频和新建任务请使用电脑端。</p>
-          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) && !state.tasks.some(task => task.status === "review") ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) && !state.tasks.some(task => task.status === "review") ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
+          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
           ${state.queue.blocked ? `<div class="queue-blocked-notice">当前排队预计超过 10 小时，暂时不能继续上传，请稍后再试。</div>` : state.queue.waitMinutes ? `<div class="queue-summary">当前预计排队 ${formatEta(state.queue.waitMinutes)} · 可同时处理 ${state.queue.workerConcurrency || 8} 个视频</div>` : ""}
           <div class="toolbar">
             <label class="search-wrap">
@@ -806,12 +805,6 @@
     return `<div class="admin-review-issues">${issues.length ? issues.map(issue => `<p><b>${escapeHtml(issue.severity || "提示")}</b>${escapeHtml(issue.description || issue.tag || issue)}</p>`).join("") : "<p>暂无结构化问题提示，请核对剧本正文。</p>"}</div>`;
   }
 
-  function openUserReview(tasks) {
-    if (!tasks.length) { toast("没有待复核的剧本，请刷新任务列表"); return; }
-    state.reviewIds = tasks.map(task => task.id);
-    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="userReviewTitle"><div class="modal-head"><h2 id="userReviewTitle">${tasks.length > 1 ? "批量复核" : "确认复核"}</h2><button class="close-btn" data-action="close-modal" aria-label="关闭">×</button></div><p class="quality-note quality-warning">以下 ${tasks.length} 集仍有未解决的问题，可能存在漏台词或内容不完整。请对照原视频核对后再确认下载；确认仅代表接受当前版本，不代表问题已修复。</p>${tasks.map(task => `<section class="review-item"><strong>${escapeHtml(task.title || task.fileName || task.id)}</strong>${reviewIssuesMarkup(task)}<details><summary>查看本集剧本</summary>${scriptPreview(task.result)}</details></section>`).join("")}<p class="quality-note">空剧本不能确认通过。如有一集无法通过，本次批量确认不会提交任何一集。</p><div class="modal-actions"><button class="primary-btn" data-action="confirm-user-review">接受当前版本并开放下载（${tasks.length}集）</button><button class="cancel-btn" data-action="close-modal">取消</button></div></div></div>`;
-  }
-
   function renderResult(task) {
     if (!task.result) return `<div class="empty-result"><strong>剧本内容暂未生成</strong><span>任务虽然已完成，但当前没有可展示的剧本内容，请稍后刷新或重新识别。</span></div>`;
     return `<div class="result-layout">
@@ -825,14 +818,19 @@
             <div><dt>完成时间</dt><dd>${formatDate(task.completedAt || task.createdAt)}</dd></div>
           </dl>
         </div>
-        <div class="aside-section quality-section">
-          <span class="aside-label">内容检查提示</span>
-          <p class="quality-note">建议对照原视频核对人名、台词及情节内容。</p>
-          ${task.status === "review" ? `<p class="quality-note quality-warning">请核对正文和以下提示，复核确认后即可下载。</p>${reviewIssuesMarkup(task)}` : ""}
-        </div>
       </aside>
       <div class="result-main">${scriptPreview(task.result, task.outputLanguage)}</div>
     </div>`;
+  }
+
+  function renderReviewSummary(task) {
+    if (!task?.result) return "";
+    const issues = reviewIssues(task);
+    return `<section class="review-summary">
+      <span class="aside-label">内容复核提示</span>
+      <p class="quality-note">建议对照原视频核对人名、台词及情节内容。以下提示仅供检查，不影响剧本下载。</p>
+      ${issues.length ? reviewIssuesMarkup(task) : `<p class="review-summary-empty">暂无额外检查提示。</p>`}
+    </section>`;
   }
 
   function renderTaskTimeline(task, adminMode = false) {
@@ -843,14 +841,14 @@
       <div class="timeline-list">${events.map((event) => {
         const publicStage = event.stage && cfg.stageText[event.stage] ? event.stage : "reviewing";
         const publicStatus = event.status && cfg.statusText[event.status] ? event.status : "running";
-        const needsReview = event.status === "review" || event.type === "review_required" || publicStage === "review";
+        const needsReview = event.status === "review" || ["review_required", "completed_with_findings"].includes(event.type) || publicStage === "review";
         const label = needsReview
-          ? "待用户复核"
+          ? "处理完成"
           : (["done", "failed"].includes(publicStatus)
             ? cfg.statusText[publicStatus]
             : (cfg.stageText[publicStage] || cfg.statusText[publicStatus] || "状态更新"));
         let publicMessage = `任务进度已更新：${label}`;
-        if (needsReview) publicMessage = "内容检查已完成，请查看提示并手动确认复核";
+        if (needsReview) publicMessage = "处理完成，剧本可下载；内容检查提示见页面底部";
         else if (publicStatus === "done" || publicStage === "done") publicMessage = "处理完成，剧本可下载";
         else if (publicStatus === "failed" || publicStage === "failed") publicMessage = "本次处理未完成，请查看任务详情";
         if (event.type === "user_approved") publicMessage = "已确认查看检查提示，剧本可下载";
@@ -873,7 +871,7 @@
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
-      </div>` : task.status === "review" ? `<button class="primary-btn" data-action="review-task" data-id="${task.id}">确认复核并开放下载</button>` : "";
+      </div>` : "";
     let content = "";
     if (isCompletedTask(task) || task.status === "review") content = renderResult(task);
     if (task.status === "queued" || task.status === "running") content = pipeline(task);
@@ -894,6 +892,7 @@
         </div>
         ${content}
         ${renderTaskTimeline(task)}
+        ${isCompletedTask(task) ? renderReviewSummary(task) : ""}
       </section>`;
   }
 
@@ -1466,46 +1465,6 @@
 
     const action = actionElement.dataset.action;
     const id = actionElement.dataset.id;
-    if (action === "review-task" || action === "review-batch") {
-      if (actionElement.dataset.busy === "1") return;
-      actionElement.dataset.busy = "1";
-      actionElement.disabled = true;
-      try {
-        const ids = action === "review-task" ? [id] : state.tasks.filter(task => task.batchId === id && task.status === "review").map(task => task.id);
-        if (ids.length > 999) throw new Error("单次最多复核 999 集");
-        const tasks = [];
-        for (let offset = 0; offset < ids.length; offset += 6) {
-          tasks.push(...await Promise.all(ids.slice(offset, offset + 6).map(taskId => api.getTask(taskId))));
-        }
-        openUserReview(tasks.filter(task => task.status === "review"));
-      } catch (error) { toast(error.message || "复核内容加载失败", "error"); }
-      finally { delete actionElement.dataset.busy; actionElement.disabled = false; }
-      return;
-    }
-    if (action === "confirm-user-review") {
-      if (actionElement.dataset.busy === "1" || !state.reviewIds.length) return;
-      const ids = state.reviewIds.slice();
-      const buttons = Array.from(actionElement.closest(".modal")?.querySelectorAll("button") || []);
-      const label = actionElement.textContent;
-      actionElement.dataset.busy = "1";
-      buttons.forEach(button => { button.disabled = true; });
-      actionElement.textContent = "正在确认…";
-      try {
-        if (ids.length === 1) await api.approveTask(ids[0]);
-        else await api.approveTasks(ids);
-        state.reviewIds = [];
-        $("#modalRoot").innerHTML = "";
-        toast("复核完成，可以下载");
-        if (state.view === "detail") await refreshDetail();
-        else await refreshList();
-      } catch (error) {
-        delete actionElement.dataset.busy;
-        buttons.forEach(button => { button.disabled = false; });
-        actionElement.textContent = label;
-        toast(error.message || "复核确认失败", "error");
-      }
-      return;
-    }
     if (action === "admin-tab") {
       state.adminTab = actionElement.dataset.tab;
       document.querySelectorAll(".admin-tab").forEach((button) => button.classList.toggle("active", button === actionElement));
@@ -1568,7 +1527,7 @@
         const restoreButton = task.recheck && task.recheck.pending ? `<button class="secondary-btn" type="button" data-action="admin-review-restore" data-id="${task.id}">恢复上次已完成版本</button>` : "";
         const episodes = Array.isArray(task.episodes) ? task.episodes : [];
         const episodeLinks = episodes.length > 1 ? `<nav class="review-episodes" aria-label="选择剧集">${episodes.map(episode => `<button class="${episode.id === task.id ? "primary-btn" : "secondary-btn"}" data-action="admin-review" data-id="${episode.id}" ${episode.id === task.id ? "disabled" : ""}>${escapeHtml(episode.fileName || episode.title)} · ${escapeHtml(cfg.statusText[episode.status] || episode.status)}</button>`).join("")}</nav>` : "";
-        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="adminTaskDetailTitle"><div class="modal-head"><h2 id="adminTaskDetailTitle">任务详情</h2><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${episodeLinks}<div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong>${statusBadge(task)}<span>${escapeHtml(task.fileName || "")}</span></div><p class="quality-note">时长 ${formatDuration(task.durationSec)} · 消耗 ${Number(task.creditsUsed ?? task.estimatedMinutes ?? 0).toFixed(1)} 分钟 · 进度 ${Number(task.progressPercent) || 0}% · 创建 ${formatDate(task.createdAt)}</p>${task.error ? `<p class="quality-note quality-warning">${escapeHtml(task.error)}</p>` : ""}${task.status === "review" ? `<p class="quality-note quality-warning">等待用户自行复核确认，确认后用户即可下载。</p>` : ""}${reviewIssuesMarkup(task)}<p class="quality-note">${escapeHtml(evidenceLabel)}</p><div class="admin-review-script">${task.result ? scriptPreview(task.result) : "<p>暂无剧本正文。</p>"}</div>${renderTaskTimeline(task, true)}<div class="modal-actions">${restoreButton}<button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
+        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="adminTaskDetailTitle"><div class="modal-head"><h2 id="adminTaskDetailTitle">任务详情</h2><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${episodeLinks}<div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong>${statusBadge(task)}<span>${escapeHtml(task.fileName || "")}</span></div><p class="quality-note">时长 ${formatDuration(task.durationSec)} · 消耗 ${Number(task.creditsUsed ?? task.estimatedMinutes ?? 0).toFixed(1)} 分钟 · 进度 ${Number(task.progressPercent) || 0}% · 创建 ${formatDate(task.createdAt)}</p>${task.error ? `<p class="quality-note quality-warning">${escapeHtml(task.error)}</p>` : ""}${task.status === "review" ? `<p class="quality-note quality-warning">该剧本已向用户开放下载；以下检查提示仍保留供核对。</p>` : ""}${reviewIssuesMarkup(task)}<p class="quality-note">${escapeHtml(evidenceLabel)}</p><div class="admin-review-script">${task.result ? scriptPreview(task.result) : "<p>暂无剧本正文。</p>"}</div>${renderTaskTimeline(task, true)}<div class="modal-actions">${restoreButton}<button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
       } catch (error) { toast(error.message || "任务详情加载失败", "error"); }
       finally {
         if (actionElement.isConnected) {

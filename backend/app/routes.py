@@ -984,8 +984,11 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
         value = f"%{keyword.strip()}%"
         params.extend([value, value])
     if status and status != "all":
-        clauses.append("status = ?")
-        params.append(status)
+        if status == "done":
+            clauses.append("status IN ('done', 'review')")
+        else:
+            clauses.append("status = ?")
+            params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     # The workspace only needs metadata.  Do not read/parse result_json here:
     # completed screenplays can be large, and their full payload is fetched by
@@ -1534,10 +1537,10 @@ def _download_markdown(task: dict[str, Any]) -> str:
 def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
     user = current_user(request)
     with db() as connection:
-        pending = connection.execute("SELECT 1 FROM tasks WHERE user_id = ? AND status = 'review' LIMIT 1", (user["id"],)).fetchone()
-        if pending:
-            raise HTTPException(status_code=409, detail="请先完成全部待复核剧本的确认，再下载全部剧本")
-        rows = connection.execute("SELECT * FROM tasks WHERE user_id = ? AND status = 'done' ORDER BY created_at ASC", (user["id"],)).fetchall()
+        rows = connection.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND status IN ('done', 'review') ORDER BY created_at ASC",
+            (user["id"],),
+        ).fetchall()
     if not rows:
         raise HTTPException(status_code=409, detail="暂无已完成剧本")
     rows = [
@@ -1561,11 +1564,8 @@ def download_all_tasks(request: Request, fmt: str = Query("md", pattern="^(md|tx
 def download_batch(request: Request, batch_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
     user = current_user(request)
     with db() as connection:
-        pending = connection.execute("SELECT 1 FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'review' LIMIT 1", (user["id"], batch_id)).fetchone()
-        if pending:
-            raise HTTPException(status_code=409, detail="请先完成该批次全部待复核剧本的确认，再批量下载")
         rows = connection.execute(
-            "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? AND status = 'done' ORDER BY created_at ASC",
+            "SELECT * FROM tasks WHERE user_id = ? AND batch_id = ? AND status IN ('done', 'review') ORDER BY created_at ASC",
             (user["id"], batch_id),
         ).fetchall()
     if not rows:
@@ -1588,7 +1588,7 @@ def download_batch(request: Request, batch_id: str, fmt: str = Query("md", patte
 
 def download_task(request: Request, task_id: str, fmt: str = Query("md", pattern="^(md|txt)$")) -> Response:
     task = get_task(task_id, current_user(request)["id"])
-    if not task or task["status"] != "done" or not task.get("result"):
+    if not task or task["status"] not in {"done", "review"} or not task.get("result"):
         raise HTTPException(status_code=409, detail="剧本还不能下载")
     markdown = _download_markdown(task)
     content = markdown if fmt == "md" else re.sub(r"^#{1,6}\s+", "", markdown, flags=re.MULTILINE)

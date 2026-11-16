@@ -1179,7 +1179,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertTrue(processing._is_non_retryable_provider_error(caught.exception))
         self.assertFalse(processing._is_quality_gate_failure(caught.exception))
 
-    def test_process_task_quality_block_enters_review_without_refund(self):
+    def test_process_task_quality_findings_remain_downloadable_without_refund(self):
         candidate = self._funnel_script(resolved=False)
         quality = {
             "issues": [{"severity": "P0", "tag": "台词归属错", "description": "说话人未知"}],
@@ -1207,17 +1207,17 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             asyncio.run(processing.process_task("task-quality"))
         refund.assert_not_called()
         persisted = update.call_args.kwargs
-        self.assertEqual((persisted["status"], persisted["stage"]), ("review", "review"))
+        self.assertEqual((persisted["status"], persisted["stage"]), ("done", "done"))
         self.assertEqual(persisted["api_cost_rmb"], 0.08)
         self.assertEqual(persisted["total_tokens"], 15)
         self.assertEqual(json.loads(persisted["result_json"])["characters"], ["甲"])
         saved_quality = json.loads(persisted["quality_json"])
-        self.assertEqual(saved_quality["deliveryStatus"], "review_required")
+        self.assertEqual(saved_quality["deliveryStatus"], "downloadable_with_findings")
         self.assertEqual(saved_quality["blockingIssues"][0]["severity"], "P0")
-        self.assertEqual(record_event.call_args.args[1], "review_required")
-        self.assertEqual(record_event.call_args.kwargs["status"], "review")
+        self.assertEqual(record_event.call_args.args[1], "completed_with_findings")
+        self.assertEqual(record_event.call_args.kwargs["status"], "done")
 
-    def test_incomplete_quality_repair_with_candidate_enters_review(self):
+    def test_incomplete_quality_repair_candidate_is_downloadable_with_findings(self):
         candidate = self._funnel_script(resolved=False)
         quality = {
             "blockingIssues": [{"severity": "P0", "tag": "missing", "description": "gap remains"}],
@@ -1243,11 +1243,11 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             asyncio.run(processing.process_task("task-incomplete"))
         refund.assert_not_called()
         persisted = update.call_args.kwargs
-        self.assertEqual((persisted["status"], persisted["stage"]), ("review", "review"))
+        self.assertEqual((persisted["status"], persisted["stage"]), ("done", "done"))
         self.assertIsNone(persisted["error"])
         self.assertEqual(json.loads(persisted["result_json"])["scenes"][0]["blocks"][0]["type"], "action")
-        self.assertTrue(json.loads(persisted["quality_json"])["automatedResolution"]["manualReview"])
-        self.assertEqual(record_event.call_args.args[1], "review_required")
+        self.assertFalse(json.loads(persisted["quality_json"])["automatedResolution"]["manualReview"])
+        self.assertEqual(record_event.call_args.args[1], "completed_with_findings")
 
     def test_lite_blocking_result_gets_one_turbo_review_and_can_finish(self):
         evidence = {
