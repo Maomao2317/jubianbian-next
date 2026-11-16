@@ -2,15 +2,15 @@
 
 ## Version comparison
 
-At 2026-11-14, the staging container was observed at build
-`screenplay-language-20261113-8a22e0c` from commit
-`8a22e0c97c2d102ec8b99441658b9df06ab73aab`. The active staging compose also
+At 2026-11-16, the staging container was observed at build
+`screenplay-language-20261114-7de015c` from commit
+`7de015cf64673d13342b95bb01f867279cd7ec69`. The active staging compose also
 keeps the prior Double11 carousel-removal overlay. The runtime build label is
 not a substitute for comparing environment configuration or source trees.
 
 | Area | Staging (test) | Production |
 | --- | --- | --- |
-| Runtime identity at observation | `jubianbian-staging`, build `screenplay-language-20261113-8a22e0c`, label `staging` | Production is only fingerprint-checked for no change |
+| Runtime identity at observation | `jubianbian-staging`, build `screenplay-language-20261114-7de015c`, label `staging` | Production is only fingerprint-checked for no change |
 | Network | port `18000` | loopback port `8000`, served externally by production Caddy |
 | CORS | test origins | production origins |
 | Default provider | GLM before this release; Ark in this release | Not changed |

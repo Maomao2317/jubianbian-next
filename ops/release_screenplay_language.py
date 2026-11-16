@@ -16,8 +16,8 @@ import sys
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
-BASELINE = "8a22e0c97c2d102ec8b99441658b9df06ab73aab"
-BASE_BUILD = "screenplay-language-20261113-8a22e0c"
+BASELINE = "7de015cf64673d13342b95bb01f867279cd7ec69"
+BASE_BUILD = "screenplay-language-20261114-7de015c"
 REF = "codex/script-translation-language"
 APP_FILES = [
     "backend/app/processing.py",
@@ -32,7 +32,6 @@ APP_FILES = [
 ]
 NEW_FILES = set()
 CHANGED_TEST_FILES = [
-    "backend/test_ark_cost_control.py",
     "backend/test_provider_delivery.py",
     "backend/test_script_quality.py",
     "backend/test_translation.py",
