@@ -2,7 +2,11 @@
 from copy import deepcopy
 import unittest
 
-from app.script import add_character_visual_descriptions, normalize_script
+from app.script import (
+    add_character_visual_descriptions,
+    compact_action_character_introductions,
+    normalize_script,
+)
 
 
 class VisualDescriptionTests(unittest.TestCase):
@@ -29,7 +33,7 @@ class VisualDescriptionTests(unittest.TestCase):
         profiles = [{"name": name, "clothing": "穿蓝色外套、戴白色帽子"} for name in ("周青", "林海")]
         text = self.enrich("穿蓝色外套、戴白色帽子的周青扶着林海走出房门。", profiles)
         self.assertEqual(text.count("蓝色外套"), 2)
-        self.assertEqual(text.count("白色帽子"), 2)
+        self.assertNotIn("白色帽子", text)
 
     def test_existing_fact_overlapping_a_longer_name_is_not_split(self):
         profiles = [{"name": "母狮妈妈", "appearance": "成年母狮、金色毛发、褐色眼眸"}]
@@ -45,8 +49,8 @@ class VisualDescriptionTests(unittest.TestCase):
         text = self.enrich("穿蓝色外套的周青把门打开。", [{"name": "周青", "appearance": "黑色短发",
                                                           "clothing": "蓝色外套、白色帽子"}])
         self.assertEqual(text.count("蓝色外套"), 1)
-        self.assertIn("黑色短发", text)
-        self.assertIn("白色帽子", text)
+        self.assertNotIn("黑色短发", text)
+        self.assertNotIn("白色帽子", text)
         self.assertIn("把门打开", text)
 
     def test_punctuation_inside_profile_fact_does_not_split_the_introduction(self):
@@ -75,7 +79,7 @@ class VisualDescriptionTests(unittest.TestCase):
     def test_legacy_first_appearance_has_the_same_fact_deduplication(self):
         text = self.enrich("穿蓝色外套、戴白色帽子的周青把门打开。", [
             {"name": "周青", "firstAppearance": "戴白色帽子、穿蓝色外套的周青走来。"}])
-        self.assertEqual(text, "穿蓝色外套、戴白色帽子的周青把门打开。")
+        self.assertEqual(text, "穿蓝色外套的周青把门打开。")
 
     def test_wardrobe_change_and_repeated_actions_are_preserved(self):
         original = "穿红色外套的周青敲了两下门，周青敲了两下门。"
@@ -100,8 +104,9 @@ class VisualDescriptionTests(unittest.TestCase):
                      "clothing": "蓝色背心、蓝色头盔"}]
         original = "年长男性、同情周青的遭遇、蓝色背心、蓝色头盔的年长男性、同情周青的遭遇的骑手伸手拍了拍周青的后背。"
         text = self.enrich(original, profiles)
-        self.assertEqual(text.count("年长男性"), 1)
-        self.assertEqual(text.count("同情周青的遭遇"), 1)
+        self.assertNotIn("年长男性", text)
+        self.assertNotIn("同情周青的遭遇", text)
+        self.assertIn("穿蓝色背心的骑手伸手拍了拍", text)
         self.assertEqual(text.count("灰色外套"), 1)
         self.assertIn("骑手伸手拍了拍穿灰色外套的周青的后背", text)
 
@@ -141,7 +146,7 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(normalized_again["scenes"][0]["blocks"][0], blocks[0])
         self.assertEqual(normalized_again["scenes"][0]["blocks"][1]["text"], blocks[1]["text"])
 
-    def test_only_clothing_is_compacted_while_appearance_action_and_dialogue_stay_complete(self):
+    def test_visible_introduction_is_compact_while_action_and_dialogue_stay_complete(self):
         appearance = "梳双丸子头、脸颊圆润、眼神明亮、个子娇小"
         action_text = "希希先扶住缸沿，再谨慎探身向内观察，确认奶奶的位置后才伸出右手。"
         raw = {
@@ -165,11 +170,134 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(profile["clothing"], "红色碎花棉袄、黑色长裤")
         action, dialogue = script["scenes"][0]["blocks"]
         self.assertTrue(action["text"].endswith(action_text))
-        self.assertIn("红色碎花棉袄", action["text"])
-        self.assertIn("黑色长裤", action["text"])
+        self.assertIn("红色棉袄", action["text"])
+        self.assertNotIn("黑色长裤", action["text"])
+        self.assertNotIn("双丸子头", action["text"])
+        self.assertNotIn("脸颊圆润", action["text"])
         self.assertNotIn("白色布鞋", action["text"])
         self.assertNotIn("银色手镯", action["text"])
         self.assertEqual(dialogue["text"], "奶奶，我来帮你！")
+
+    def test_long_model_written_portraits_are_reduced_to_one_core_outfit(self):
+        cases = [
+            (
+                "顾岑舟",
+                "年轻男性、黑色偏分短发、眼下有痣",
+                "深灰色西装外套内搭黑色衬衫、西装领上别着带链条装饰的胸针",
+                "穿深灰西装、内搭黑衬衫的年轻男性、黑色偏分短发、眼下有痣、"
+                "深灰色西装外套内搭黑色衬衫、西装领上别着带链条装饰的胸针的"
+                "顾岑舟坐在长会议桌主位上，面前放着文件。",
+                "穿深灰色西装的顾岑舟坐在长会议桌主位上，面前放着文件。",
+            ),
+            (
+                "江晚",
+                "年轻女性、黑色大波浪长发",
+                "黑色吊带长裙、黑色粗花呢短外套、黑色高跟鞋、细手链",
+                "穿黑色开叉长裙、脚踩黑色高跟鞋的年轻女性、黑色大波浪长发、"
+                "黑色吊带长裙领口有珍珠装饰、后期穿黑色粗花呢短外套配白色衬衫"
+                "与黑色短裤的江晚迈步走进会议室，左手腕戴着细手链。",
+                "穿黑色长裙的江晚迈步走进会议室，左手腕戴着细手链。",
+            ),
+            (
+                "商场女销售",
+                "年轻女性、黑色头发扎成低马尾",
+                "米白色西装套装、同色上衣、白手套",
+                "穿米白西装、戴白手套的年轻女性、黑色头发扎成低马尾、"
+                "米白色西装套装、内搭同色系上衣的商场女销售双手接过黑卡，"
+                "低头微笑看向卡片。",
+                "穿米白色西装的商场女销售双手接过黑卡，低头微笑看向卡片。",
+            ),
+            (
+                "顾宜悦",
+                "年轻女性、黑色长卷发、头上别着粉色蝴蝶结发饰",
+                "粉色无袖连衣裙、白色大翻领",
+                "穿粉色连衣裙、头戴粉色蝴蝶结的年轻女性、黑色长卷发、"
+                "头上别着粉色蝴蝶结发饰、粉色无袖连衣裙、配有白色大翻领的"
+                "顾宜悦站在客厅中，转头看向进门的江晚，面露怒色。",
+                "穿粉色连衣裙的顾宜悦站在客厅中，转头看向进门的江晚，面露怒色。",
+            ),
+        ]
+        for name, appearance, clothing, action, expected in cases:
+            with self.subTest(name=name):
+                raw = {
+                    "characterProfiles": [{
+                        "name": name,
+                        "appearance": appearance,
+                        "clothing": clothing,
+                    }],
+                    "scenes": [{
+                        "heading": "1-1 日 内 会议室",
+                        "characters": [name],
+                        "blocks": [
+                            {"type": "action", "text": action},
+                            {"type": "dialogue", "speaker": name, "text": "原话必须完整保留。"},
+                        ],
+                    }],
+                }
+                first = normalize_script(deepcopy(raw), "第1集")
+                self.assertEqual(first["scenes"][0]["blocks"][0]["text"], expected)
+                self.assertEqual(
+                    first["scenes"][0]["blocks"][1]["text"], "原话必须完整保留。"
+                )
+                again = normalize_script(deepcopy(first), "第1集")
+                self.assertEqual(
+                    again["scenes"][0]["blocks"][0]["text"], expected
+                )
+                self.assertEqual(
+                    again["scenes"][0]["blocks"][1]["text"], "原话必须完整保留。"
+                )
+
+    def test_described_object_is_not_mistaken_for_the_acting_character(self):
+        original = "江晚走到穿深灰西装、戴胸针的顾岑舟身侧，将一只手搭在他的肩膀上。"
+        blocks = [{"type": "action", "text": original}]
+        compact_action_character_introductions(blocks, [{
+            "name": "顾岑舟",
+            "clothing": "深灰色西装外套、黑色衬衫、胸针",
+        }])
+        self.assertEqual(blocks[0]["text"], original)
+
+    def test_long_portrait_without_a_known_garment_keeps_only_name_and_action(self):
+        blocks = [{
+            "type": "action",
+            "text": "年轻女性、黑色长卷发、佩戴蝴蝶结发饰的顾宜悦站在客厅中。",
+        }]
+        compact_action_character_introductions(blocks, [{
+            "name": "顾宜悦",
+            "appearance": "年轻女性、黑色长卷发",
+        }])
+        self.assertEqual(blocks[0]["text"], "顾宜悦站在客厅中。")
+
+    def test_setting_before_long_portrait_is_preserved(self):
+        blocks = [
+            {
+                "type": "action",
+                "text": "会议室内，穿深灰西装、内搭黑衬衫的年轻男性、黑色偏分短发、"
+                "眼下有痣的顾岑舟坐在主位上，翻开文件。",
+            },
+            {"type": "dialogue", "speaker": "顾岑舟", "text": "开始吧。"},
+        ]
+        compact_action_character_introductions(blocks, [{
+            "name": "顾岑舟",
+            "clothing": "深灰色西装外套、黑色衬衫",
+        }])
+        self.assertEqual(
+            blocks[0]["text"],
+            "会议室内，穿深灰色西装的顾岑舟坐在主位上，翻开文件。",
+        )
+        self.assertEqual(blocks[1]["text"], "开始吧。")
+
+    def test_prior_walk_through_action_is_not_mistaken_for_clothing(self):
+        blocks = [{
+            "type": "action",
+            "text": "穿过走廊后，穿黑色长裙、戴项链的江晚走进会议室。",
+        }]
+        compact_action_character_introductions(blocks, [{
+            "name": "江晚",
+            "clothing": "黑色长裙、项链",
+        }])
+        self.assertEqual(
+            blocks[0]["text"], "穿过走廊后，穿黑色长裙的江晚走进会议室。"
+        )
 
     def test_scene_only_names_delimit_mentions_in_other_scenes_too(self):
         raw = {"characters": ["周青"], "characterProfiles": [

@@ -1,4 +1,4 @@
-"""Promote the pushed review/download patch without language delivery.
+"""Promote the pushed compact-character-introduction patch without language delivery.
 
 Run on the application host:
     python3 release_screenplay_language_restore.py prepare SHA
@@ -20,19 +20,19 @@ import release_quality_ledger as common
 
 
 REF = "codex/production-language-restore-20261113"
-BUILD_PREFIX = "review-download-no-language-20261116-"
+BUILD_PREFIX = "character-intro-no-language-20261116-"
 SITES = {
     "staging": {
         "project": "jubianbian-staging",
         "port": 18000,
-        "baseline": "ec0fe613e07e6692c11b7a589c7961cb83508ad1",
-        "baselineBuild": "review-download-20261116-ec0fe61",
+        "baseline": "b0041e4f6383fa206356e2d6d4ed36d62d204e7b",
+        "baselineBuild": "review-download-no-language-20261116-b0041e4",
     },
     "production": {
         "project": "jubianbian",
         "port": 8000,
-        "baseline": "2905441b2731c84e90ae9c799a48d33e5c5063d5",
-        "baselineBuild": "screenplay-language-rollback-20261113-2905441",
+        "baseline": "b0041e4f6383fa206356e2d6d4ed36d62d204e7b",
+        "baselineBuild": "review-download-no-language-20261116-b0041e4",
     },
 }
 APP_FILES = [
@@ -50,19 +50,10 @@ APP_FILES += [
 ]
 REMOVE_FILES = ["backend/app/translation.py"]
 CHANGED_FILES = {
-    "backend/app/processing.py",
     "backend/app/providers.py",
-    "backend/app/routes.py",
     "backend/app/script.py",
-    "backend/app/user_view.py",
     "backend/test_provider_delivery.py",
-    "backend/test_script_quality.py",
-    "backend/test_user_review.py",
     "backend/test_visual_description.py",
-    "web-staging/css/app.css",
-    "web-staging/js/app.js",
-    "web-staging/js/config.js",
-    "web-staging/test-user-review.cjs",
     "ops/release_screenplay_language_restore.py",
     "ops/test_release_screenplay_language_restore.py",
 }
@@ -100,7 +91,9 @@ def verify_release_content(base):
     assert "确认复核并开放下载" not in sources["web-staging/js/app.js"]
     assert "renderReviewSummary" in sources["web-staging/js/app.js"]
     assert "compact_clothing_detail" in sources["backend/app/script.py"]
-    assert "穿搭只保留一至两个" in sources["backend/app/providers.py"]
+    assert "compact_action_character_introductions" in sources["backend/app/script.py"]
+    assert "只保留一个最能识别的核心穿搭" in sources["backend/app/providers.py"]
+    assert "正文不要罗列发型、五官、年龄外观" in sources["backend/app/providers.py"]
     assert "完整保留原话" in sources["backend/app/providers.py"]
     assert not (base / "backend/app/translation.py").exists()
 
@@ -136,17 +129,13 @@ def _runtime_content(project, path):
     return common.output(["docker", "exec", project + "-app-1", "cat", "/app/" + path])
 
 
-def _assert_translation_state(site, project, baseline):
+def _assert_translation_state(site, project):
     command = (
         "if test -f /app/backend/app/translation.py; "
         "then cat /app/backend/app/translation.py; else printf __ABSENT__; fi"
     )
     actual = common.output(["docker", "exec", project + "-app-1", "sh", "-c", command])
-    if site == "production":
-        assert actual == b"__ABSENT__", "Production unexpectedly contains translation.py"
-    else:
-        expected = common.git("show", baseline + ":backend/app/translation.py")
-        assert common.digest(actual) == common.digest(expected), "Staging translation baseline differs"
+    assert actual == b"__ABSENT__", site.capitalize() + " unexpectedly contains translation.py"
 
 
 def _validate_image(image):
@@ -161,6 +150,9 @@ def _validate_image(image):
         "assert '确认复核并开放下载' not in combined\n"
         "assert 'renderReviewSummary' in combined\n"
         "assert 'compact_clothing_detail' in combined\n"
+        "assert 'compact_action_character_introductions' in combined\n"
+        "assert '只保留一个最能识别的核心穿搭' in combined\n"
+        "assert '完整保留原话' in combined\n"
         "assert not Path('/app/backend/app/translation.py').exists()\n"
     )
     common.run([
@@ -195,7 +187,7 @@ def prepare(commit, build, base):
             assert_known_runtime_digest(
                 path, common.digest(_runtime_content(project, path)), common.digest(expected)
             )
-        _assert_translation_state(site, project, settings["baseline"])
+        _assert_translation_state(site, project)
 
     checks = test_files(commit)
     digests = {}
@@ -303,8 +295,8 @@ def deploy(site, commit, build, base):
     files = before["Config"]["Labels"]["com.docker.compose.project.config_files"].split(",")
     assert all(Path(path).parent == root for path in files), "Unexpected Compose path"
     compose = common.compose_args(project, root, files)
-    overlay = root / "release-review-download-no-language.yml"
-    assert str(overlay) not in files, "Review/download release overlay is already active"
+    overlay = root / "release-character-intro-no-language.yml"
+    assert str(overlay) not in files, "Character-introduction release overlay is already active"
     new_compose = common.compose_args(project, root, files + [str(overlay)])
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))
 

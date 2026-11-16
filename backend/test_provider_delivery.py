@@ -472,8 +472,9 @@ class ProviderDeliveryTests(unittest.TestCase):
 
     def test_generation_prompts_keep_clothing_brief_without_weakening_dialogue(self):
         prompt = providers.ark_prompt("第1集", 60)
-        self.assertIn("穿搭只保留一至两个", prompt)
-        self.assertIn("不得写成长串服饰清单", prompt)
+        self.assertIn("只保留一个最能识别的核心穿搭", prompt)
+        self.assertIn("不得写成长串人物形象或服饰清单", prompt)
+        self.assertIn("正文不要罗列发型、五官、年龄外观", prompt)
         self.assertIn("完整保留原话", prompt)
 
     def test_batch_continuity_waits_until_terminal_and_persists_script_labels(self):

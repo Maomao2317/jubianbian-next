@@ -16,8 +16,14 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
     def _release_sources(self):
         sources = {path: "legacy code" for path in release.APP_FILES}
         sources["web-staging/js/app.js"] = "function renderReviewSummary() {}"
-        sources["backend/app/script.py"] = "def compact_clothing_detail(): pass"
-        sources["backend/app/providers.py"] = "穿搭只保留一至两个；完整保留原话"
+        sources["backend/app/script.py"] = (
+            "def compact_clothing_detail(): pass\n"
+            "def compact_action_character_introductions(): pass"
+        )
+        sources["backend/app/providers.py"] = (
+            "只保留一个最能识别的核心穿搭；"
+            "正文不要罗列发型、五官、年龄外观；完整保留原话"
+        )
         return sources
 
     def _verify_sources(self, sources, translation_exists=False):
@@ -38,8 +44,15 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
         self.assertEqual(release.SITES["staging"]["port"], 18000)
         self.assertEqual(release.SITES["production"]["project"], "jubianbian")
         self.assertEqual(release.SITES["production"]["port"], 8000)
-        self.assertNotEqual(
+        self.assertEqual(
             release.SITES["staging"]["baseline"], release.SITES["production"]["baseline"]
+        )
+        self.assertEqual(
+            release.SITES["staging"]["baselineBuild"],
+            "review-download-no-language-20261116-b0041e4",
+        )
+        self.assertEqual(
+            release.BUILD_PREFIX, "character-intro-no-language-20261116-"
         )
 
     def test_parse_args_requires_action_and_full_sha(self):
@@ -68,6 +81,17 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
         release.assert_known_runtime_digest("backend/app/auth_store.py", "baseline", "baseline")
         with self.assertRaises(AssertionError):
             release.assert_known_runtime_digest("backend/app/auth_store.py", "unknown", "baseline")
+
+    def test_translation_module_must_be_absent_from_both_live_sites(self):
+        for site in ("staging", "production"):
+            with self.subTest(site=site), patch.object(
+                release.common, "output", return_value=b"__ABSENT__"
+            ):
+                release._assert_translation_state(site, "jubianbian-" + site)
+            with self.subTest(site=site + "-present"), patch.object(
+                release.common, "output", return_value=b"translation code"
+            ), self.assertRaises(AssertionError):
+                release._assert_translation_state(site, "jubianbian-" + site)
 
     def test_content_guard_accepts_review_download_without_language(self):
         self._verify_sources(self._release_sources())

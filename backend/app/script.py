@@ -233,6 +233,150 @@ def compact_clothing_detail(text: Any, *, max_parts: int = 2) -> str:
     return "、".join(parts[:max_parts])
 
 
+_CORE_CLOTHING_RE = re.compile(
+    r"^"
+    r"(?P<color>米白色?|深灰色?|浅灰色?|黑色?|白色?|红色?|蓝色?|粉色?|绿色?|"
+    r"紫色?|黄色?|棕色?|咖色?|卡其色?|藏青色?)?"
+    r"[^，、；。]{0,8}?"
+    r"(?P<garment>西装(?:外套|套装)?|连衣裙|长裙|短裙|礼服|旗袍|制服|校服|工装|"
+    r"棉袄|外套|大衣|风衣|夹克|毛衣|针织衫|衬衫|上衣|背心|T恤|短裤|长裤)"
+)
+_INTRODUCTION_DETAIL_RE = re.compile(
+    r"穿|身着|内搭|外搭|西装|裙|外套|衬衫|上衣|裤|鞋|手套|首饰|项链|胸针|"
+    r"手链|发饰|蝴蝶结|头发|短发|长发|卷发|马尾|年轻|男性|女性|眼下|面容"
+)
+_INTRODUCTION_CLAUSE_START_RE = re.compile(
+    r"^(?:身穿|身着|穿着|穿(?!过|越)|戴着|戴|梳着|梳|留着|留|扎着|扎|披着|披|"
+    r"(?:年轻|中年|年长|老年)(?:男性|女性|男人|女人|男士|女士)|"
+    r"(?:黑色?|白色?|棕色?|栗色?)?(?:头发|短发|长发|卷发|马尾))"
+)
+_INTRODUCTION_VISUAL_START_RE = re.compile(
+    r"身穿|身着|穿着|穿(?!过|越)|戴着|戴|梳着|梳|留着|留|扎着|扎|披着|披"
+)
+_INTRODUCTION_ACTION_RE = re.compile(
+    r"^(?:[（(][^）)]{0,8}[）)])?(?:先|再|随后|正|正在)?(?:迈步)?(?:双手|左手|右手)?(?:坐|走|站|接|看|拿|低头|抬|推|提|"
+    r"转|伸|将|把|扶|靠|笑|说|问|点|递|搭|触|抱|捧|进入|离开|回|望|放|端|拉|挽|握)"
+)
+
+
+def core_clothing_label(text: Any) -> str:
+    """Return one color-and-garment label, without styling/accessory inventory."""
+    value = compact_character_detail(text, max_chars=96)
+    for part in re.split(r"[，、；]", value):
+        part = re.sub(r"[（(][^）)]*[）)]", "", part).strip()
+        part = re.sub(
+            r"^(?:后期|随后)?(?:身穿|身着|穿着|穿|内搭|外搭|配|脚踩|戴着|戴)",
+            "",
+            part,
+        ).strip()
+        match = _CORE_CLOTHING_RE.search(part)
+        if not match:
+            continue
+        color = match.group("color") or ""
+        garment = match.group("garment")
+        if garment.startswith("西装"):
+            garment = "西装"
+        return color + garment
+    return ""
+
+
+def compact_action_character_introductions(
+    blocks: list[dict[str, Any]], profiles: list[dict[str, Any]]
+) -> None:
+    """Reduce only a long first-appearance prefix; preserve the full action.
+
+    A model may put hair, facial details, accessories, and several outfits in
+    front of a named character even when ``clothing`` was already compacted.
+    Rewrite only a sentence-leading descriptor immediately followed by that
+    character performing an action. Dialogue and everything after the name are
+    untouched.
+    """
+    profile_clothing: dict[str, str] = {}
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        name = str(profile.get("name") or "").strip()
+        if not name:
+            continue
+        profile_clothing[name] = core_clothing_label(
+            profile.get("clothing") or profile.get("firstAppearance")
+        )
+    if not profile_clothing:
+        return
+
+    for block in blocks:
+        if block.get("type") != "action":
+            continue
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+        for name in sorted(profile_clothing, key=len, reverse=True):
+            search_from = 0
+            while True:
+                match = re.search(re.escape(name), text[search_from:])
+                if match is None:
+                    break
+                name_start = search_from + match.start()
+                name_end = search_from + match.end()
+                sentence_start = max(
+                    (text.rfind(mark, 0, name_start) for mark in "。！？；"),
+                    default=-1,
+                ) + 1
+                descriptor_start = sentence_start
+                prior_names = [
+                    (text.rfind(other, sentence_start, name_start), other)
+                    for other in profile_clothing
+                    if other != name
+                ]
+                prior_names = [item for item in prior_names if item[0] >= sentence_start]
+                if prior_names:
+                    last_position, last_name = max(prior_names)
+                    after_name = last_position + len(last_name)
+                    after_previous = text[after_name:name_start]
+                    clause_offset = after_previous.rfind("，") + 1
+                    visual = _INTRODUCTION_VISUAL_START_RE.search(
+                        after_previous[clause_offset:]
+                    )
+                    if visual:
+                        descriptor_start = after_name + clause_offset + visual.start()
+                else:
+                    descriptor_area = text[sentence_start:name_start]
+                    for part in re.finditer(r"(?:^|[，、])([^，、]*)", descriptor_area):
+                        clause = part.group(1)
+                        visual = _INTRODUCTION_VISUAL_START_RE.search(clause)
+                        if visual:
+                            descriptor_start = sentence_start + part.start(1) + visual.start()
+                            break
+                        if _INTRODUCTION_CLAUSE_START_RE.match(clause.strip()):
+                            leading = len(clause) - len(clause.lstrip())
+                            descriptor_start = sentence_start + part.start(1) + leading
+                            break
+                prefix = text[descriptor_start:name_start]
+                suffix = text[name_end:]
+                compactable = (
+                    len(prefix.strip()) >= 10
+                    and (
+                        prefix.rstrip().endswith("的")
+                        or sum(prefix.count(mark) for mark in "，、；") >= 2
+                    )
+                    and _INTRODUCTION_DETAIL_RE.search(prefix)
+                    and _INTRODUCTION_ACTION_RE.match(suffix)
+                    and "“" not in prefix
+                    and "”" not in prefix
+                )
+                if compactable:
+                    leading_space = prefix[:len(prefix) - len(prefix.lstrip())]
+                    clothing = profile_clothing[name] or core_clothing_label(prefix)
+                    if clothing:
+                        replacement = leading_space + "穿" + clothing + "的" + name
+                    else:
+                        replacement = leading_space + name
+                    text = text[:descriptor_start] + replacement + text[name_end:]
+                    block["text"] = normalize_text(text, sentence=True)
+                    break
+                search_from = name_end
+
+
 def evidence_comparison_text(text: Any) -> str:
     """Reduce recovered speech/OCR to comparable characters only.
 
@@ -1724,6 +1868,7 @@ def add_character_visual_descriptions(blocks: list[dict[str, Any]], profiles: li
                 text = text[:name_position] + styled_prefix + text[name_position:]
                 block["text"] = normalize_text(text, sentence=True)
             introduced.add(name)
+    compact_action_character_introductions(blocks, profiles)
 
 
 def clean_environment(text: Any) -> str:
