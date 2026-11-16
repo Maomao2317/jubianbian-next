@@ -299,6 +299,28 @@ class VisualDescriptionTests(unittest.TestCase):
             blocks[0]["text"], "穿过走廊后，穿黑色长裙的江晚走进会议室。"
         )
 
+    def test_repeated_outfit_is_removed_without_changing_actions_or_dialogue(self):
+        blocks = [
+            {"type": "action", "text": "穿米白色上衣的诺诺妈抬手轻轻打开陆星尘的手，侧头摇头说话。"},
+            {"type": "action", "text": "身穿米白色波点露肩上衣的诺诺妈身体发软，靠进陆星尘的怀里，抬手抓住他的衬衫衣襟。"},
+            {"type": "action", "text": "身穿酒红色衬衫的陆星尘伸手环住诺诺妈，手掌轻拍她的后背安抚。"},
+            {"type": "action", "text": "身穿米白色波点露肩上衣的诺诺妈从陆星尘怀里抬起头，看向他开口说话。"},
+            {"type": "dialogue", "speaker": "诺诺妈", "text": "妈妈没事了，诺诺不用担心。"},
+        ]
+        original_actions = [block["text"] for block in blocks if block["type"] == "action"]
+        compact_action_character_introductions(blocks, [
+            {"name": "诺诺妈", "clothing": "米白色上衣"},
+            {"name": "陆星尘", "clothing": "酒红色衬衫"},
+        ])
+
+        actions = [block["text"] for block in blocks if block["type"] == "action"]
+        self.assertEqual(actions[0], original_actions[0])
+        self.assertIn("身体发软，靠进陆星尘的怀里，抬手抓住他的衬衫衣襟。", actions[1])
+        self.assertIn("伸手环住诺诺妈，手掌轻拍她的后背安抚。", actions[2])
+        self.assertIn("从陆星尘怀里抬起头，看向他开口说话。", actions[3])
+        self.assertEqual(sum("米白色" in action for action in actions), 1)
+        self.assertEqual(blocks[-1]["text"], "妈妈没事了，诺诺不用担心。")
+
     def test_scene_only_names_delimit_mentions_in_other_scenes_too(self):
         raw = {"characters": ["周青"], "characterProfiles": [
             {"name": "周青", "appearance": "留着黑色长发"}], "scenes": [

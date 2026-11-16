@@ -575,8 +575,20 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertIn("只保留一个最能识别的核心穿搭", prompt)
         self.assertIn("不得写成长串人物形象或服饰清单", prompt)
         self.assertIn("正文不要罗列发型、五官、年龄外观", prompt)
+        self.assertIn("核对可见动作的起始、过程和结果", prompt)
+        self.assertIn("门内外、朝向和目光", prompt)
+        self.assertIn("screenType=name_card、scene_label", prompt)
         self.assertIn("完整保留原话", prompt)
         self.assertIn("only one core identifying outfit", compact)
+        compact_review = providers.ark_prompt(
+            "第1集", 60, compact=True,
+            review_context={"scope": "issue_patches", "ranges": []},
+        )
+        self.assertIn("visible start, process, and result", compact)
+        self.assertIn("which side of a doorway they occupy", compact)
+        self.assertIn("screenType name_card or scene_label", compact)
+        self.assertIn("explicitly supported by the video", compact_review)
+        self.assertIn("preserve correct neighboring blocks", compact_review)
         self.assertIn("Do not list hair, facial details, age", compact)
         self.assertIn("preserve every spoken line verbatim", compact)
 

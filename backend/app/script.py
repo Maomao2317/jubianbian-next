@@ -238,7 +238,7 @@ _CORE_CLOTHING_RE = re.compile(
     r"(?P<color>米白色?|深灰色?|浅灰色?|黑色?|白色?|红色?|蓝色?|粉色?|绿色?|"
     r"紫色?|黄色?|棕色?|咖色?|卡其色?|藏青色?)?"
     r"[^，、；。]{0,8}?"
-    r"(?P<garment>西装(?:外套|套装)?|连衣裙|长裙|短裙|礼服|旗袍|制服|校服|工装|"
+    r"(?P<garment>西装(?:外套|套装)?|连衣裙|长裙|短裙|礼服|旗袍|制服|校服|工装|帽子?|"
     r"棉袄|外套|大衣|风衣|夹克|毛衣|针织衫|衬衫|上衣|背心|T恤|短裤|长裤)"
 )
 _INTRODUCTION_DETAIL_RE = re.compile(
@@ -273,6 +273,8 @@ def core_clothing_label(text: Any) -> str:
         if not match:
             continue
         color = match.group("color") or ""
+        if color and not color.endswith("色"):
+            color += "色"
         garment = match.group("garment")
         if garment.startswith("西装"):
             garment = "西装"
@@ -283,15 +285,16 @@ def core_clothing_label(text: Any) -> str:
 def compact_action_character_introductions(
     blocks: list[dict[str, Any]], profiles: list[dict[str, Any]]
 ) -> None:
-    """Reduce only a long first-appearance prefix; preserve the full action.
+    """Keep one short outfit label per character and preserve every action.
 
     A model may put hair, facial details, accessories, and several outfits in
     front of a named character even when ``clothing`` was already compacted.
-    Rewrite only a sentence-leading descriptor immediately followed by that
-    character performing an action. Dialogue and everything after the name are
-    untouched.
+    Rewrite only a sentence-leading descriptor immediately before a named
+    character. Repeated mentions of the same outfit are removed; dialogue and
+    all text after the name are untouched.
     """
     profile_clothing: dict[str, str] = {}
+    profile_details: dict[str, str] = {}
     for profile in profiles:
         if not isinstance(profile, dict):
             continue
@@ -301,9 +304,18 @@ def compact_action_character_introductions(
         profile_clothing[name] = core_clothing_label(
             profile.get("clothing") or profile.get("firstAppearance")
         )
+        profile_details[name] = "、".join(
+            str(profile.get(key) or "")
+            for key in ("appearance", "clothing", "firstAppearance")
+        )
     if not profile_clothing:
         return
 
+    embedded_name_references = {
+        name: {other for other in profile_clothing if other != name and other in profile_details[name]}
+        for name in profile_clothing
+    }
+    seen_clothing: dict[str, set[str]] = {}
     for block in blocks:
         if block.get("type") != "action":
             continue
@@ -326,19 +338,21 @@ def compact_action_character_introductions(
                 prior_names = [
                     (text.rfind(other, sentence_start, name_start), other)
                     for other in profile_clothing
-                    if other != name
+                    if other not in embedded_name_references.get(name, set())
                 ]
                 prior_names = [item for item in prior_names if item[0] >= sentence_start]
                 if prior_names:
-                    last_position, last_name = max(prior_names)
+                    last_position, last_name = max(prior_names, key=lambda item: (item[0], len(item[1])))
                     after_name = last_position + len(last_name)
                     after_previous = text[after_name:name_start]
                     clause_offset = after_previous.rfind("，") + 1
                     visual = _INTRODUCTION_VISUAL_START_RE.search(
                         after_previous[clause_offset:]
                     )
-                    if visual:
-                        descriptor_start = after_name + clause_offset + visual.start()
+                    if not visual:
+                        search_from = name_end
+                        continue
+                    descriptor_start = after_name + clause_offset + visual.start()
                 else:
                     descriptor_area = text[sentence_start:name_start]
                     for part in re.finditer(r"(?:^|[，、])([^，、]*)", descriptor_area):
@@ -353,6 +367,21 @@ def compact_action_character_introductions(
                             break
                 prefix = text[descriptor_start:name_start]
                 suffix = text[name_end:]
+                visual_start = _INTRODUCTION_VISUAL_START_RE.search(prefix)
+                clothing_match = (
+                    _CORE_CLOTHING_RE.search(prefix[visual_start.end():])
+                    if visual_start else None
+                )
+                visible_clothing = core_clothing_label(prefix)
+                seen = seen_clothing.setdefault(name, set())
+                if visible_clothing and visible_clothing in seen and visual_start and clothing_match:
+                    before = prefix[:visual_start.start()]
+                    after = prefix[visual_start.end() + clothing_match.end():]
+                    after = re.sub(r"^[、，；\s]+", "", after)
+                    after = re.sub(r"^的", "", after)
+                    text = text[:descriptor_start] + before + after + text[name_end:]
+                    block["text"] = normalize_text(text, sentence=True)
+                    break
                 compactable = (
                     len(prefix.strip()) >= 10
                     and (
@@ -366,14 +395,18 @@ def compact_action_character_introductions(
                 )
                 if compactable:
                     leading_space = prefix[:len(prefix) - len(prefix.lstrip())]
-                    clothing = profile_clothing[name] or core_clothing_label(prefix)
+                    clothing = visible_clothing or profile_clothing[name]
                     if clothing:
-                        replacement = leading_space + "穿" + clothing + "的" + name
+                        verb = "戴" if clothing.endswith(("帽", "帽子")) else "穿"
+                        replacement = leading_space + verb + clothing + "的" + name
+                        seen.add(clothing)
                     else:
                         replacement = leading_space + name
                     text = text[:descriptor_start] + replacement + text[name_end:]
                     block["text"] = normalize_text(text, sentence=True)
                     break
+                if visible_clothing:
+                    seen.add(visible_clothing)
                 search_from = name_end
 
 
@@ -734,6 +767,9 @@ def suppress_redundant_subtitles(script: dict[str, Any]) -> None:
             if not isinstance(block, dict):
                 continue
             block.pop("suppressInOutput", None)
+            if (block.get("type") == "screen_text"
+                    and str(block.get("screenType") or "").strip().lower() in {"name_card", "scene_label"}):
+                block["suppressInOutput"] = True
             if block.get("type") in {"dialogue", "vo"} and spoken_text(block):
                 spoken_by_episode.setdefault(episode_key(scene), []).append(block)
 
@@ -2607,6 +2643,10 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
 
     scenes = sorted(scenes, key=scene_sort_key)
     scenes = merge_continuous_scenes(scenes)
+    compact_action_character_introductions(
+        [block for scene in scenes for block in scene.get("blocks", [])],
+        enrichment_profiles,
+    )
     used_characters: list[str] = []
     for scene in scenes:
         for character in scene.get("characters", []):

@@ -70,6 +70,10 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
             "f8a67d050a7cd1f0fea48b70ac3ec7f0d119d698",
         )
         self.assertEqual(
+            release.RELEASE_BASE_COMMIT,
+            "cfd1b0870dc9113774b68d676ec91eff346e704e",
+        )
+        self.assertEqual(
             release.STAGING_LANGUAGE_COMMIT,
             "ec0fe613e07e6692c11b7a589c7961cb83508ad1",
         )

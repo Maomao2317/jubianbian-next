@@ -4,10 +4,38 @@ from unittest.mock import MagicMock, patch
 import unittest
 
 from app import routes
-from app.script import script_to_markdown
+from app.script import normalize_script, script_to_markdown, suppress_redundant_subtitles
 
 
 class DialogueExportTests(unittest.TestCase):
+    def test_internal_labels_and_dialogue_survive_repeated_normalization(self):
+        source = {"title": "第1集", "scenes": [{"heading": "1-1 日 内 客厅", "blocks": [
+            {"type": "action", "text": "林川站在门内，看向门外。", "startSec": 0, "endSec": 1},
+            {"type": "screen_text", "screenType": "name_card", "text": "林川", "startSec": 0, "endSec": 1},
+            {"type": "screen_text", "screenType": "scene_label", "text": "客厅", "startSec": 0, "endSec": 1},
+            {"type": "dialogue", "speaker": "林川", "text": "走。", "startSec": 1, "endSec": 2},
+            {"type": "screen_text", "screenType": "subtitle", "text": "走。", "startSec": 1, "endSec": 2},
+            {"type": "dialogue", "speaker": "林川", "text": "走。", "startSec": 3, "endSec": 4},
+            {"type": "screen_text", "screenType": "system", "text": "任务完成", "startSec": 4, "endSec": 5},
+            {"type": "screen_text", "screenType": "other", "text": "林川", "startSec": 5, "endSec": 6},
+        ]}]}
+        script = normalize_script(source, "第1集")
+        script = normalize_script(script, "第1集")
+        suppress_redundant_subtitles(script)
+        blocks = script["scenes"][0]["blocks"]
+        self.assertEqual([b["text"] for b in blocks if b["type"] == "dialogue"], ["走。", "走。"])
+        labels = {b["screenType"]: b for b in blocks if b["type"] == "screen_text"}
+        self.assertTrue(labels["name_card"]["suppressInOutput"])
+        self.assertTrue(labels["scene_label"]["suppressInOutput"])
+        self.assertTrue(labels["subtitle"]["suppressInOutput"])
+        self.assertFalse(labels["system"].get("suppressInOutput", False))
+        self.assertFalse(labels["other"].get("suppressInOutput", False))
+        output = script_to_markdown({"title": "第1集", "result": script})
+        self.assertEqual(output.count("林川：走。"), 2)
+        self.assertIn("任务完成", output)
+        self.assertIn("【字幕：林川】", output)
+        self.assertNotIn("【字幕：客厅】", output)
+
     def task(self, text, block_type="dialogue"):
         return {"id": "fixture", "title": "第1集", "status": "done", "result": {
             "title": "第1集", "scenes": [{"heading": "1-1 日 内 客厅", "blocks": [
