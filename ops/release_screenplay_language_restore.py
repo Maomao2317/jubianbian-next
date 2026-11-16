@@ -23,7 +23,7 @@ import release_quality_ledger as common
 REF = "codex/production-language-restore-20261113"
 BUILD_PREFIX = "character-intro-split-20261116-"
 RELEASE_MERGE_COMMIT = "f8a67d050a7cd1f0fea48b70ac3ec7f0d119d698"
-RELEASE_BASE_COMMIT = "cfd1b0870dc9113774b68d676ec91eff346e704e"
+RELEASE_BASE_COMMIT = "d3e4ab222cde0a359cab89c264e110e9f94f7ff7"
 PRODUCTION_SOURCE_COMMIT = "fb8e304decfa9b4d927975aa3e0e11bc85c57836"
 STAGING_LANGUAGE_COMMIT = "ec0fe613e07e6692c11b7a589c7961cb83508ad1"
 SITES = {
@@ -82,6 +82,7 @@ STAGING_CHANGED_FILES = {
     "backend/app/translation.py",
     "backend/app/user_view.py",
     "backend/test_ark_cost_control.py",
+    "backend/test_dialogue_export.py",
     "backend/test_large_batch.py",
     "backend/test_process_task_translation.py",
     "backend/test_provider_delivery.py",
