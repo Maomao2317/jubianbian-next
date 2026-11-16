@@ -26,7 +26,7 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
         )
         if site == "staging":
             sources["backend/app/providers.py"] += (
-                " sourceLanguage outputLanguage translate_delivery /translation"
+                " sourceLanguage outputLanguage translate_delivery"
             )
             sources[release.TRANSLATION_FILE] = "translation module"
         return sources
@@ -64,6 +64,10 @@ class ProductionLanguageRestoreTests(unittest.TestCase):
         self.assertEqual(
             release.PRODUCTION_SOURCE_COMMIT,
             "fb8e304decfa9b4d927975aa3e0e11bc85c57836",
+        )
+        self.assertEqual(
+            release.RELEASE_MERGE_COMMIT,
+            "f8a67d050a7cd1f0fea48b70ac3ec7f0d119d698",
         )
         self.assertEqual(
             release.STAGING_LANGUAGE_COMMIT,

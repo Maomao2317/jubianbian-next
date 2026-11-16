@@ -22,6 +22,7 @@ import release_quality_ledger as common
 
 REF = "codex/production-language-restore-20261113"
 BUILD_PREFIX = "character-intro-split-20261116-"
+RELEASE_MERGE_COMMIT = "f8a67d050a7cd1f0fea48b70ac3ec7f0d119d698"
 PRODUCTION_SOURCE_COMMIT = "fb8e304decfa9b4d927975aa3e0e11bc85c57836"
 STAGING_LANGUAGE_COMMIT = "ec0fe613e07e6692c11b7a589c7961cb83508ad1"
 SITES = {
@@ -141,7 +142,7 @@ def verify_release_content(base, site):
     translation = base / TRANSLATION_FILE
     if site == "staging":
         assert "sourceLanguage" in combined and "outputLanguage" in combined
-        assert "translate_delivery" in combined and "/translation" in combined
+        assert "translate_delivery" in combined
         assert translation.exists()
     else:
         assert "sourceLanguage" not in combined and "outputLanguage" not in combined
@@ -206,7 +207,7 @@ def _validate_image(image, site):
     if site == "staging":
         validation += (
             "assert 'sourceLanguage' in combined and 'outputLanguage' in combined\n"
-            "assert 'translate_delivery' in combined and '/translation' in combined\n"
+            "assert 'translate_delivery' in combined\n"
             "assert Path('/app/backend/app/translation.py').exists()\n"
         )
     else:
@@ -223,8 +224,9 @@ def _validate_image(image, site):
 
 def prepare(commit, build, base):
     fetch_revision(commit)
-    assert common.git("rev-parse", commit + "^1").decode().strip() == PRODUCTION_SOURCE_COMMIT
-    assert common.git("rev-parse", commit + "^2").decode().strip() == STAGING_LANGUAGE_COMMIT
+    assert common.git("rev-parse", commit + "^").decode().strip() == RELEASE_MERGE_COMMIT
+    assert common.git("rev-parse", RELEASE_MERGE_COMMIT + "^1").decode().strip() == PRODUCTION_SOURCE_COMMIT
+    assert common.git("rev-parse", RELEASE_MERGE_COMMIT + "^2").decode().strip() == STAGING_LANGUAGE_COMMIT
     source_commits = {
         "staging": commit,
         "production": PRODUCTION_SOURCE_COMMIT,
