@@ -22,10 +22,10 @@ for (const value of [
 
 assert.doesNotMatch(styles, /\.campaign-[a-z-]+/, "app.css still contains campaign styles");
 assert.doesNotMatch(index, /double11-carousel|campaign-carousel/, "index.html still references campaign assets");
-assert.match(index, /carousel-removed/, "index.html cache-busting version was not updated");
+assert.match(index, /creation-studio/, "index.html cache-busting version was not updated");
 
-assert.match(source, /class="activity-card \$\{enterprise \? "activity-enterprise" : "activity-personal"\}/);
-assert.match(source, /cfg\.rechargeOffers\[tier\]/);
-assert.match(source, /data-action="show-pricing" data-tier="\$\{tier\}"/);
+assert.match(source, /class="studio-plan-card"/);
+assert.match(source, /data-action="show-pricing"/);
+assert.match(source, /cfg\.rechargeOffers/);
 
 console.log("Double11 carousel removal checks passed");

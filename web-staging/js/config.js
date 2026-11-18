@@ -40,6 +40,7 @@ window.APP_CONFIG = {
     { id: "queued", label: "待开始" },
     { id: "running", label: "进行中" },
     { id: "done", label: "已完成" },
+    { id: "failed", label: "失败" },
   ],
 
   statusText: {

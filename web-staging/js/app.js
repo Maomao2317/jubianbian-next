@@ -15,10 +15,11 @@
   let rechargeReturnToPricing = false;
 
   const state = {
-    view: "list",
+    view: "workspace",
     taskId: "",
     keyword: "",
     status: "all",
+    homeStatus: "all",
     tasks: [],
     current: null,
     profile: null,
@@ -29,7 +30,7 @@
     authCooldownTimer: null,
     authEmail: "",
     menuTaskId: "",
-    upload: { files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "", sourceLanguage: "", outputLanguage: "" },
+    upload: { mode: "standard", files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "", sourceLanguage: "", outputLanguage: "" },
     pollTimer: null,
     rateLimitNotified: false,
     adminTab: "overview",
@@ -48,6 +49,10 @@
     adminRechargeTo: "",
     adminRechargeType: "all",
     taskPage: 0,
+    taskDateRange: "all",
+    taskFrom: "",
+    taskTo: "",
+    taskType: "all",
     expandedBatches: {},
     queue: { waitMinutes: 0, blocked: false, workerConcurrency: 8 },
     pointsPage: 0,
@@ -128,8 +133,14 @@
   }
 
   function parseHash() {
-    const parts = (location.hash || "#/tasks").replace(/^#\/?/, "").split("/");
-    state.view = parts[0] === "task" && parts[1] ? "detail" : (parts[0] === "admin" ? "admin" : "list");
+    const parts = (location.hash || "#/workspace").replace(/^#\/?/, "").split("/");
+    state.view = parts[0] === "task" && parts[1]
+      ? "detail"
+      : parts[0] === "admin"
+        ? "admin"
+        : parts[0] === "tasks"
+          ? "list"
+          : "workspace";
     state.taskId = state.view === "detail" ? parts[1] : "";
   }
 
@@ -173,10 +184,14 @@
     const initial = state.profile && state.profile.name ? state.profile.name.charAt(0) : "用";
     $("#header").innerHTML = `
       <div class="header-inner">
-        <a class="brand" href="#/tasks" aria-label="返回任务列表">
+        <a class="brand" href="#/workspace" aria-label="返回创作工作台">
           <img class="brand-logo" src="${cfg.brand.logo}" alt="" />
           <span>${cfg.brand.name}</span>
         </a>
+        <nav class="header-workspace-nav" aria-label="主要导航">
+          <a href="#/workspace" class="${state.view === "workspace" ? "active" : ""}">创作工作台</a>
+          <a href="#/tasks" class="${state.view === "list" || state.view === "detail" ? "active" : ""}">任务中心</a>
+        </nav>
         <div class="header-right">
           <button class="credit-pill" type="button" data-action="points" title="查看积分余额和流水">
             <span class="credit-label">剩余积分</span>
@@ -579,7 +594,7 @@
 
   function setListLoading(loading) {
     state.listLoading = loading;
-    const panel = $(".workspace-panel");
+    const panel = $(".workspace-panel, .studio-recent-panel");
     panel?.classList.toggle("is-loading", loading);
     panel?.setAttribute("aria-busy", String(loading));
   }
@@ -610,78 +625,145 @@
     ].join("|");
   }
 
+  function workspaceSidebar(active) {
+    const item = (key, href, icon, label) => `<a class="studio-nav-item ${active === key ? "active" : ""}" href="${href}"><span aria-hidden="true">${icon}</span>${label}</a>`;
+    return `<aside class="studio-sidebar">
+      <div class="studio-nav-label">创作空间</div>
+      <nav class="studio-nav" aria-label="创作工具">
+        ${item("home", "#/workspace", "▦", "工作台首页")}
+        <button class="studio-nav-item" type="button" data-action="create-standard"><span aria-hidden="true">▣</span>视频转剧本</button>
+        <button class="studio-nav-item" type="button" data-action="create-multilingual"><span aria-hidden="true">文</span>多语言剧本</button>
+        <button class="studio-nav-item" type="button" data-action="show-coming-soon"><span aria-hidden="true">✣</span>剧本优化改编</button>
+        <span class="studio-nav-divider" aria-hidden="true"></span>
+        ${item("tasks", "#/tasks", "☷", "全部任务")}
+      </nav>
+      <div class="studio-future-card">
+        <span class="studio-future-orbit" aria-hidden="true">✦</span>
+        <small>COMING NEXT</small>
+        <strong>更多精彩，<br>即将发生</strong>
+        <p>更多创作能力持续解锁</p>
+      </div>
+      <button class="studio-plan-card" type="button" data-action="show-pricing" aria-haspopup="dialog">
+        <strong>创作需要更多积分？</strong>
+        <span>升级套餐，获得更高额度<br>和团队协作能力。</span>
+        <b>查看套餐 →</b>
+      </button>
+    </aside>`;
+  }
+
+  function workspaceShell(content, active, extraClass = "") {
+    return `<section class="studio-page ${extraClass}"><div class="studio-shell">${workspaceSidebar(active)}<div class="studio-content">${content}</div></div></section>`;
+  }
+
+  function taskKind(task) {
+    const source = task.sourceLanguage || task.source_language || "";
+    const output = task.outputLanguage || task.output_language || "";
+    const multilingual = output === "both" || Boolean(source && output && source !== output);
+    return multilingual
+      ? { className: "multilingual", icon: "文", label: "多语言剧本" }
+      : { className: "standard", icon: "▣", label: "视频转剧本" };
+  }
+
+  function homeTaskRow(task) {
+    const kind = taskKind(task);
+    const points = Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE;
+    const action = isCompletedTask(task)
+      ? `<button type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button type="button" data-action="download" data-id="${task.id}" data-format="md">下载</button>`
+      : `<button type="button" data-action="open-task" data-id="${task.id}">查看进度</button>`;
+    return `<article class="studio-recent-row" data-open="${task.id}">
+      <span class="studio-task-icon ${kind.className}" aria-hidden="true">${kind.icon}</span>
+      <div class="studio-recent-main"><strong>${escapeHtml(task.title || task.fileName || "未命名任务")}</strong><span>${kind.label} · ${escapeHtml(task.fileName || "视频任务")} · ${formatDuration(task.durationSec)}${points ? ` · ${points.toFixed(1)} 积分` : ""}</span></div>
+      ${statusBadge(task)}
+      <div class="studio-recent-actions">${action}</div>
+    </article>`;
+  }
+
+  function renderWorkspaceHome() {
+    const recent = state.tasks.filter((task) => state.homeStatus === "all" || (state.homeStatus === "done" ? isCompletedTask(task) : ["queued", "running"].includes(task.status))).slice(0, 5);
+    const rows = recent.length ? recent.map(homeTaskRow).join("") : `<div class="studio-empty"><span>✦</span><strong>这里会出现你的创作任务</strong><p>选择上方工具，开始第一段创作旅程。</p></div>`;
+    const content = `<div class="studio-hero">
+      <div><span class="studio-eyebrow">创作工作台</span><h1>今天想创作什么？</h1><p>从视频识别到剧本优化，把创作流程集中在一个工作台。</p></div>
+      <div class="studio-hero-actions"><a class="secondary-btn" href="#/tasks">查看全部任务</a><button class="primary-btn" type="button" data-action="create-standard">＋ 新建任务</button></div>
+    </div>
+    <div class="studio-tool-grid" aria-label="创作工具">
+      <article class="studio-tool-card standard"><div class="studio-tool-top"><span class="studio-tool-icon">▣</span><b>常用</b></div><h2>视频转剧本</h2><p>上传视频，自动整理台词、人物、场景和动作，生成标准镜头剧本。</p><button type="button" data-action="create-standard">开始转换 <span>→</span></button></article>
+      <article class="studio-tool-card multilingual"><div class="studio-tool-top"><span class="studio-tool-icon">文</span><b>NEW</b></div><h2>多语言视频转剧本</h2><p>识别原始语言，输出中文、英文或中英双语剧本，人物与台词保持一致。</p><button type="button" data-action="create-multilingual">创建多语言任务 <span>→</span></button></article>
+      <article class="studio-tool-card adaptation"><div class="studio-tool-top"><span class="studio-tool-icon">✣</span><b>创作引擎筹备中</b></div><h2>剧本优化改编</h2><p>节奏重塑、台词润色与多版本改编能力，正在精心打磨。</p><button type="button" data-action="show-coming-soon">了解功能 <span>→</span></button></article>
+    </div>
+    <section class="studio-recent-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
+      <div class="studio-recent-head"><div><h2>最近任务</h2><p>不同创作功能的任务统一管理</p></div><div class="studio-recent-filter" role="group" aria-label="最近任务状态"><button class="${state.homeStatus === "all" ? "active" : ""}" data-action="home-filter" data-status="all" aria-pressed="${state.homeStatus === "all"}">全部</button><button class="${state.homeStatus === "running" ? "active" : ""}" data-action="home-filter" data-status="running" aria-pressed="${state.homeStatus === "running"}">进行中</button><button class="${state.homeStatus === "done" ? "active" : ""}" data-action="home-filter" data-status="done" aria-pressed="${state.homeStatus === "done"}">已完成</button><a href="#/tasks" aria-label="查看全部任务">⌕</a></div></div>
+      <div class="studio-recent-list">${rows}</div>
+    </section>`;
+    $("#main").innerHTML = workspaceShell(content, "home");
+  }
+
+  function shanghaiDateValue(timestamp = Date.now()) {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" })
+      .formatToParts(new Date(timestamp)).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  }
+
+  function taskDateBounds() {
+    if (state.taskDateRange === "all") return null;
+    let from = state.taskFrom;
+    let to = state.taskTo;
+    if (state.taskDateRange !== "custom") {
+      const days = { today: 1, week: 7, month: 30 }[state.taskDateRange] || 1;
+      to = shanghaiDateValue();
+      from = shanghaiDateValue(Date.now() - (days - 1) * 86400000);
+    }
+    return {
+      from: from ? Date.parse(`${from}T00:00:00+08:00`) : Number.NEGATIVE_INFINITY,
+      to: to ? Date.parse(`${to}T23:59:59.999+08:00`) : Number.POSITIVE_INFINITY,
+    };
+  }
+
+  function filteredUserTasks() {
+    const bounds = taskDateBounds();
+    return state.tasks.filter((task) => {
+      if (state.taskType !== "all" && taskKind(task).className !== state.taskType) return false;
+      if (!bounds) return true;
+      const createdAt = new Date(task.createdAt).getTime();
+      return Number.isFinite(createdAt) && createdAt >= bounds.from && createdAt <= bounds.to;
+    });
+  }
+
   function renderList({ preserveViewport = false, stabilizeHeight = false } = {}) {
     const viewport = preserveViewport ? captureListViewport() : null;
     const previousListHeight = stabilizeHeight ? $(".task-list")?.getBoundingClientRect().height || 0 : 0;
-    const filters = cfg.statusFilters.map((item) => `
-      <button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}" aria-pressed="${state.status === item.id}">${item.label}</button>`).join("");
+    const filters = cfg.statusFilters.map((item) => `<button class="chip ${state.status === item.id ? "active" : ""}" type="button" data-filter="${item.id}" aria-pressed="${state.status === item.id}">${item.label}</button>`).join("");
+    const dateFilters = [["all", "全部时间"], ["today", "今天"], ["week", "近 7 天"], ["month", "近 30 天"], ["custom", "自定义"]]
+      .map(([value, label]) => `<button type="button" class="${state.taskDateRange === value ? "active" : ""}" data-action="task-date-range" data-range="${value}" aria-pressed="${state.taskDateRange === value}">${label}</button>`).join("");
+    const filteredTasks = filteredUserTasks();
     const pageSize = 10;
-    const grouped = groupedTaskItems(state.tasks);
+    const grouped = groupedTaskItems(filteredTasks);
     const pageCount = Math.max(1, Math.ceil(grouped.length / pageSize));
     const page = Math.min(state.taskPage, pageCount - 1);
     if (page !== state.taskPage) state.taskPage = page;
     const pageTasks = grouped.slice(page * pageSize, (page + 1) * pageSize);
-    const rows = state.tasks.length
+    const typeFilters = [["all", "全部类型"], ["standard", "视频转剧本"], ["multilingual", "多语言剧本"]]
+      .map(([value, label]) => `<button type="button" class="${state.taskType === value ? "active" : ""}" data-action="task-type-filter" data-type="${value}" aria-pressed="${state.taskType === value}">${label}</button>`).join("");
+    const hasFilters = Boolean(state.keyword || state.status !== "all" || state.taskDateRange !== "all" || state.taskType !== "all");
+    const rows = filteredTasks.length
       ? pageTasks.map((item) => item.type === "batch" ? batchRow(item) : taskRow(item.task)).join("")
-      : `<div class="empty">
-          <div class="empty-icon">＋</div>
-          <h3>${state.keyword || state.status !== "all" ? "没有匹配的任务" : "还没有识别任务"}</h3>
-          <p>${state.keyword || state.status !== "all" ? "换个关键词或筛选条件试试" : "上传第一个视频，生成可编辑、可下载的剧本"}</p>
-          ${state.keyword || state.status !== "all" ? "" : `<button class="primary-btn" type="button" data-action="create">新建任务</button>`}
-        </div>`;
-    $("#main").innerHTML = `
-      <section class="page tasks-page">
-        <div class="workspace-layout">
-        <div class="workspace-main">
-        <div class="page-heading">
-          <div>
-            <div class="eyebrow">创作工作台</div>
-            <h1>视频转剧本</h1>
-            <p>${cfg.brand.slogan}</p>
-          </div>
-          <button class="primary-btn create-btn" type="button" data-action="create"><span>＋</span> 新建任务</button>
+      : `<div class="empty"><div class="empty-icon">＋</div><h3>${hasFilters ? "没有匹配的任务" : "还没有识别任务"}</h3><p>${hasFilters ? "换个关键词或筛选条件试试" : "上传第一个视频，生成可编辑、可下载的剧本"}</p>${hasFilters ? "" : `<button class="primary-btn" type="button" data-action="create-standard">新建任务</button>`}</div>`;
+    const content = `<div class="studio-list-heading"><div><span class="studio-eyebrow">任务中心</span><h1>全部任务</h1><p>统一查看、筛选和管理所有剧本任务。</p></div><button class="primary-btn create-btn" type="button" data-action="create-standard"><span>＋</span> 新建任务</button></div>
+      <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
+        <p class="mobile-upload-note">手机端可查看已有任务。上传视频和新建任务请使用电脑端。</p>
+        <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
+        ${state.queue.blocked ? `<div class="queue-blocked-notice">当前排队预计超过 10 小时，暂时不能继续上传，请稍后再试。</div>` : state.queue.waitMinutes ? `<div class="queue-summary">当前预计排队 ${formatEta(state.queue.waitMinutes)} · 可同时处理 ${state.queue.workerConcurrency || 8} 个视频</div>` : ""}
+        <div class="studio-task-filters">
+          <div class="toolbar"><label class="search-wrap"><input class="search" id="keyword" placeholder="搜索任务或文件名" value="${escapeHtml(state.keyword)}" /><button class="search-submit" type="button" data-action="search" aria-label="执行搜索" title="执行搜索">⌕</button></label><div class="filters" aria-label="任务状态筛选">${filters}</div><div class="task-count">${filteredTasks.length} 个任务</div></div>
+          <div class="studio-date-filter"><span>任务类型</span><div class="studio-date-presets">${typeFilters}</div></div>
+          <div class="studio-date-filter"><span>创建日期</span><div class="studio-date-presets">${dateFilters}</div><div class="studio-custom-dates ${state.taskDateRange === "custom" ? "visible" : ""}"><input id="taskFrom" type="date" value="${escapeHtml(state.taskFrom)}" aria-label="开始日期" /><i>至</i><input id="taskTo" type="date" value="${escapeHtml(state.taskTo)}" aria-label="结束日期" /><button type="button" data-action="task-date-apply">应用</button></div><button class="studio-filter-reset" type="button" data-action="task-filter-reset">重置筛选</button></div>
         </div>
-        <div class="workspace-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
-          <p class="mobile-upload-note">手机端可查看已有任务。上传视频和新建任务请使用电脑端。</p>
-          <div class="batch-download-actions"><button class="secondary-btn" type="button" data-action="download-all" data-format="md" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（MD）</button><button class="secondary-btn" type="button" data-action="download-all" data-format="txt" ${state.tasks.some(isCompletedTask) ? "" : "disabled"}>下载全部剧本（TXT）</button></div>
-          ${state.queue.blocked ? `<div class="queue-blocked-notice">当前排队预计超过 10 小时，暂时不能继续上传，请稍后再试。</div>` : state.queue.waitMinutes ? `<div class="queue-summary">当前预计排队 ${formatEta(state.queue.waitMinutes)} · 可同时处理 ${state.queue.workerConcurrency || 8} 个视频</div>` : ""}
-          <div class="toolbar">
-            <label class="search-wrap">
-              <input class="search" id="keyword" placeholder="搜索任务或文件名" value="${escapeHtml(state.keyword)}" />
-              <button class="search-submit" type="button" data-action="search" aria-label="执行搜索" title="执行搜索">⌕</button>
-            </label>
-            <div class="filters" aria-label="任务状态筛选">${filters}</div>
-            <div class="task-count">${state.tasks.length} 个任务</div>
-          </div>
-          <div class="task-list">${rows}</div>
-          <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, page - 1)}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, page + 1)}" ${page >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
-        </div>
-        </div>
-        <div class="workspace-sidebar">
-        <div class="workspace-guide" aria-label="创作流程">
-          <span class="workspace-guide-icon" aria-hidden="true">▶</span>
-          <div><strong>从视频，到剧本</strong><p>上传视频 · 自动整理 · 导出剧本</p></div>
-        </div>
-        <aside class="workspace-activity" aria-label="充值活动">
-          <div class="activity-heading"><span>为创作加点动力</span><small>积分充值</small></div>
-          ${["personal", "enterprise"].map((tier) => {
-            const enterprise = tier === "enterprise";
-            const entry = cfg.rechargeOffers[tier][0];
-            return `<article class="activity-card ${enterprise ? "activity-enterprise" : "activity-personal"}">
-              <div class="activity-edition">${enterprise ? "FOR TEAMS" : "FOR CREATORS"}<span>${enterprise ? "企业版" : "个人版"}</span></div>
-              <h2>${enterprise ? "团队创作<br>从容开场。" : "好故事，<br>即刻开场。"}</h2>
-              <p>${enterprise ? "为持续创作，备足每一份灵感。" : "从第一份剧本，到下一部好作品。"}</p>
-              <div class="activity-price"><strong><small>¥</small>${entry.price.toLocaleString("en-US")}</strong><span>起 / ${entry.credits.toLocaleString("en-US")} 总积分</span></div>
-              <button type="button" data-action="show-pricing" data-tier="${tier}" aria-haspopup="dialog">查看${enterprise ? "企业" : "个人"}套餐 <span aria-hidden="true">↗</span></button>
-            </article>`;
-          }).join("")}
-        </aside>
-        </div>
-        </div>
-      </section>`;
+        <div class="task-list">${rows}</div>
+        <div class="user-pagination"><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.max(0, page - 1)}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} / ${pageCount} 页</span><button class="secondary-btn" type="button" data-action="task-page" data-page="${Math.min(pageCount - 1, page + 1)}" ${page >= pageCount - 1 ? "disabled" : ""}>下一页</button></div>
+      </div>`;
+    $("#main").innerHTML = workspaceShell(content, "tasks", "tasks-page");
     const batchActions = document.querySelector(".batch-download-actions");
-    if (batchActions) [...batchActions.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).forEach((node) => node.remove());
-    if (previousListHeight) $(".task-list").style.minHeight = `${Math.ceil(previousListHeight)}px`;
+    if (batchActions && window.Node) [...batchActions.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).forEach((node) => node.remove());
+    if (previousListHeight && $(".task-list")) $(".task-list").style.minHeight = `${Math.ceil(previousListHeight)}px`;
     restoreListViewport(viewport);
   }
 
@@ -942,8 +1024,14 @@
     return `<div class="selected-files-list"><div class="selected-files-head"><strong>已选择 ${upload.files.length} 个视频</strong><span>将分别创建任务</span></div>${upload.files.map((file, index) => `<div class="selected-file-row"><span>${index + 1}</span><strong>${escapeHtml(file.name)}</strong><small>${formatSize(file.size)}</small><button type="button" data-action="remove-file" data-index="${index}">移除</button></div>`).join("")}</div>`;
   }
 
+  function languageOption(field, value, title, subtitle, disabled = false) {
+    const selected = state.upload[field] === value;
+    return `<button class="language-option ${selected ? "selected" : ""}" type="button" data-action="select-language" data-language-field="${field}" data-value="${value}" aria-pressed="${selected}" ${disabled ? "disabled" : ""}><span class="language-check" aria-hidden="true">${selected ? "✓" : ""}</span><strong>${title}</strong><small>${subtitle}</small></button>`;
+  }
+
   function createModalMarkup() {
     const upload = state.upload;
+    const multilingual = upload.mode === "multilingual";
     const estimate = uploadEstimate();
     const credits = state.profile ? state.profile.credits : 0;
     // The six-minute limit applies to each file, never to the batch total.
@@ -976,29 +1064,18 @@
     return `<div class="modal-mask" id="modalMask">
       <div class="modal create-modal" role="dialog" aria-modal="true" aria-labelledby="createTitle">
         <div class="modal-head">
-          <div><span class="modal-kicker">创建识别任务</span><h2 id="createTitle">上传短视频</h2></div>
+          <div><span class="modal-kicker">${multilingual ? "多语言创作任务" : "创建识别任务"}</span><h2 id="createTitle">${multilingual ? "创建多语言视频剧本" : "上传视频生成剧本"}</h2></div>
           <button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button>
         </div>
+        <div class="create-mode-banner ${multilingual ? "multilingual" : "standard"}"><span aria-hidden="true">${multilingual ? "文" : "▣"}</span><div><strong>${multilingual ? "多语言视频转剧本" : "视频转剧本"}</strong><p>${multilingual ? "选择原片与交付语言，生成准确一致的多语言剧本。" : "完整保留台词、人物、场景和动作，生成清爽标准剧本。"}</p></div></div>
         <div class="field">
           <label for="taskTitle">任务名称 <span>可选</span></label>
           <input type="text" id="taskTitle" placeholder="默认使用视频文件名" />
         </div>
-        <div class="field">
-          <label for="sourceLanguage">原剧语言</label>
-          <select id="sourceLanguage" data-upload-language="sourceLanguage" required>
-            <option value="" ${upload.sourceLanguage ? "" : "selected"} disabled>请选择原剧语言</option>
-            <option value="zh" ${upload.sourceLanguage === "zh" ? "selected" : ""}>中文剧</option>
-            <option value="en" ${upload.sourceLanguage === "en" ? "selected" : ""}>英文剧</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="outputLanguage">生成剧本语言</label>
-          <select id="outputLanguage" data-upload-language="outputLanguage" ${upload.sourceLanguage ? "" : "disabled"} required>
-            <option value="" ${upload.outputLanguage ? "" : "selected"} disabled>请选择交付语言</option>
-            <option value="zh" ${upload.outputLanguage === "zh" ? "selected" : ""}>中文</option>
-            <option value="en" ${upload.outputLanguage === "en" ? "selected" : ""}>英文</option>
-            <option value="both" ${upload.outputLanguage === "both" ? "selected" : ""}>中英文双语</option>
-          </select>
+        <div class="language-studio">
+          <div class="language-stage"><div class="language-stage-head"><span>1</span><div><strong>原剧语言</strong><small>视频中主要使用的语言</small></div></div><div class="language-option-grid source" role="group" aria-label="原剧语言">${languageOption("sourceLanguage", "zh", "中文原片", "Chinese Source")}${languageOption("sourceLanguage", "en", "英文原片", "English Source")}</div></div>
+          <div class="language-flow-arrow" aria-hidden="true">↓</div>
+          <div class="language-stage ${upload.sourceLanguage ? "" : "disabled"}"><div class="language-stage-head"><span>2</span><div><strong>交付版本</strong><small>${upload.sourceLanguage ? "选择最终生成的剧本语言" : "请先选择原剧语言"}</small></div></div><div class="language-option-grid output" role="group" aria-label="交付版本">${languageOption("outputLanguage", "zh", "中文剧本", "Chinese Script", !upload.sourceLanguage)}${languageOption("outputLanguage", "en", "英文剧本", "English Script", !upload.sourceLanguage)}${languageOption("outputLanguage", "both", "中英双语", "Bilingual Script", !upload.sourceLanguage)}</div></div>
         </div>
         <div class="field">
           <label>视频文件</label>
@@ -1019,8 +1096,8 @@
     </div>`;
   }
 
-  function openCreateModal() {
-    state.upload = { files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "", sourceLanguage: "", outputLanguage: "" };
+  function openCreateModal(mode = "standard") {
+    state.upload = { mode, files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "", sourceLanguage: "", outputLanguage: "" };
     $("#modalRoot").innerHTML = createModalMarkup();
   }
 
@@ -1028,6 +1105,10 @@
     $("#modalRoot").innerHTML = createModalMarkup();
     const title = $("#taskTitle");
     if (title) title.value = titleValue;
+  }
+
+  function openComingSoonModal() {
+    $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal coming-soon-modal" role="dialog" aria-modal="true" aria-labelledby="comingSoonTitle"><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button><div class="coming-soon-visual" aria-hidden="true"><span>✦</span><i></i><b>✣</b></div><span class="modal-kicker">CREATIVE ENGINE · 即将上线</span><h2 id="comingSoonTitle">创作引擎正在精心打磨</h2><p>剧本节奏重塑、台词润色与多版本改编能力即将与您见面。我们希望它出现时，不只是能用，而是真正好用。</p><div class="coming-soon-tags"><span>节奏优化</span><span>台词润色</span><span>多版本改编</span></div><button class="primary-btn" type="button" data-action="close-modal">期待相见</button></div></div>`;
   }
 
   function openDeleteModal(taskId) {
@@ -1161,7 +1242,9 @@
 
   async function refreshList({ source = "user" } = {}) {
     const requestId = ++state.listRequestId;
-    const query = { keyword: state.keyword, status: state.status };
+    const requestedView = state.view;
+    const workspaceRequest = requestedView === "workspace";
+    const query = workspaceRequest ? { keyword: "", status: "all" } : { keyword: state.keyword, status: state.status };
     const previousSignature = listDataSignature(state.tasks, state.queue);
     if (source !== "poll") setListLoading(true);
     try {
@@ -1169,7 +1252,8 @@
         api.listTasks(query),
         source === "filter" ? Promise.resolve(state.queue) : api.getQueueSummary().catch(() => state.queue),
       ]);
-      if (requestId !== state.listRequestId || state.view !== "list" || query.keyword !== state.keyword || query.status !== state.status) return;
+      if (requestId !== state.listRequestId || state.view !== requestedView || !["list", "workspace"].includes(state.view)) return;
+      if (!workspaceRequest && (query.keyword !== state.keyword || query.status !== state.status)) return;
       state.tasks = tasks.map(normalizeUserTask);
       state.queue = queue || state.queue;
       const rateLimitTasks = source === "poll" ? state.tasks.slice(0, 50) : state.tasks;
@@ -1177,11 +1261,12 @@
       if (limited && !state.rateLimitNotified) { state.rateLimitNotified = true; toast("当前处理请求较多，任务已自动重试，请稍后查看", "warning"); }
       if (!limited) state.rateLimitNotified = false;
       const dataChanged = listDataSignature(state.tasks, state.queue) !== previousSignature;
-      if (source !== "poll" || dataChanged || !$(".workspace-panel")) {
-        renderList({
-          preserveViewport: Boolean($(".workspace-panel")),
-          stabilizeHeight: source === "poll",
-        });
+      if (source !== "poll" || dataChanged || !$(".workspace-panel, .studio-recent-panel")) {
+        if (state.view === "workspace") renderWorkspaceHome();
+        else renderList({
+            preserveViewport: Boolean($(".workspace-panel")),
+            stabilizeHeight: source === "poll",
+          });
       }
     } catch (error) {
       if (requestId === state.listRequestId) toast(error.message || "任务列表加载失败", "error");
@@ -1432,7 +1517,7 @@
   function hardRefreshApp() {
     const url = new URL(window.location.href);
     url.searchParams.set("ui", String(Date.now()));
-    url.hash = "#/tasks";
+    url.hash = "#/workspace";
     window.location.replace(url.toString());
   }
 
@@ -1573,6 +1658,40 @@
     if (action === "request-code") { await requestCode(); return; }
     if (action === "auth-submit") { event.preventDefault(); await submitAuth(); return; }
     if (action === "points") { await openPointsModal(); return; }
+    if (action === "home-filter") { state.homeStatus = actionElement.dataset.status || "all"; renderWorkspaceHome(); return; }
+    if (action === "task-date-range") {
+      state.taskDateRange = actionElement.dataset.range || "all";
+      state.taskPage = 0;
+      renderList();
+      return;
+    }
+    if (action === "task-type-filter") {
+      state.taskType = ["all", "standard", "multilingual"].includes(actionElement.dataset.type) ? actionElement.dataset.type : "all";
+      state.taskPage = 0;
+      renderList();
+      return;
+    }
+    if (action === "task-date-apply") {
+      const from = $("#taskFrom")?.value || "", to = $("#taskTo")?.value || "";
+      if (!adminDateRangeValid(from, to)) return;
+      state.taskFrom = from;
+      state.taskTo = to;
+      state.taskDateRange = "custom";
+      state.taskPage = 0;
+      renderList();
+      return;
+    }
+    if (action === "task-filter-reset") {
+      state.keyword = "";
+      state.status = "all";
+      state.taskDateRange = "all";
+      state.taskFrom = "";
+      state.taskTo = "";
+      state.taskType = "all";
+      state.taskPage = 0;
+      await refreshList({ source: "filter" });
+      return;
+    }
     if (action === "task-page") { state.taskPage = Number(actionElement.dataset.page) || 0; renderList(); return; }
     if (action === "toggle-batch") { const batchId = actionElement.dataset.id; state.expandedBatches[batchId] = !state.expandedBatches[batchId]; renderList(); return; }
     if (action === "search") { state.keyword = $("#keyword")?.value.trim() || ""; state.taskPage = 0; await refreshList(); return; }
@@ -1596,7 +1715,22 @@
       return;
     }
     if (action === "logout") { await logout(); return; }
-    if (action === "create") { if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; } if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; } openCreateModal(); }
+    if (["create", "create-standard", "create-multilingual"].includes(action)) {
+      if (mobileUploadDisabled()) { toast("上传视频和新建任务请使用电脑端", "warning"); return; }
+      if (state.queue.blocked) { toast("当前排队预计超过 10 小时，请稍后再上传", "warning"); return; }
+      openCreateModal(action === "create-multilingual" ? "multilingual" : "standard");
+      return;
+    }
+    if (action === "show-coming-soon") { openComingSoonModal(); return; }
+    if (action === "select-language") {
+      const field = actionElement.dataset.languageField;
+      if (!['sourceLanguage', 'outputLanguage'].includes(field) || actionElement.disabled) return;
+      const titleValue = $("#taskTitle")?.value || "";
+      state.upload[field] = actionElement.dataset.value || "";
+      if (field === "sourceLanguage") state.upload.outputLanguage = "";
+      rerenderCreateModal(titleValue);
+      return;
+    }
     if (action === "close-modal") closeModal();
     if (action === "back") go("tasks");
     if (action === "account") openAccountModal();
@@ -1648,7 +1782,7 @@
         await setUploadFiles(remaining, { replace: true });
         return;
       }
-      state.upload = { files: [], file: null, durationSec: 0, estimatedMinutes: 0, reading: false, error: "" };
+      state.upload = { ...state.upload, files: [], file: null, durations: [], durationSec: 0, estimatedMinutes: 0, reading: false, error: "" };
       rerenderCreateModal(titleValue);
     }
     if (action === "submit-task") {

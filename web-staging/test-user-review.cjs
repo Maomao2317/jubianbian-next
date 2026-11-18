@@ -79,7 +79,7 @@ const click = async (action, id) => {
   assert.doesNotMatch(node("#main").innerHTML, /ASR|OCR|覆盖率|P0/);
   assert.doesNotMatch(node("#main").innerHTML, /Lite|Turbo|毛利率|1125125|durationMs/);
   assert.match(node("#main").innerHTML, /处理完成，剧本可下载；内容检查提示见页面底部/);
-  assert.deepEqual(Array.from(context.window.APP_CONFIG.statusFilters, item => item.id), ["all", "queued", "running", "done"]);
+  assert.deepEqual(Array.from(context.window.APP_CONFIG.statusFilters, item => item.id), ["all", "queued", "running", "done", "failed"]);
   assert.match(node("#main").innerHTML, /data-action="download"/);
   assert.match(node("#main").innerHTML, /内容复核提示/);
   assert.match(node("#main").innerHTML, /不影响剧本下载/);

@@ -187,6 +187,13 @@ class UserReviewTests(unittest.TestCase):
         self.assertEqual({task["id"] for task in routes.list_tasks(None, status="done")}, {"one", "two"})
         self.assertTrue(all(task["status"] == "done" for task in routes.list_tasks(None, status="done")))
 
+    def test_task_list_includes_only_language_metadata_needed_for_type_filters(self):
+        with auth_store.db() as c:
+            c.execute("UPDATE tasks SET source_language='en', output_language='both' WHERE id='one'")
+        listed = next(task for task in routes.list_tasks(None) if task["id"] == "one")
+        self.assertEqual(listed["sourceLanguage"], "en")
+        self.assertEqual(listed["outputLanguage"], "both")
+
     def test_customer_copy_hides_internal_diagnostics_and_admin_retains_them(self):
         issue = {"severity": "P0", "tag": "疑似漏台词片段", "description": "独立 ASR OCR 模型覆盖率 0%",
                  "startSec": 32.1, "endSec": 38, "scene": 1, "block": 2}

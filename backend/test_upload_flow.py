@@ -108,7 +108,8 @@ class ParallelUploadFlowTests(unittest.TestCase):
                         duration_sec REAL, estimated_minutes INTEGER, credits_used INTEGER,
                         status TEXT, stage TEXT, progress_percent INTEGER, stage_progress_percent INTEGER, error TEXT,
                         created_at TEXT, updated_at TEXT, completed_at TEXT,
-                        batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER
+                        batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER,
+                        source_language TEXT, output_language TEXT
                     )
                     """
                 )
