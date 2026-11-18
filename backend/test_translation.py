@@ -288,8 +288,35 @@ class TranslationTests(unittest.TestCase):
         payload = request.call_args.args[0]
         self.assertEqual(translated[0]["text"], "Hello")
         self.assertEqual(usage["model"], providers.ARK_LITE_MODEL)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertLess(payload["max_output_tokens"], providers.ARK_MAX_OUTPUT_TOKENS)
         self.assertLess(payload["_jbb_token_reservation"], providers.ARK_INPUT_TOKEN_RESERVE)
+
+    def test_single_field_output_limit_retries_once_with_larger_budget(self):
+        completed = {
+            "status": "completed",
+            "output_text": '{"translations":[{"id":"t0","text":"Hello"}]}',
+            "usage": {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24},
+        }
+        limit = ArkError("output limit", provider_code="output_limit")
+        with (
+            patch.object(providers, "ark_account_key", return_value="key"),
+            patch.object(
+                providers, "ark_stream_response", side_effect=[limit, completed],
+            ) as request,
+        ):
+            translated, _usage = providers.ark_translate_items(
+                [{"id": "t0", "text": "你好", "kind": "dialogue"}], "zh", "en",
+            )
+
+        self.assertEqual(translated, [{"id": "t0", "text": "Hello"}])
+        self.assertEqual(request.call_count, 2)
+        first, second = (call.args[0] for call in request.call_args_list)
+        self.assertEqual(first["thinking"], {"type": "disabled"})
+        self.assertEqual(second["thinking"], {"type": "disabled"})
+        self.assertGreater(second["max_output_tokens"], first["max_output_tokens"])
+        self.assertLessEqual(second["max_output_tokens"], providers.ARK_MAX_OUTPUT_TOKENS)
+        self.assertGreater(second["_jbb_token_reservation"], first["_jbb_token_reservation"])
 
     def test_english_source_prompt_requires_original_language_transcription(self):
         prompt = ark_prompt("Episode", 60, {"sourceLanguage": "en", "sources": []})

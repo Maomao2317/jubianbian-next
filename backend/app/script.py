@@ -259,6 +259,157 @@ _INTRODUCTION_ACTION_RE = re.compile(
 )
 
 
+def strip_action_character_visual_descriptions(
+    blocks: list[dict[str, Any]], profiles: list[dict[str, Any]],
+) -> None:
+    """Remove static portraits while preserving every depicted action.
+
+    The screenplay is action- and dialogue-first.  Provider prompts already
+    forbid wardrobe and appearance introductions, but normalization also
+    cleans older/model-deviating responses.  Only a descriptor attached
+    directly to a known character mention is removed; actions such as putting
+    on, taking off, exchanging, or grabbing clothing remain untouched.
+    """
+    names = sorted(
+        {
+            str(profile.get("name") or "").strip()
+            for profile in profiles
+            if isinstance(profile, dict) and str(profile.get("name") or "").strip()
+        },
+        key=len,
+        reverse=True,
+    )
+    if not names:
+        return
+
+    post_name_portrait = re.compile(
+        r"^(?:身穿|身着|穿着|穿(?!上|下|过|好)|戴着|佩戴着)"
+        r"[^，。！？；]{1,40}(?=[，；])"
+    )
+    standalone_portrait = re.compile(
+        r"(?:^|(?<=[，；]))\s*"
+        r"(?:(?:左|右)?(?:手腕|手上|脚上)|头上|颈间|脖子上|耳朵上|身上)?"
+        r"(?:身穿|身着|穿着|戴着|佩戴着|脚踩)"
+        r"[^，。！？；]{1,40}(?=[，。！？；])"
+    )
+    relational_suffix = re.compile(
+        r"^(?:身侧|身边|旁边|面前|跟前|背后|左侧|右侧|对面|怀里|肩上|手中)"
+    )
+
+    for block in blocks:
+        if block.get("type") != "action":
+            continue
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+
+        changed = True
+        while changed:
+            changed = False
+            mentions = sorted(
+                (
+                    (match.start(), match.end(), name)
+                    for name in names
+                    for match in re.finditer(re.escape(name), text)
+                ),
+                key=lambda item: (item[0], -len(item[2])),
+            )
+            # Ignore a shorter known label nested inside a longer one at the
+            # same position (for example 周青 inside 周青爸爸).
+            filtered: list[tuple[int, int, str]] = []
+            for mention in mentions:
+                if any(
+                    start == mention[0] and end >= mention[1]
+                    for start, end, _name in filtered
+                ):
+                    continue
+                filtered.append(mention)
+
+            for index, (name_start, name_end, _name) in enumerate(filtered):
+                sentence_start = max(
+                    (text.rfind(mark, 0, name_start) for mark in "。！？；"),
+                    default=-1,
+                ) + 1
+                previous_name_end = max(
+                    (end for start, end, _ in filtered[:index] if end <= name_start),
+                    default=sentence_start,
+                )
+                segment_start = max(sentence_start, previous_name_end)
+                prefix = text[segment_start:name_start]
+                suffix = text[name_end:]
+
+                descriptor_offset: int | None = None
+                # A long portrait can begin with age/body/hair before its
+                # clothing phrase. Test each clause boundary so a real setting
+                # lead such as “会议室内，” is retained.
+                clause_offsets = [0, *(
+                    match.end() for match in re.finditer(r"[，、]", prefix)
+                )]
+                for offset in clause_offsets:
+                    candidate = prefix[offset:]
+                    leading = len(candidate) - len(candidate.lstrip())
+                    if _INTRODUCTION_CLAUSE_START_RE.match(candidate.lstrip()):
+                        descriptor_offset = offset + leading
+                        break
+                if descriptor_offset is None:
+                    visual = _INTRODUCTION_VISUAL_START_RE.search(prefix)
+                    if visual:
+                        descriptor_offset = visual.start()
+
+                if descriptor_offset is not None:
+                    descriptor = prefix[descriptor_offset:].strip()
+                    suffix_is_action = bool(
+                        _INTRODUCTION_ACTION_RE.match(suffix)
+                        or relational_suffix.match(suffix)
+                        or re.match(r"^[，。！？；]", suffix)
+                    )
+                    if (
+                        (
+                            descriptor.endswith("的")
+                            or re.search(
+                                r"(?:小女孩|小男孩|男子|女子|男人|女人|少年|少女|老人|母狮)$",
+                                descriptor,
+                            )
+                        )
+                        and suffix_is_action
+                        and (
+                            _INTRODUCTION_DETAIL_RE.search(descriptor)
+                            or _INTRODUCTION_VISUAL_START_RE.search(descriptor)
+                        )
+                    ):
+                        text = (
+                            text[:segment_start]
+                            + prefix[:descriptor_offset]
+                            + text[name_start:]
+                        )
+                        text = re.sub(r"([，、])\1+", r"\1", text)
+                        text = re.sub(r"^[，、\s]+", "", text)
+                        text = re.sub(r"[，、\s]+(?=[。！？；])", "", text)
+                        changed = True
+                        break
+
+                # Also remove a static predicate immediately after a name,
+                # while deliberately excluding 穿上/脱下/换上 and other actual
+                # wardrobe actions.
+                portrait = post_name_portrait.match(suffix)
+                if portrait and _INTRODUCTION_DETAIL_RE.search(portrait.group()):
+                    tail = suffix[portrait.end():]
+                    tail = re.sub(r"^[，；\s]+", "", tail)
+                    text = text[:name_end] + tail
+                    changed = True
+                    break
+
+        # Remove later standalone accessory/wardrobe state clauses too. The
+        # garment check prevents unrelated uses such as “脚踩刹车” from being
+        # treated as appearance prose.
+        for portrait in list(standalone_portrait.finditer(text))[::-1]:
+            if not _INTRODUCTION_DETAIL_RE.search(portrait.group()):
+                continue
+            text = text[:portrait.start()] + text[portrait.end():]
+            text = re.sub(r"([，；])\1+", r"\1", text)
+        block["text"] = normalize_text(text, sentence=True)
+
+
 def core_clothing_label(text: Any) -> str:
     """Return one color-and-garment label, without styling/accessory inventory."""
     value = compact_character_detail(text, max_chars=96)
@@ -2567,7 +2718,7 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
             if str(profile.get("name") or "").strip()
         ]
         repair_action_subjects(blocks, list(dict.fromkeys(fallback_characters)))
-        add_character_visual_descriptions(blocks, enrichment_profiles)
+        strip_action_character_visual_descriptions(blocks, enrichment_profiles)
         known_for_scene = [name for name in dict.fromkeys(fallback_characters) if name]
         if known_for_scene:
             for block in blocks:
@@ -2647,6 +2798,10 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
         [block for scene in scenes for block in scene.get("blocks", [])],
         enrichment_profiles,
     )
+    strip_action_character_visual_descriptions(
+        [block for scene in scenes for block in scene.get("blocks", [])],
+        enrichment_profiles,
+    )
     used_characters: list[str] = []
     for scene in scenes:
         for character in scene.get("characters", []):
@@ -2657,6 +2812,9 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
             if block.get("type") in {"dialogue", "vo"} and speaker and speaker not in {"未知说话人", "未知男声", "未知女声", "旁白", "OS", "内心独白"} and speaker not in used_characters:
                 used_characters.append(speaker)
     used_profiles = [profile for profile in character_profiles if profile["name"] in used_characters]
+    # Keep compact visual metadata internally for cross-episode identity
+    # matching. It is never rendered by script_to_markdown, and static visual
+    # prose has already been removed from every visible action above.
     profile_names = {str(profile.get("name") or "") for profile in used_profiles}
     for name in used_characters:
         if name not in profile_names:
@@ -3870,32 +4028,10 @@ def script_quality(
                 add_issue("情绪变化丢失", "P1", f"第 {scene_index} 场第 {block_index + 1} 个块情绪强度跨级变化，但没有记录变化节点。", scene_index, block_index + 1)
             previous_intensities[actor] = intensity
 
-    # Appearance profiles are internal metadata, but the first visible action
-    # must still carry the identifying details so the exported screenplay can be
-    # used without a separate character table.
+    # Static appearance and wardrobe are intentionally absent from the visible
+    # screenplay. Quality review therefore focuses on identity, action, and
+    # dialogue evidence rather than requiring a portrait in the first action.
     character_introduction_warnings = 0
-    for profile in (script.get("characterProfiles") or []):
-        if not isinstance(profile, dict):
-            continue
-        name = str(profile.get("name") or "").strip()
-        details = [str(profile.get(key) or "").strip() for key in ("appearance", "clothing")]
-        details = [detail for detail in details if detail and detail not in {"不明", "未知", "待核对"}]
-        if not name or not details:
-            continue
-        first_action = next(
-            (
-                block
-                for scene in scenes
-                for block in (scene.get("blocks") or [])
-                if isinstance(block, dict)
-                and block.get("type") == "action"
-                and name in str(block.get("text") or "")
-            ),
-            None,
-        )
-        if first_action is None or not any(detail in str(first_action.get("text") or "") for detail in details):
-            character_introduction_warnings += 1
-            add_issue("人物外形缺失", "P1", f"人物{name}首次动作没有带出可见发型/服装描述。")
 
     # Compare the final screenplay against independent evidence after all
     # normalization. This turns dialogue coverage into a measurable signal

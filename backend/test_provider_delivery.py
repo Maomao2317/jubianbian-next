@@ -352,7 +352,7 @@ class ProviderDeliveryTests(unittest.TestCase):
         upload.assert_not_called()
         self.assertEqual(len(requests), 2)
         self.assertIn(
-            "Keep characterProfiles and optional fields minimal",
+            "Keep characterProfiles as internal identity evidence only",
             requests[1]["input"][0]["content"][1]["text"],
         )
         self.assertNotEqual(
@@ -569,17 +569,18 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertIn("visibleSpeaker", prompt)
         self.assertIn("小晨", prompt)
 
-    def test_generation_prompts_keep_clothing_brief_without_weakening_dialogue(self):
+    def test_generation_prompts_omit_static_appearance_without_weakening_dialogue(self):
         prompt = providers.ark_prompt("第1集", 60)
         compact = providers._ark_compact_prompt("第1集", 60)
-        self.assertIn("只保留一个最能识别的核心穿搭", prompt)
-        self.assertIn("不得写成长串人物形象或服饰清单", prompt)
-        self.assertIn("正文不要罗列发型、五官、年龄外观", prompt)
+        self.assertIn("直接写规范人物名和实际动作", prompt)
+        self.assertIn("不写服装、穿搭、发型、五官", prompt)
+        self.assertIn("仅供后台人物一致性判断的内部证据", prompt)
+        self.assertIn("不得把这些字段复制进 action", prompt)
         self.assertIn("核对可见动作的起始、过程和结果", prompt)
         self.assertIn("门内外、朝向和目光", prompt)
         self.assertIn("screenType=name_card、scene_label", prompt)
         self.assertIn("完整保留原话", prompt)
-        self.assertIn("only one core identifying outfit", compact)
+        self.assertIn("Start directly with the character name and observable action", compact)
         compact_review = providers.ark_prompt(
             "第1集", 60, compact=True,
             review_context={"scope": "issue_patches", "ranges": []},
@@ -589,7 +590,9 @@ class ProviderDeliveryTests(unittest.TestCase):
         self.assertIn("screenType name_card or scene_label", compact)
         self.assertIn("explicitly supported by the video", compact_review)
         self.assertIn("preserve correct neighboring blocks", compact_review)
-        self.assertIn("Do not list hair, facial details, age", compact)
+        self.assertIn("Do not describe clothing, hair, facial details, age", compact)
+        self.assertIn("internal identity evidence only", compact)
+        self.assertIn("must never be copied into action text", compact)
         self.assertIn("preserve every spoken line verbatim", compact)
 
     def test_batch_continuity_waits_until_terminal_and_persists_script_labels(self):

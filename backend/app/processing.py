@@ -1638,6 +1638,7 @@ async def process_task(task_id: str) -> None:
         output_language = _task_language(task, "output_language", "outputLanguage")
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=91,
                         message="正在生成所选语言的交付剧本")
+        translation_token = ark_task_id.set(task_id)
         try:
             delivery, translation_usage = await _run_model_call(
                 translate_delivery, script, source_language, output_language,
@@ -1651,6 +1652,8 @@ async def process_task(task_id: str) -> None:
             if isinstance(exc, ArkError) and not exc.provider_code.startswith("translation_"):
                 exc.provider_code = "translation_provider_error"
             raise
+        finally:
+            ark_task_id.reset(translation_token)
         usage = _merge_usage(usage, {**translation_usage, "calls": []})
         quality["translation"] = {
             "sourceLanguage": source_language,

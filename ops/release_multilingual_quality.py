@@ -1,4 +1,4 @@
-"""Deploy the pushed multilingual performance/quality patch to staging only.
+"""Deploy translation resilience and screenplay-focus changes to staging only.
 
 Run on the application host:
     python3 release_multilingual_quality.py prepare SHA
@@ -18,24 +18,26 @@ import sys
 import release_quality_ledger as common
 
 
-BASELINE = "208d8365cf4754c40763ba06a96b28c4f540aa2b"
-BASE_BUILD = "character-intro-split-20261116-208d836"
+BASELINE = "24775e67df221bacd47ba9f2b51c86eaa1b8ea7c"
+BASE_BUILD = "multilingual-quality-20261118-24775e6"
 REF = "codex/multilingual-performance-quality"
-BUILD_PREFIX = "multilingual-quality-20261118-"
+BUILD_PREFIX = "translation-screenplay-focus-20261118-"
 PROJECT = "jubianbian-staging"
 PROTECTED_PROJECT = "jubianbian"
 PORT = 18000
 SITE = "staging"
 APP_FILES = [
-    "backend/app/config.py",
     "backend/app/processing.py",
     "backend/app/providers.py",
+    "backend/app/script.py",
     "backend/app/translation.py",
 ]
 CHANGED_TEST_FILES = [
     "backend/test_process_task_translation.py",
+    "backend/test_provider_delivery.py",
     "backend/test_script_quality.py",
     "backend/test_translation.py",
+    "backend/test_visual_description.py",
 ]
 RELEASE_SUPPORT_FILES = [
     "ops/release_multilingual_quality.py",
@@ -188,8 +190,8 @@ def deploy(commit, build, base):
     assert old_env["JBB_BUILD_VERSION"] == BASE_BUILD, "Staging runtime baseline changed"
     files = before["Config"]["Labels"]["com.docker.compose.project.config_files"].split(",")
     assert all(Path(path).parent == root for path in files), "Unexpected staging Compose path"
-    overlay = root / "release-multilingual-quality.yml"
-    assert str(overlay) not in files, "Multilingual quality release overlay is already active"
+    overlay = root / "release-translation-screenplay-focus.yml"
+    assert str(overlay) not in files, "Translation/screenplay release overlay is already active"
     compose = common.compose_args(PROJECT, root, files)
     new_compose = common.compose_args(PROJECT, root, files + [str(overlay)])
     old_config = json.loads(common.output(compose + ["config", "--format", "json"]))

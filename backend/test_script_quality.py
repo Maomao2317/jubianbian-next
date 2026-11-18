@@ -315,8 +315,9 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         self.assertTrue(any(block["type"] == "screen_text" for block in result["scenes"][0]["blocks"]))
         self.assertFalse(any("这里不需要" in block["text"] for scene in result["scenes"] for block in scene["blocks"]))
         first_action = result["scenes"][0]["blocks"][0]["text"]
-        self.assertIn("深色工装", first_action)
-        self.assertIn("黑色短发", first_action)
+        self.assertEqual(first_action, "王铁柱走到门口。")
+        self.assertEqual(result["characterProfiles"][0]["appearance"], "黑色短发")
+        self.assertEqual(result["characterProfiles"][0]["clothing"], "深色工装")
 
     def test_micro_action_is_not_lost(self):
         self.assertIn("指尖发白", clean_action_text("指尖发白。"))

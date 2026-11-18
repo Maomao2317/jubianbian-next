@@ -6,10 +6,28 @@ from app.script import (
     add_character_visual_descriptions,
     compact_action_character_introductions,
     normalize_script,
+    script_to_markdown,
+    strip_action_character_visual_descriptions,
 )
 
 
 class VisualDescriptionTests(unittest.TestCase):
+    def test_static_portraits_are_removed_but_wardrobe_actions_and_dialogue_remain(self):
+        blocks = [
+            {"type": "action", "text": "穿蓝色外套、戴白色帽子的周青推开门。"},
+            {"type": "action", "text": "江晚走到穿深灰西装的顾岑舟身侧，将手搭在他的肩上。"},
+            {"type": "action", "text": "周青穿上蓝色外套，扣好纽扣后走出房门。"},
+            {"type": "dialogue", "speaker": "周青", "text": "这件衣服是证据，不能丢。"},
+        ]
+        strip_action_character_visual_descriptions(blocks, [
+            {"name": "周青"}, {"name": "江晚"}, {"name": "顾岑舟"},
+        ])
+
+        self.assertEqual(blocks[0]["text"], "周青推开门。")
+        self.assertEqual(blocks[1]["text"], "江晚走到顾岑舟身侧，将手搭在他的肩上。")
+        self.assertEqual(blocks[2]["text"], "周青穿上蓝色外套，扣好纽扣后走出房门。")
+        self.assertEqual(blocks[3]["text"], "这件衣服是证据，不能丢。")
+
     def enrich(self, text, profiles):
         blocks = [{"type": "action", "text": text}]
         add_character_visual_descriptions(blocks, profiles)
@@ -122,7 +140,9 @@ class VisualDescriptionTests(unittest.TestCase):
             self.assertEqual([b["text"] for s in first_again["scenes"] for b in s["blocks"]],
                              [b["text"] for s in first["scenes"] for b in s["blocks"]])
         action = first["scenes"][0]["blocks"][0]["text"]
-        self.assertEqual(action.count("蓝色外套"), 1)
+        self.assertEqual(action, "周青把门打开。")
+        self.assertEqual(first["characterProfiles"][0]["appearance"], "黑色短发、蓝色外套")
+        self.assertEqual(first["characterProfiles"][0]["clothing"], "穿蓝色外套、戴白色帽子")
         self.assertEqual(first["scenes"][0]["blocks"][1]["text"], "走，走，快走！")
 
     def test_family_name_without_profile_is_a_separate_character_boundary(self):
@@ -135,18 +155,18 @@ class VisualDescriptionTests(unittest.TestCase):
                 {"type": "dialogue", "speaker": "周青", "text": "谢谢爸爸！"}]}]}
         first = normalize_script(deepcopy(raw), "第1集")
         blocks = first["scenes"][0]["blocks"]
-        self.assertTrue(blocks[0]["text"].startswith("周青爸爸捧着小熊玩偶，递给"))
-        self.assertEqual(blocks[0]["text"].count("面容清秀"), 1)
+        self.assertEqual(blocks[0]["text"], "周青爸爸捧着小熊玩偶，递给周青。")
+        self.assertNotIn("面容清秀", blocks[0]["text"])
         self.assertEqual((blocks[0]["startSec"], blocks[0]["endSec"]), (1, 3))
         self.assertEqual(blocks[1]["text"], "谢谢爸爸！")
         again = deepcopy(blocks)
-        add_character_visual_descriptions(again, first["characterProfiles"])
+        strip_action_character_visual_descriptions(again, first["characterProfiles"])
         self.assertEqual(again, blocks)
         normalized_again = normalize_script(deepcopy(first), "第1集")
         self.assertEqual(normalized_again["scenes"][0]["blocks"][0], blocks[0])
         self.assertEqual(normalized_again["scenes"][0]["blocks"][1]["text"], blocks[1]["text"])
 
-    def test_visible_introduction_is_compact_while_action_and_dialogue_stay_complete(self):
+    def test_visual_introduction_is_omitted_while_action_and_dialogue_stay_complete(self):
         appearance = "梳双丸子头、脸颊圆润、眼神明亮、个子娇小"
         action_text = "希希先扶住缸沿，再谨慎探身向内观察，确认奶奶的位置后才伸出右手。"
         raw = {
@@ -169,16 +189,21 @@ class VisualDescriptionTests(unittest.TestCase):
         self.assertEqual(profile["appearance"], appearance)
         self.assertEqual(profile["clothing"], "红色碎花棉袄、黑色长裤")
         action, dialogue = script["scenes"][0]["blocks"]
-        self.assertTrue(action["text"].endswith(action_text))
-        self.assertIn("红色棉袄", action["text"])
+        self.assertEqual(action["text"], action_text)
+        self.assertNotIn("红色棉袄", action["text"])
         self.assertNotIn("黑色长裤", action["text"])
         self.assertNotIn("双丸子头", action["text"])
         self.assertNotIn("脸颊圆润", action["text"])
         self.assertNotIn("白色布鞋", action["text"])
         self.assertNotIn("银色手镯", action["text"])
         self.assertEqual(dialogue["text"], "奶奶，我来帮你！")
+        exported = script_to_markdown({"title": "第1集", "result": script})
+        self.assertNotIn("红色碎花棉袄", exported)
+        self.assertNotIn("双丸子头", exported)
+        self.assertIn(action_text, exported)
+        self.assertIn("奶奶，我来帮你！", exported)
 
-    def test_long_model_written_portraits_are_reduced_to_one_core_outfit(self):
+    def test_long_model_written_portraits_are_removed(self):
         cases = [
             (
                 "顾岑舟",
@@ -187,7 +212,7 @@ class VisualDescriptionTests(unittest.TestCase):
                 "穿深灰西装、内搭黑衬衫的年轻男性、黑色偏分短发、眼下有痣、"
                 "深灰色西装外套内搭黑色衬衫、西装领上别着带链条装饰的胸针的"
                 "顾岑舟坐在长会议桌主位上，面前放着文件。",
-                "穿深灰色西装的顾岑舟坐在长会议桌主位上，面前放着文件。",
+                "顾岑舟坐在长会议桌主位上，面前放着文件。",
             ),
             (
                 "江晚",
@@ -196,7 +221,7 @@ class VisualDescriptionTests(unittest.TestCase):
                 "穿黑色开叉长裙、脚踩黑色高跟鞋的年轻女性、黑色大波浪长发、"
                 "黑色吊带长裙领口有珍珠装饰、后期穿黑色粗花呢短外套配白色衬衫"
                 "与黑色短裤的江晚迈步走进会议室，左手腕戴着细手链。",
-                "穿黑色长裙的江晚迈步走进会议室，左手腕戴着细手链。",
+                "江晚迈步走进会议室。",
             ),
             (
                 "商场女销售",
@@ -205,7 +230,7 @@ class VisualDescriptionTests(unittest.TestCase):
                 "穿米白西装、戴白手套的年轻女性、黑色头发扎成低马尾、"
                 "米白色西装套装、内搭同色系上衣的商场女销售双手接过黑卡，"
                 "低头微笑看向卡片。",
-                "穿米白色西装的商场女销售双手接过黑卡，低头微笑看向卡片。",
+                "商场女销售双手接过黑卡，低头微笑看向卡片。",
             ),
             (
                 "顾宜悦",
@@ -214,7 +239,7 @@ class VisualDescriptionTests(unittest.TestCase):
                 "穿粉色连衣裙、头戴粉色蝴蝶结的年轻女性、黑色长卷发、"
                 "头上别着粉色蝴蝶结发饰、粉色无袖连衣裙、配有白色大翻领的"
                 "顾宜悦站在客厅中，转头看向进门的江晚，面露怒色。",
-                "穿粉色连衣裙的顾宜悦站在客厅中，转头看向进门的江晚，面露怒色。",
+                "顾宜悦站在客厅中，转头看向进门的江晚，面露怒色。",
             ),
         ]
         for name, appearance, clothing, action, expected in cases:
@@ -341,7 +366,7 @@ class VisualDescriptionTests(unittest.TestCase):
                                                 "type": "vo", "speaker": "旁白",
                                                 "visibleSpeaker": "周青爸爸", "text": "他回来了。"})
                 first = normalize_script(candidate, "第1集")
-                self.assertEqual(first["scenes"][0]["blocks"][0]["text"], "周青爸爸递给留着黑色长发的周青一只玩偶。")
+                self.assertEqual(first["scenes"][0]["blocks"][0]["text"], "周青爸爸递给周青一只玩偶。")
                 self.assertEqual(first["scenes"][1]["blocks"][0]["text"], "周青爸爸推开门。")
                 again = normalize_script(deepcopy(first), "第1集")
                 self.assertEqual([[(b["type"], b["text"]) for b in s["blocks"]] for s in again["scenes"]],

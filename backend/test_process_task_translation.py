@@ -42,12 +42,16 @@ class ProcessTaskTranslationTests(unittest.TestCase):
         usage = {"provider": "ark", "model": "doubao-seed-2-1-lite-260915",
                  "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
                  "api_cost_rmb": 0.01}
-        model_call = AsyncMock(return_value=(delivery, {
-            "provider": "ark", "model": "doubao-seed-2-1-lite-260915",
-            "callCount": 1, "chunkCount": 1, "fieldCount": 3, "elapsedMs": 1250,
-            "input_tokens": 4, "output_tokens": 3,
-            "total_tokens": 7, "api_cost_rmb": 0.002,
-        }))
+        async def deliver(*_args):
+            self.assertEqual(processing.ark_task_id.get(), "task-bilingual")
+            return delivery, {
+                "provider": "ark", "model": "doubao-seed-2-1-lite-260915",
+                "callCount": 1, "chunkCount": 1, "fieldCount": 3, "elapsedMs": 1250,
+                "input_tokens": 4, "output_tokens": 3,
+                "total_tokens": 7, "api_cost_rmb": 0.002,
+            }
+
+        model_call = AsyncMock(side_effect=deliver)
         try:
             with (
                 patch.object(processing, "task_row", return_value=row),
@@ -64,6 +68,7 @@ class ProcessTaskTranslationTests(unittest.TestCase):
                 asyncio.run(processing.process_task("task-bilingual"))
 
             model_call.assert_awaited_once()
+            self.assertEqual(processing.ark_task_id.get(), "-")
             self.assertEqual(model_call.await_args.args[2:], ("zh", "both"))
             persisted = update.call_args.kwargs
             self.assertEqual(persisted["status"], "done")

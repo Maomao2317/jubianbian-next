@@ -1116,17 +1116,19 @@ def _ark_compact_prompt(
         "Each scene needs heading and blocks. Each block needs type, text, startSec, and endSec; "
         "allowed types are action, dialogue, vo, sound, screen_text, and transition. "
         "For dialogue/vo keep speaker and original wording; for action use concise, observable "
-        "descriptions (one or two sentences) and avoid repeating metadata. On first appearance, "
-        "keep only one core identifying outfit (color plus garment category) before the character name. "
-        "Do not list hair, facial details, age, physique, inner layers, shoes, gloves, jewelry, or multiple garments. "
+        "descriptions (one or two sentences) and avoid repeating metadata. Start directly with the "
+        "character name and observable action. Do not describe clothing, hair, facial details, age, "
+        "physique, accessories, or other static appearance. Keep an actual put-on, take-off, disguise, "
+        "or costume-handling event only when it visibly advances the plot, as an action rather than a portrait. "
         "Check adjacent shots for the visible start, process, and result of actions and each person's location, "
         "which side of a doorway they occupy, facing, and gaze. Describe only what the video supports; never "
         "invent movement to bridge a cut or change a person's position without visible evidence. "
         "For screen_text, preserve dialogue captions as internal subtitle evidence, and mark clearly identified "
         "character name cards and scene/location labels as screenType name_card or scene_label. Keep plot-relevant "
         "messages, signs, and system text in the screenplay; do not classify text by its wording alone. "
-        "Keep characterProfiles and optional fields minimal: include only evidence-based values and "
-        "omit empty fields. Return JSON only, with no Markdown or explanation.\n"
+        "Keep characterProfiles as internal identity evidence only. Appearance/clothing values may be "
+        "briefly recorded there when they help distinguish people, but must never be copied into action text. "
+        "Return JSON only, with no Markdown or explanation.\n"
         + evidence_fragment
     )
 
@@ -1249,13 +1251,13 @@ def ark_prompt(
         "3a. 只要画面从院门到厅堂、厅堂到院外、化妆区到拍摄区等明确换地点或换连续空间，就必须拆成新的场次，重新编号并填写该场实际出场人物；heading 必须使用‘1-2 日 内转外 地点/地点’或‘1-3 日 外 地点’这类可读格式，不能把多个地点塞进一个场次。时间或内外景发生连续转换时，timeOfDay/interiorExterior 可写‘傍晚转夜’、‘内转外’、‘外转内’。"
         "3b. 出场人物只列本场画面中出现或实际说话的人，不要把全片人物表、剧组全体、路人和未入画工作人员复制到每一场；只有动作或对白确实出现时才列入。"
         "4. 连续动作要完整覆盖因果和数量：每一次明确的拳击、推搡、开门、拿取、进出、转身离开都不能漏写；如果是第一拳、第二拳，要按实际顺序明确写出，不能只写‘打了几拳’或只写最后结果，也不能凭空增加动作。动作必须保留视频里实际听见/看见的动词和对象，不要把‘推’改写成‘撞’、把‘拿’概括成‘处理’。每个 action 必须包含规范人物名、动作、对象和结果，必要时补充可执行的表演提示；不要让句子以‘狠狠拽住’、‘随后离开’、‘故意看向’这类无主语短语开头；看不清时写‘未知人物’，不要猜。"
-        "4b. 每条▲画面动作控制在主体+动词+对象+结果的一到两句，按连续动作拆开，避免把整段剧情、环境说明和多个人物的多轮行为塞进一个长句；不要重复同一人物的外形和同一场景陈设。"
+        "4b. 每条▲画面动作控制在主体+动词+对象+结果的一到两句，按连续动作拆开，避免把整段剧情、环境说明和多个人物的多轮行为塞进一个长句；不要描写人物外形、穿着或同一场景陈设。"
         "4c. 连续镜头先核对可见动作的起始、过程和结果，按实际画面顺序交代，不只写最后状态；例如只有视频确实拍到驶来、停稳和下车时，才依次记录这些动作，没拍到的不能推测补写。结合前后镜头核对人物所在位置、门内外、朝向和目光；只有画面清楚时才写明相对位置和变化，不要因切镜或开门而让人物无故换位置。已有准确动作保持原样，不为凑完整编造衔接。"
-        "4a. 人物第一次在正文 action 中出现时，人物名前只保留一个最能识别的核心穿搭（颜色+服装大类），例如‘穿红色棉袄的希希趴在米缸口……’、‘穿深色工装的王铁柱用渔网……’。正文不要罗列发型、五官、年龄外观、体貌、内搭、鞋袜、手套、首饰或多层服装；直接影响剧情的物件只在对应动作中写出。后续动作不重复人物形象，只写视频实际发生的动作，不要猜测。"
+        "4a. 人物在正文 action 中出现时直接写规范人物名和实际动作，不写服装、穿搭、发型、五官、年龄外观、体貌、鞋袜、手套、首饰或其他静态形象。只有视频明确拍到穿上、脱下、换装、伪装或拿取服装且该行为推动剧情时，才把它作为动作和对象写出，不能写成出场形象介绍。"
         "5. 指尖发白、眼里有血丝、眼神一闪、呼吸变化等只作为动作段中的补充，不得单独成为一个镜头/block；只有它直接改变人物决定或剧情结果时才保留。"
         "6. 严禁写‘特写、近景、正反打、镜头切到、推近、拉远、俯拍、仰拍、画面给到’等拍摄或剪辑指令。后期剪辑处理不进入剧本正文。"
         "7. 不输出 environment 字段；画面中的地点、人物关系和动作直接写进 action block，不另设环境段落。"
-        "8. characterProfiles 只保存简短识别信息：appearance 最多一个发型或体貌特征，clothing 只写一个核心穿搭（颜色+服装大类），并与正文第一次 action 一致；不得写成长串人物形象或服饰清单。鞋袜、手套、首饰等配件只有直接影响剧情时才在对应动作中出现。不要猜年龄、身份或视频中看不清的信息；看不清就留空并标记需要核对。"
+        "8. characterProfiles 是仅供后台人物一致性判断的内部证据，不会进入用户看到或下载的剧本正文。必要时可在 appearance、clothing、firstAppearance 中各保留一条简短、可见且能区分人物的特征，但不得把这些字段复制进 action，不得写成长串形象或服饰清单。不要猜年龄、身份或视频中看不清的信息；看不清就留空并标记需要核对。"
         "9. dialogue 必须一人一句、完整保留原话，不能改写成剧情概括，不能省略、合并、调换顺序或补写听不清的内容。台词文字是不可改写字段：只允许恢复中文标点和清理空白，不能替换同义词。每句 dialogue 单独一个 block；同一 speaker 连续说多句也逐句输出，发现说话人切换同样新建 block，不能把两个人的台词合并。先根据语气和语法恢复准确中文标点：逗号分隔分句，句末使用‘。’、‘？’、‘！’或‘……’，不要输出无标点的长句，也不要连续重复标点。听不清的人名、称谓和代词保留‘[听不清]’，confidence 写 low、uncertain 写 true。"
         "9a. 对白括号只保留一到两个简短、可执行的情绪/状态词，例如‘震惊’、‘急切呼喊’、‘语气坚定’；只要视频能观察到表情、动作或语气，就必须填写 performance 或 speechTone，不能把已有情绪证据静默省略；不要输出音高、音量、停顿、重音、语气分析、同义重复或完整表演说明。不要把两个人的台词合并到一个 speaker 下，下一位说话人必须新建 dialogue block。"
         "9b. 独立 ASR 证据中的每个 transcript_segment 都必须在同一时间顺序中逐句对照；声音清晰时以实际听到的台词为准，不能用不同措辞的字幕改写台词。声音听不清时标记audioUnclear=true、speechClarity=unclear，才可用时间对应且可靠的字幕补足；仅说话人不确定不能覆盖清晰原声。不得用剧情概括替代任何一句，也不得把两段台词合并。无法确认某句或说话人时，保留原始可辨识文字、confidence 写 low、uncertain 写 true，并将 speaker 写‘未知说话人’，绝不能按上下文猜测或把上一句人物沿用给下一句。"
@@ -1399,11 +1401,32 @@ def ark_translate_items(
         "model": model,
         "max_output_tokens": output_token_limit,
         "_jbb_token_reservation": input_token_estimate + output_token_limit,
+        # Translation is a deterministic structured-text task. Hidden
+        # reasoning consumes the same output budget and can exhaust it even
+        # after the batch has been split down to one short field.
+        "thinking": {"type": "disabled"},
         "text": {"format": {"type": "json_schema", "name": "screenplay_translation",
                              "strict": True, "schema": schema}},
         "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
     }
-    response = ark_stream_response(payload, api_key)
+    try:
+        response = ark_stream_response(payload, api_key)
+    except ArkError as exc:
+        # Recursive batch splitting is handled by translation.py. Once it has
+        # reached one field there is nothing left to split, so permit exactly
+        # one larger, still globally bounded response budget before failing.
+        if exc.provider_code != "output_limit" or len(items) != 1:
+            raise
+        retry_limit = min(
+            ARK_MAX_OUTPUT_TOKENS,
+            max(8192, output_token_limit * 2),
+        )
+        if retry_limit <= output_token_limit:
+            raise
+        retry_payload = dict(payload)
+        retry_payload["max_output_tokens"] = retry_limit
+        retry_payload["_jbb_token_reservation"] = input_token_estimate + retry_limit
+        response = ark_stream_response(retry_payload, api_key)
     try:
         decoded = json.loads(ark_response_text(response))
     except (TypeError, ValueError) as exc:
@@ -2440,10 +2463,10 @@ def openai_script(title: str, duration_sec: float, transcript: str, evidence: di
     prompt = (
         "请把下面这段短视频转写整理为《剧拆拆》样式的中文短剧剧本。只返回 JSON，不要 Markdown。"
         "按画面顺序保留连续动作，每个可辨识画面用一个 action block；不要写人物表、剧情衔接、场次任务、目标阻力结果、环境说明、独立情绪段或摄影剪辑指令。"
-        "JSON 必须包含 version、title、eventChain、settingRules、characters、characterProfiles、scenes；eventChain 记录起因、冲突、转折、结果和钩子，characterProfiles 内包含 id、name、aliases、appearance、clothing、firstAppearance；scenes 内包含 id、heading、location、timeOfDay、interiorExterior、goal、obstacle、result、continuityIn、continuityOut、hook、summary、characters、environment、blocks。"
+        "JSON 必须包含 version、title、eventChain、settingRules、characters、characterProfiles、scenes；eventChain 记录起因、冲突、转折、结果和钩子，characterProfiles 内包含 id、name、aliases、appearance、clothing、firstAppearance 等仅供后台人物一致性使用的内部证据，这些字段不得写进正文 action；scenes 内包含 id、heading、location、timeOfDay、interiorExterior、goal、obstacle、result、continuityIn、continuityOut、hook、summary、characters、environment、blocks。"
         "summary、goal、obstacle、result、continuityIn、continuityOut、hook、environment 均留空；每场只保留场次头、出场人物和正文 blocks。"
         "只要画面从一个明确空间切换到另一个空间就拆新场次，重新编号并只列该场实际出现/说话的人；heading 要写清日夜、内外景和地点，允许‘内转外’、‘外转内’、‘傍晚转夜’，不能把多个镜头地点压成一个场次。"
-        "blocks 可使用 action、dialogue、vo、sound、screen_text、transition、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名、视频中实际动词、动作对象和结果，不能省略动作主语或把动作概括成泛化词。人物第一次在正文 action 中出现时，人物名前只保留一个核心穿搭（颜色+服装大类），例如‘穿红色棉袄的希希趴在米缸口……’；不要罗列发型、五官、年龄、体貌、内搭、鞋袜、手套、首饰或多层服装，直接影响剧情的物件只在对应动作中写出。"
+        "blocks 可使用 action、dialogue、vo、sound、screen_text、transition、emotion；动作要完整写出每一次明确的拳击、推搡、进出和取放，不能漏掉第一步，也不要把指尖发白、血丝等微表情单独拆成块。每个 action 必须明确人物名、视频中实际动词、动作对象和结果，不能省略动作主语或把动作概括成泛化词。人物出现时直接写人物名和动作，不写服装、穿搭、发型、五官、年龄、体貌、鞋袜、手套、首饰或其他静态形象；只有明确拍到穿上、脱下、换装、伪装或拿取服装且推动剧情时，才作为动作和对象写出。"
         "每条 action 只写一到两句可拍摄的主体、动词、对象和结果，连续动作拆成多个 block，不重复整段环境或同一人物外形。"
         "结合相邻镜头核对动作起始、过程和结果，以及人物位置、门内外、朝向和目光；只描述视频实际可见的内容，不推测补写或因切镜让人物无故换位置。"
         "dialogue 必须完整保留转写原话，一人一句，不省略、合并、调换顺序或改写，只恢复中文标点和空白；同一角色连续发言也逐句输出，每句单独一个 block；‘今天’、‘我’、‘决定’等一到三个字的短台词以及真实重复出现的短词仍必须按次数和顺序保留。每个 block 只能有一个 speaker。画面中人物开口说话必须是 dialogue，不能只写成字幕或 VO；若视频同时有对白字幕，仅保留为内部screen_text证据。同一时间片的相同 speaker、相同 text 只生成一次。人物嘴没有动不能据此判断OS，只有明确内心独白才写voKind=os；画外音、电话另一端、回忆声分别使用offscreen、phone、memory，来源不明用unknown，不猜人物。对白括号只写一到两个简短情绪词，不写音高、音量、停顿、重音等技术分析。"
