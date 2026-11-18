@@ -134,6 +134,20 @@ ARK_VIDEO_URL_ATTEMPTS = max(1, min(3, int(os.getenv("ARK_VIDEO_URL_ATTEMPTS", "
 # full-video review off after minutes of generation. This is a ceiling, not
 # a target: the prompt omits repeated text and unused metadata.
 ARK_MAX_OUTPUT_TOKENS = max(4096, min(32768, int(os.getenv("ARK_MAX_OUTPUT_TOKENS", "32768"))))
+# Translation requests contain text rather than a full video. Keep their
+# concurrency bounded across all tasks and let each task occupy only half of
+# the shared translation lanes, so a multi-episode batch cannot create an
+# unbounded pool of provider calls or let one long episode starve the rest.
+TRANSLATION_MAX_IN_FLIGHT = max(
+    1, min(12, int(os.getenv("JBB_TRANSLATION_MAX_IN_FLIGHT", "8")))
+)
+TRANSLATION_MAX_IN_FLIGHT_PER_TASK = max(
+    1,
+    min(
+        TRANSLATION_MAX_IN_FLIGHT,
+        int(os.getenv("JBB_TRANSLATION_MAX_IN_FLIGHT_PER_TASK", "4")),
+    ),
+)
 # A patch review returns bounded corrections, so it does not need the full
 # screenplay output budget. Keep this separate so initial recognition retains
 # its allowance for dialogue, subtitles, and character metadata.

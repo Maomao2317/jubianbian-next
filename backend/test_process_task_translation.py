@@ -44,7 +44,8 @@ class ProcessTaskTranslationTests(unittest.TestCase):
                  "api_cost_rmb": 0.01}
         model_call = AsyncMock(return_value=(delivery, {
             "provider": "ark", "model": "doubao-seed-2-1-lite-260915",
-            "callCount": 1, "input_tokens": 4, "output_tokens": 3,
+            "callCount": 1, "chunkCount": 1, "fieldCount": 3, "elapsedMs": 1250,
+            "input_tokens": 4, "output_tokens": 3,
             "total_tokens": 7, "api_cost_rmb": 0.002,
         }))
         try:
@@ -69,6 +70,15 @@ class ProcessTaskTranslationTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(persisted["delivery_json"])["scenes"][0]["blocks"][0]["text"],
                 "你好\nHello",
+            )
+            self.assertEqual(
+                json.loads(persisted["quality_json"])["translation"],
+                {
+                    "sourceLanguage": "zh", "outputLanguage": "both",
+                    "provider": "ark", "model": "doubao-seed-2-1-lite-260915",
+                    "callCount": 1, "chunkCount": 1, "fieldCount": 3,
+                    "elapsedMs": 1250,
+                },
             )
         finally:
             connection.close()

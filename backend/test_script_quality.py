@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 from http.client import IncompleteRead
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app import processing, providers
 from app.evidence import collect_evidence, evidence_summary, transcript_from_evidence
@@ -143,6 +143,20 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         with patch.object(providers, "urlopen", return_value=FakeResponse()):
             payload = providers.ark_stream_response({"model": "test", "input": "hello"}, "key")
         self.assertEqual(payload, completed)
+
+    def test_ark_stream_response_uses_and_strips_text_token_reservation(self):
+        completed = {"status": "completed", "output_text": "OK"}
+        budget = MagicMock()
+        budget.reserve.return_value = "reservation"
+        with (patch.object(providers, "provider_budget", budget),
+              patch.object(providers, "_ark_stream_response", return_value=completed) as request):
+            payload = providers.ark_stream_response(
+                {"model": "test", "_jbb_token_reservation": 3210}, "key",
+            )
+
+        self.assertEqual(payload, completed)
+        self.assertEqual(budget.reserve.call_args.kwargs["tokens"], 3210)
+        self.assertNotIn("_jbb_token_reservation", request.call_args.args[0])
 
     def test_ark_stream_response_polls_after_disconnect(self):
         completed = {"id": "resp-test", "status": "completed", "output": [{"content": [{"text": "OK"}]}]}

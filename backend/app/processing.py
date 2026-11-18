@@ -1658,6 +1658,9 @@ async def process_task(task_id: str) -> None:
             "provider": translation_usage.get("provider"),
             "model": translation_usage.get("model"),
             "callCount": translation_usage.get("callCount", 0),
+            "chunkCount": translation_usage.get("chunkCount", 0),
+            "fieldCount": translation_usage.get("fieldCount", 0),
+            "elapsedMs": translation_usage.get("elapsedMs", 0),
         }
         mark_task_stage(task_id, status="running", stage="exporting", progress_percent=94, message="正在生成可下载剧本")
         elapsed_ms = (time.perf_counter() - started) * 1000

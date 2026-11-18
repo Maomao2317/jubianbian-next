@@ -1,11 +1,13 @@
 import threading
-import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from app.errors import ArkError
+from app import providers
 from app.providers import ark_prompt
 from app.script import script_to_markdown
+from app import translation as translation_module
 from app.translation import translate_delivery
 
 
@@ -99,6 +101,49 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(usage["callCount"], 1)
         self.assertEqual(usage["model"], "doubao-lite")
 
+    def test_translation_items_include_screenplay_context_and_cast_glossary(self):
+        original = sample_script()
+        captured = []
+
+        def translate(items, _source, _target):
+            captured.extend(items)
+            return [{"id": item["id"], "text": f"EN {item['text']}"} for item in items], {}
+
+        translate_delivery(original, "zh", "en", translate_items=translate)
+
+        dialogue = next(item for item in captured if item.get("kind") == "dialogue" and item.get("field") == "text")
+        self.assertEqual(dialogue["speaker"], "林夏")
+        self.assertIn("1-1", dialogue["scene"])
+        self.assertTrue(any("林夏" in item.get("protectedNames", "") for item in captured))
+
+    def test_translation_preserves_multiline_dialogue_names_and_scene_numbers(self):
+        original = sample_script()
+        original["scenes"][0]["blocks"][0]["text"] = "林夏：第一句\n第二句"
+
+        def changed_lines(items, *_args):
+            return [{"id": item["id"], "text": "collapsed"} for item in items], {}
+
+        with self.assertRaises(ArkError) as lines:
+            translate_delivery(original, "zh", "en", translate_items=changed_lines)
+        self.assertEqual(lines.exception.provider_code, "translation_structure_changed")
+
+        def changed_name(items, *_args):
+            return [{"id": item["id"], "text": item["text"].replace("林夏", "Lin")}
+                    for item in items], {}
+
+        with self.assertRaises(ArkError) as name:
+            translate_delivery(original, "zh", "en", translate_items=changed_name)
+        self.assertEqual(name.exception.provider_code, "translation_name_changed")
+
+        def changed_scene(items, *_args):
+            return [{"id": item["id"], "text": "2-1 Night INT Living room"
+                     if item.get("kind") == "scene_heading" else item["text"]}
+                    for item in items], {}
+
+        with self.assertRaises(ArkError) as scene:
+            translate_delivery(sample_script(), "zh", "en", translate_items=changed_scene)
+        self.assertEqual(scene.exception.provider_code, "translation_structure_changed")
+
     def test_english_source_can_be_delivered_in_chinese_or_bilingually(self):
         original = {
             "title": "The visitor",
@@ -165,6 +210,7 @@ class TranslationTests(unittest.TestCase):
             {"type": "dialogue", "text": f"台词 {index}"} for index in range(95)
         ]
         lock = threading.Lock()
+        entered = threading.Barrier(2)
         active = 0
         max_active = 0
 
@@ -175,7 +221,7 @@ class TranslationTests(unittest.TestCase):
                 active += 1
                 max_active = max(max_active, active)
             try:
-                time.sleep(0.02)
+                entered.wait(timeout=2)
                 return [{"id": item["id"], "text": f"EN {item['text']}"} for item in items], {
                     "model": "doubao-lite", "input_tokens": 2, "output_tokens": 3,
                     "total_tokens": 5, "api_cost_rmb": 0.001,
@@ -188,11 +234,62 @@ class TranslationTests(unittest.TestCase):
             delivery, usage = translate_delivery(original, "zh", "en")
 
         self.assertGreaterEqual(max_active, 2)
-        self.assertEqual(usage["callCount"], 4)
+        self.assertEqual(usage["callCount"], 2)
+        self.assertEqual(usage["chunkCount"], 2)
         self.assertEqual(
             [block["text"] for block in delivery["scenes"][0]["blocks"][:3]],
             ["EN 台词 0", "EN 台词 1", "EN 台词 2"],
         )
+
+    def test_multiple_tasks_share_bounded_translation_capacity(self):
+        lock = threading.Lock()
+        two_entered = threading.Event()
+        active = 0
+        peak = 0
+
+        def translate(items, _source, _target):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                if peak >= 2:
+                    two_entered.set()
+            try:
+                self.assertTrue(two_entered.wait(timeout=2))
+                return [{"id": item["id"], "text": f"EN {item['text']}"} for item in items], {}
+            finally:
+                with lock:
+                    active -= 1
+
+        def run_task(index):
+            script = sample_script()
+            script["title"] = f"任务 {index}"
+            return translate_delivery(script, "zh", "en", translate_items=translate)[0]
+
+        with (patch.object(translation_module, "_translation_semaphore", threading.BoundedSemaphore(2)),
+              ThreadPoolExecutor(max_workers=5) as tasks):
+            results = list(tasks.map(run_task, range(5)))
+
+        self.assertEqual(len(results), 5)
+        self.assertEqual(peak, 2)
+
+    def test_translation_uses_text_sized_provider_reservation(self):
+        completed = {
+            "status": "completed",
+            "output_text": '{"translations":[{"id":"t0","text":"Hello"}]}',
+            "usage": {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24},
+        }
+        with (patch.object(providers, "ark_account_key", return_value="key"),
+              patch.object(providers, "ark_stream_response", return_value=completed) as request):
+            translated, usage = providers.ark_translate_items(
+                [{"id": "t0", "text": "你好", "kind": "dialogue"}], "zh", "en",
+            )
+
+        payload = request.call_args.args[0]
+        self.assertEqual(translated[0]["text"], "Hello")
+        self.assertEqual(usage["model"], providers.ARK_LITE_MODEL)
+        self.assertLess(payload["max_output_tokens"], providers.ARK_MAX_OUTPUT_TOKENS)
+        self.assertLess(payload["_jbb_token_reservation"], providers.ARK_INPUT_TOKEN_RESERVE)
 
     def test_english_source_prompt_requires_original_language_transcription(self):
         prompt = ark_prompt("Episode", 60, {"sourceLanguage": "en", "sources": []})
