@@ -30,7 +30,6 @@ APP_FILES = [
     "backend/app/processing.py",
     "backend/app/providers.py",
     "backend/app/script.py",
-    "backend/app/translation.py",
 ]
 CHANGED_TEST_FILES = [
     "backend/test_process_task_translation.py",

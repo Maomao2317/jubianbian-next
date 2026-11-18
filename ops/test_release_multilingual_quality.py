@@ -17,7 +17,7 @@ class MultilingualQualityReleaseTests(unittest.TestCase):
         self.assertEqual(release.PROTECTED_PROJECT, "jubianbian")
         self.assertEqual(release.PORT, 18000)
         self.assertEqual(release.BASE_BUILD, "multilingual-quality-20261118-24775e6")
-        self.assertIn("backend/app/translation.py", release.APP_FILES)
+        self.assertNotIn("backend/app/translation.py", release.APP_FILES)
         self.assertIn("backend/app/script.py", release.APP_FILES)
         self.assertEqual(
             release.ALLOWED,
