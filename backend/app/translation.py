@@ -18,10 +18,68 @@ from .providers import ark_translate_items
 TRANSLATION_MAX_ITEMS = 64
 TRANSLATION_MAX_SOURCE_CHARS = 5000
 _translation_semaphore = BoundedSemaphore(TRANSLATION_MAX_IN_FLIGHT)
+_NAME_PLACEHOLDER_TEMPLATE = "[[JBB_NAME_{index:03d}]]"
 _GENERIC_CHARACTER_LABELS = {
     "旁白", "未知说话人", "未知男声", "未知女声", "人物", "角色", "OS", "VO", "内心独白",
     "Narrator", "Unknown speaker", "Character", "Inner monologue",
 }
+
+
+def _protect_character_names(
+    text: str, protected_names: list[str],
+) -> tuple[str, dict[str, tuple[str, int]]]:
+    """Replace cast names with stable, non-translatable placeholders.
+
+    The provider still receives the cast glossary as context, but it never has
+    to decide whether a name inside screenplay prose should be translated.
+    Longer names are replaced first so overlapping aliases remain stable.
+    """
+    names = sorted(
+        {name for name in protected_names if name and name in text},
+        key=lambda value: (-len(value), value),
+    )
+    if not names:
+        return text, {}
+    placeholders = {
+        name: _NAME_PLACEHOLDER_TEMPLATE.format(index=index)
+        for index, name in enumerate(names)
+    }
+    counts = {name: 0 for name in names}
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(0)
+        counts[name] += 1
+        return placeholders[name]
+
+    # A single pass is important: a Latin-character name such as "JBB"
+    # must never match inside a placeholder produced for another character.
+    pattern = re.compile("|".join(re.escape(name) for name in names))
+    protected = pattern.sub(replace, text)
+    replacements = {
+        placeholders[name]: (name, counts[name])
+        for name in names
+        if counts[name]
+    }
+    return protected, replacements
+
+
+def _restore_character_names(
+    translated: str, replacements: dict[str, tuple[str, int]],
+) -> str:
+    restored = translated
+    for placeholder, (name, expected_count) in replacements.items():
+        label = re.escape(placeholder[2:-2])
+        pattern = re.compile(
+            rf"(?:\[\[|［［)\s*{label}\s*(?:\]\]|］］)",
+            flags=re.IGNORECASE,
+        )
+        if len(pattern.findall(restored)) != expected_count:
+            raise ArkError(
+                "翻译改变了人物姓名占位符，未开放交付",
+                provider_code="translation_name_changed",
+            )
+        restored = pattern.sub(lambda _match: name, restored)
+    return restored
 
 
 def _translate_chunk_with_retry(
@@ -115,14 +173,19 @@ def _text_fields(
 
 def _translation_chunks(
     fields: list[tuple[dict[str, Any], str, str, dict[str, str]]],
-) -> list[list[dict[str, str]]]:
+    protected_names: list[str],
+) -> tuple[list[list[dict[str, str]]], dict[str, dict[str, tuple[str, int]]]]:
     chunks: list[list[dict[str, str]]] = []
+    name_replacements: dict[str, dict[str, tuple[str, int]]] = {}
     current: list[dict[str, str]] = []
     source_chars = 0
     for index, (_owner, _key, value, context) in enumerate(fields):
+        item_id = f"t{index}"
+        protected_value, replacements = _protect_character_names(value, protected_names)
+        name_replacements[item_id] = replacements
         if current and (
             len(current) >= TRANSLATION_MAX_ITEMS
-            or source_chars + len(value) > TRANSLATION_MAX_SOURCE_CHARS
+            or source_chars + len(protected_value) > TRANSLATION_MAX_SOURCE_CHARS
         ):
             chunks.append(current)
             current = []
@@ -136,21 +199,27 @@ def _translation_chunks(
         # of repeating a potentially long roster for every screenplay line.
         if not current and context.get("protectedNames"):
             item_context["protectedNames"] = context["protectedNames"]
-        current.append({"id": f"t{index}", "text": value, **item_context})
-        source_chars += len(value)
+        current.append({"id": item_id, "text": protected_value, **item_context})
+        source_chars += len(protected_value)
     if current:
         chunks.append(current)
-    return chunks
+    return chunks, name_replacements
 
 
 def _validate_translation(
     original: str, translated: str, context: dict[str, str], protected_names: list[str],
 ) -> None:
-    if original.count("\n") != translated.count("\n"):
-        raise ArkError("翻译改变了原文行数，未开放交付", provider_code="translation_structure_changed")
+    _validate_translation_structure(original, translated, context)
     for name in protected_names:
         if name in original and name not in translated:
             raise ArkError("翻译改变了人物姓名，未开放交付", provider_code="translation_name_changed")
+
+
+def _validate_translation_structure(
+    original: str, translated: str, context: dict[str, str],
+) -> None:
+    if original.count("\n") != translated.count("\n"):
+        raise ArkError("翻译改变了原文行数，未开放交付", provider_code="translation_structure_changed")
     if context.get("kind") == "scene_heading":
         original_number = re.match(r"^\s*(\d+-\d+)(?=\s|$)", original)
         translated_number = re.match(r"^\s*(\d+-\d+)(?=\s|$)", translated)
@@ -212,7 +281,8 @@ def translate_delivery(
 
     translate = translate_items or ark_translate_items
     target = _target_language(source_language) if output_language == "both" else output_language
-    chunks = _translation_chunks(fields)
+    protected_names = _character_names(delivery)
+    chunks, name_replacements = _translation_chunks(fields, protected_names)
 
     # Each chunk is independent.  The real provider path can run a bounded
     # number of requests concurrently, while injected test doubles stay
@@ -251,12 +321,57 @@ def translate_delivery(
             translations[item["id"]] = value.strip()
         usages.extend(chunk_usages)
 
-    protected_names = _character_names(delivery)
+    items_by_id = {item["id"]: item for chunk in chunks for item in chunk}
+    restored_translations: dict[str, str] = {}
+    for offset, (_owner, _key, _original, _context) in enumerate(fields):
+        item_id = f"t{offset}"
+        try:
+            _validate_translation_structure(
+                _original, translations[item_id], _context,
+            )
+            restored_translations[item_id] = _restore_character_names(
+                translations[item_id], name_replacements[item_id],
+            )
+        except ArkError as initial_error:
+            if initial_error.provider_code != "translation_name_changed":
+                initial_error.usage = _usage_summary(
+                    usages, chunks=len(chunks), fields=len(fields), started=started,
+                )
+                raise
+            # A provider can occasionally rewrite even an explicit placeholder.
+            # Retry only that field with an even clearer data-level constraint;
+            # the second result still has to pass the same deterministic check.
+            retry_item = dict(items_by_id[item_id])
+            retry_item["placeholderRule"] = (
+                "Keep every [[JBB_NAME_###]] placeholder byte-for-byte and in place."
+            )
+            try:
+                returned, retry_usages = _translate_chunk_with_retry(
+                    translate, [retry_item], source_language, target,
+                )
+                if (len(returned) != 1 or not isinstance(returned[0], dict)
+                        or returned[0].get("id") != item_id
+                        or not isinstance(returned[0].get("text"), str)
+                        or not returned[0]["text"].strip()):
+                    raise ArkError(
+                        "豆包翻译结果缺项或重复，未开放交付",
+                        provider_code="translation_incomplete",
+                    )
+                usages.extend(retry_usages)
+                restored_translations[item_id] = _restore_character_names(
+                    returned[0]["text"].strip(), name_replacements[item_id],
+                )
+            except ArkError as exc:
+                exc.usage = _usage_summary(
+                    usages, chunks=len(chunks), fields=len(fields), started=started,
+                )
+                raise
+
     usage_summary = _usage_summary(
         usages, chunks=len(chunks), fields=len(fields), started=started,
     )
     for offset, (owner, key, original, context) in enumerate(fields):
-        translated = translations[f"t{offset}"]
+        translated = restored_translations[f"t{offset}"]
         try:
             _validate_translation(original, translated, context, protected_names)
         except ArkError as exc:

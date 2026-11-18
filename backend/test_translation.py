@@ -1,3 +1,4 @@
+import re
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -116,6 +117,94 @@ class TranslationTests(unittest.TestCase):
         self.assertIn("1-1", dialogue["scene"])
         self.assertTrue(any("林夏" in item.get("protectedNames", "") for item in captured))
 
+    def test_names_in_translatable_text_use_deterministic_placeholders(self):
+        original = sample_script()
+        character = original["characters"][0]
+        captured = []
+
+        def translate(items, _source, _target):
+            captured.extend(items)
+            return [{"id": item["id"], "text": f"EN {item['text']}"} for item in items], {}
+
+        delivery, _usage = translate_delivery(original, "zh", "en", translate_items=translate)
+
+        action_item = next(item for item in captured if "JBB_NAME" in item["text"])
+        self.assertNotIn(character, action_item["text"])
+        self.assertIn("[[JBB_NAME_000]]", action_item["text"])
+        self.assertIn(character, delivery["scenes"][0]["blocks"][1]["text"])
+        self.assertNotIn("JBB_NAME", delivery["scenes"][0]["blocks"][1]["text"])
+
+    def test_changed_name_placeholder_retries_only_the_affected_field(self):
+        original = sample_script()
+        character = original["characters"][0]
+        calls = []
+
+        def translate(items, _source, _target):
+            calls.append([item["id"] for item in items])
+            returned = []
+            for item in items:
+                text = item["text"]
+                if "JBB_NAME" in text and "placeholderRule" not in item:
+                    text = text.replace("[[JBB_NAME_000]]", "Lin")
+                returned.append({"id": item["id"], "text": f"EN {text}"})
+            return returned, {}
+
+        delivery, usage = translate_delivery(original, "zh", "en", translate_items=translate)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls[1]), 1)
+        self.assertIn(character, delivery["scenes"][0]["blocks"][1]["text"])
+        self.assertEqual(usage["callCount"], 2)
+
+    def test_common_placeholder_formatting_is_restored_without_retry(self):
+        original = sample_script()
+        character = original["characters"][0]
+        calls = []
+
+        def translate(items, _source, _target):
+            calls.append(len(items))
+            return [{
+                "id": item["id"],
+                "text": item["text"].replace(
+                    "[[JBB_NAME_000]]", "［［jbb_name_000］］",
+                ),
+            } for item in items], {}
+
+        delivery, _usage = translate_delivery(
+            original, "zh", "en", translate_items=translate,
+        )
+
+        self.assertEqual(calls, [5])
+        self.assertIn(character, delivery["scenes"][0]["blocks"][1]["text"])
+
+    def test_latin_name_cannot_match_inside_another_name_placeholder(self):
+        original = {
+            "title": "Meeting",
+            "characters": ["JBB", "Alice"],
+            "scenes": [{
+                "heading": "1-1 Day INT Office",
+                "characters": ["JBB", "Alice"],
+                "blocks": [{"type": "action", "text": "Alice meets JBB."}],
+            }],
+        }
+
+        def translate(items, _source, _target):
+            action = next(item for item in items if item.get("kind") == "action")
+            self.assertEqual(
+                action["text"],
+                "[[JBB_NAME_000]] meets [[JBB_NAME_001]].",
+            )
+            return [{"id": item["id"], "text": item["text"]} for item in items], {}
+
+        delivery, _usage = translate_delivery(
+            original, "en", "zh", translate_items=translate,
+        )
+
+        self.assertEqual(
+            delivery["scenes"][0]["blocks"][0]["text"],
+            "Alice meets JBB.",
+        )
+
     def test_translation_preserves_multiline_dialogue_names_and_scene_numbers(self):
         original = sample_script()
         original["scenes"][0]["blocks"][0]["text"] = "林夏：第一句\n第二句"
@@ -128,7 +217,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(lines.exception.provider_code, "translation_structure_changed")
 
         def changed_name(items, *_args):
-            return [{"id": item["id"], "text": item["text"].replace("林夏", "Lin")}
+            return [{"id": item["id"], "text": re.sub(r"\[\[JBB_NAME_\d+\]\]", "Lin", item["text"])}
                     for item in items], {}
 
         with self.assertRaises(ArkError) as name:

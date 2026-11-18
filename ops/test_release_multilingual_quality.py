@@ -16,9 +16,15 @@ class MultilingualQualityReleaseTests(unittest.TestCase):
         self.assertEqual(release.PROJECT, "jubianbian-staging")
         self.assertEqual(release.PROTECTED_PROJECT, "jubianbian")
         self.assertEqual(release.PORT, 18000)
-        self.assertEqual(release.BASE_BUILD, "multilingual-quality-20261118-24775e6")
-        self.assertNotIn("backend/app/translation.py", release.APP_FILES)
-        self.assertIn("backend/app/script.py", release.APP_FILES)
+        self.assertEqual(
+            release.BASE_BUILD,
+            "translation-screenplay-focus-20261118-8ddf4b5",
+        )
+        self.assertEqual(
+            release.APP_FILES,
+            ["backend/app/providers.py", "backend/app/translation.py"],
+        )
+        self.assertEqual(release.CHANGED_TEST_FILES, ["backend/test_translation.py"])
         self.assertEqual(
             release.ALLOWED,
             set(release.APP_FILES + release.CHANGED_TEST_FILES + release.RELEASE_SUPPORT_FILES),
