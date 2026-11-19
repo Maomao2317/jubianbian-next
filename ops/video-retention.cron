@@ -1,0 +1,5 @@
+# Server local time is Asia/Shanghai. Keep completed task and screenplay rows.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+15 4 * * * root /usr/bin/docker exec jubianbian-staging-app-1 python /app/ops/video_retention.py run >> /var/log/jubianbian-staging-video-retention.log 2>&1
+35 4 * * * root /usr/bin/docker exec jubianbian-app-1 python /app/ops/video_retention.py run >> /var/log/jubianbian-video-retention.log 2>&1

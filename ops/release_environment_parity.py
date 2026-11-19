@@ -20,16 +20,22 @@ from release_gpu_transport import stop_when_compute_idle
 
 
 REF = "codex/multilingual-performance-quality"
-BASELINE = "8d706c8c9c80fec11579f46fe58f253519f3e114"
-STAGING_BASE_BUILD = "screenplay-fidelity-20261119-8d706c8"
-PRODUCTION_BASE_BUILD = "character-intro-split-20261116-cfd1b08"
-BUILD_PREFIX = "environment-parity-20261119-"
+BASELINE = "e18dba831668d7a68a8d02de204c218ef74d637a"
+STAGING_BASE_BUILD = "environment-parity-20261119-e18dba8"
+PRODUCTION_BASE_BUILD = STAGING_BASE_BUILD
+BUILD_PREFIX = "video-retention-20261119-"
 RELEASE_FILES = {
+    ".env.example",
+    "docker-compose.yml",
+    "docker-compose.staging.yml",
+    "ops/README.md",
+    "ops/cleanup_data.py",
+    "ops/video_retention.py",
+    "ops/test_video_retention.py",
+    "ops/video-retention.cron",
     "ops/release_environment_parity.py",
     "ops/test_release_environment_parity.py",
-    "ops/purge_disabled_accounts.py",
-    "ops/test_purge_disabled_accounts.py",
-    "ops/environment-parity-release-2026-11-19.md",
+    "ops/video-retention-release-2026-11-19.md",
 }
 SITES = {
     "staging": ("jubianbian-staging", 18000, STAGING_BASE_BUILD),
@@ -74,8 +80,10 @@ def verify_config(old: dict, new: dict, image: str, build: str) -> None:
     old_app = old["services"]["app"]
     assert app["image"] == image
     assert app["environment"]["JBB_BUILD_VERSION"] == build
+    assert app["environment"]["JBB_RETENTION_DAYS"] == "14"
     app["image"] = old_app["image"]
     app["environment"]["JBB_BUILD_VERSION"] = old_app["environment"]["JBB_BUILD_VERSION"]
+    app["environment"]["JBB_RETENTION_DAYS"] = old_app["environment"]["JBB_RETENTION_DAYS"]
     assert adjusted == old, "Unrelated Compose configuration changed"
 
 
@@ -93,12 +101,13 @@ def prepare(commit: str, build: str, base: Path) -> None:
     checks = test_files(commit)
     assert files and checks
     hashes = {}
-    for path in files + checks + ["ops/purge_disabled_accounts.py"]:
+    for path in files + checks + ["ops/cleanup_data.py", "ops/video_retention.py",
+                                 "ops/test_video_retention.py"]:
         data = common.normalized(common.git("show", commit + ":" + path))
         target = base / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if path in files:
+        if path in files or path in {"ops/cleanup_data.py", "ops/video_retention.py"}:
             hashes[path] = common.digest(data)
 
     # Staging is the already verified base. Every tracked application source
@@ -112,7 +121,8 @@ def prepare(commit: str, build: str, base: Path) -> None:
     dockerfile.write_text(
         "FROM " + source_tag + "\n"
         + "".join("COPY " + p + " /app/" + p + "\n" for p in files)
-        + "COPY ops/purge_disabled_accounts.py /app/ops/purge_disabled_accounts.py\n"
+        + "COPY ops/cleanup_data.py /app/ops/cleanup_data.py\n"
+        + "COPY ops/video_retention.py /app/ops/video_retention.py\n"
     )
     common.run(["docker", "build", "--network=none", "--pull=false", "-q", "-t", image,
                 "-f", dockerfile, base])
@@ -122,6 +132,11 @@ def prepare(commit: str, build: str, base: Path) -> None:
         cmd += ["-v", str(base / path) + ":/app/" + path + ":ro"]
     common.run(cmd + ["-w", "/app/backend", "--entrypoint", "python", image,
                       "-m", "unittest", *(Path(path).stem for path in checks)])
+    common.run(["docker", "run", "--rm", "--network=none", "--memory=1g", "--cpus=1",
+                "-e", "PYTHONPATH=/app/backend:/app/ops", "-e", "JBB_DATA_DIR=/tmp/jbb-retention-tests",
+                "-v", str(base / "ops/test_video_retention.py") + ":/app/ops/test_video_retention.py:ro",
+                "-w", "/app/ops", "--entrypoint", "python", image,
+                "-m", "unittest", "test_video_retention"])
     assert {site: common.fingerprint(project) for site, (project, _, _) in SITES.items()} == before
     record = {"commit": commit, "build": build, "files": hashes, "image": image,
               "imageId": image_id(image), "fingerprintsBefore": before,
@@ -181,7 +196,8 @@ def deploy(site: str, commit: str, build: str, base: Path) -> None:
     stopped = False
     try:
         overlay.write_text(json.dumps({"services": {"app": {
-            "image": record["image"], "environment": {"JBB_BUILD_VERSION": build},
+            "image": record["image"], "environment": {
+                "JBB_BUILD_VERSION": build, "JBB_RETENTION_DAYS": "14"},
         }}}, indent=2))
         new_config = json.loads(common.output(new_compose + ["config", "--format", "json"]))
         verify_config(old_config, new_config, record["image"], build)
@@ -199,7 +215,8 @@ def deploy(site: str, commit: str, build: str, base: Path) -> None:
         deployment["health"] = common.health(port, site, build)
         current = common.inspect(project)
         assert current["Image"] == record["imageId"]
-        assert common.environment(current) == dict(old_env, JBB_BUILD_VERSION=build)
+        assert common.environment(current) == dict(old_env, JBB_BUILD_VERSION=build,
+                                                   JBB_RETENTION_DAYS="14")
         assert common.mounts(current) == common.mounts(before)
         assert current["HostConfig"]["PortBindings"] == before["HostConfig"]["PortBindings"]
         common.verify_files(project, port, record["files"])

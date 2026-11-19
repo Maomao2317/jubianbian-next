@@ -3,7 +3,7 @@
 这些脚本在服务器上运行，不包含 API Key。
 
 - `backup_data.sh`：把 Docker 数据卷中的 SQLite 和上传视频打包到 `/opt/jubianbian-backups`，默认保留 14 天。
-- `cleanup_data.sh`：默认清理 30 天以前已经完成或失败的任务及孤立视频，不触碰排队中或进行中的任务。
+- `cleanup_data.sh`：只清理超过 14 天的原视频、视频代理及孤立本地视频；任务、剧本和台词长期保留，不触碰排队中或进行中的任务。`video_retention.py audit` 可先审计清理范围，`video_retention.py run` 可执行并记录已清理任务。
 
 建议由 root 定时运行：
 
