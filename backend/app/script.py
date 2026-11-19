@@ -2849,9 +2849,11 @@ def normalize_script(script: Any, title: str, evidence: dict[str, Any] | None = 
 
 _GENERIC_CHARACTER_LABELS = {
     "旁白", "未知说话人", "未知男声", "未知女声", "人物", "男主", "女主",
-    "主角", "配角", "路人", "群众", "工作人员", "全体", "os", "vo",
+    "主角", "男主人公", "女主人公", "男一", "女一", "配角", "路人", "群众", "工作人员", "全体", "os", "vo",
     "内心独白",
 }
+
+_LEAD_ROLE_LABELS = {"男主", "女主", "主角", "男主人公", "女主人公", "男一", "女一"}
 
 # A provider may correctly record the source's naming evidence while still
 # leaving a descriptive label (for example ``白发蛇尾男性``) in ``name``.
@@ -3042,9 +3044,31 @@ def _script_character_names(script: dict[str, Any], *, include_generic: bool = F
 
 
 def _replace_cast_labels(script: dict[str, Any], mapping: dict[str, str]) -> None:
-    """Rewrite structured identity labels, never source dialogue/action text."""
+    """Rewrite identity labels and action subjects, never spoken/source text.
+
+    Dialogue, VO and screen text are source evidence and must remain verbatim.
+    Action prose is generated screenplay narration, so leaving ``女主`` there
+    after its structured label becomes ``甄珠`` would still expose mixed names
+    to users.  Only labels that were already proven by ``mapping`` are changed.
+    """
     def replace(value: Any) -> Any:
         return mapping.get(str(value).strip(), value) if value is not None else value
+
+    def replace_action_text(value: Any) -> Any:
+        text = str(value or "")
+        for old, new in sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True):
+            if not old or old == new:
+                continue
+            # Do not turn the ordinary words 女主角/男主人 into malformed
+            # names. Elsewhere Chinese action prose normally joins a subject
+            # directly to its verb, so word-boundary matching is unsuitable.
+            if old == "女主":
+                text = re.sub(r"女主(?!角)", new, text)
+            elif old == "男主":
+                text = re.sub(r"男主(?!角|人)", new, text)
+            else:
+                text = text.replace(old, new)
+        return text
 
     script["characterNameScope"] = "labels"
     script["characters"] = list(dict.fromkeys(replace(v) for v in script.get("characters") or []))
@@ -3081,6 +3105,71 @@ def _replace_cast_labels(script: dict[str, Any], mapping: dict[str, str]) -> Non
                 for field in ("speaker", "visibleSpeaker"):
                     if field in block:
                         block[field] = replace(block[field])
+                if block.get("type") == "action":
+                    for field in ("text", "object", "result"):
+                        if field in block:
+                            block[field] = replace_action_text(block[field])
+
+
+def _has_direct_name_support(profile: dict[str, Any], name: str) -> bool:
+    """Return whether source-oriented evidence directly supports ``name``."""
+    evidence = "。".join(
+        str(profile.get(key) or "").strip()
+        for key in ("nameEvidence", "identityEvidence")
+        if str(profile.get(key) or "").strip()
+    )
+    if not evidence or not _name_is_supported(evidence, name):
+        return False
+    return bool(re.search(
+        r"姓名条|名字|姓名|名叫|叫做|叫作|自称|自报|称呼|被称|喊|字幕|字条|证件|签名|备注名",
+        evidence,
+    ))
+
+
+def _backfill_unproven_proper_name_drift(scripts: list[dict[str, Any]]) -> int:
+    """Keep an earlier evidenced name when a later unsupported name drifts.
+
+    A later model response sometimes invents a new proper-looking name while
+    still retaining the earlier canonical name in ``aliases``.  That is enough
+    to identify the regression only when the alias points to exactly one
+    earlier, directly evidenced identity.  A separately evidenced new name is
+    preserved instead of guessed away.
+    """
+    established: dict[str, str] = {}
+    changes = 0
+    for script in scripts:
+        if not isinstance(script, dict):
+            continue
+        mapping: dict[str, str] = {}
+        for profile in script.get("characterProfiles") or []:
+            if not isinstance(profile, dict):
+                continue
+            name = character_label(profile.get("name"))
+            if not name or _is_generic_character(name) or not _looks_like_explicit_name(name):
+                continue
+            key = _character_key(name)
+            if key in established:
+                continue
+            prior = {
+                established[_character_key(alias)]
+                for alias in profile.get("aliases") or []
+                if _character_key(alias) in established
+            }
+            if len(prior) == 1 and not _has_direct_name_support(profile, name):
+                mapping[name] = next(iter(prior))
+                continue
+            if _has_direct_name_support(profile, name):
+                established[key] = name
+        if mapping:
+            _replace_cast_labels(script, mapping)
+            changes += len(mapping)
+        for profile in script.get("characterProfiles") or []:
+            if not isinstance(profile, dict):
+                continue
+            name = character_label(profile.get("name"))
+            if name and _looks_like_explicit_name(name) and _has_direct_name_support(profile, name):
+                established.setdefault(_character_key(name), name)
+    return changes
 
 
 def _backfill_evidenced_cast_aliases(scripts: list[dict[str, Any]]) -> int:
@@ -3089,6 +3178,13 @@ def _backfill_evidenced_cast_aliases(scripts: list[dict[str, Any]]) -> int:
     Do not treat an alias list, shared clothes, or a shared surname as proof.
     Different full names remain distinct; ambiguous aliases remain unresolved.
     """
+    directly_supported_names = {
+        character_label(profile.get("name"))
+        for script in scripts if isinstance(script, dict)
+        for profile in script.get("characterProfiles") or [] if isinstance(profile, dict)
+        if character_label(profile.get("name"))
+        and _has_direct_name_support(profile, character_label(profile.get("name")))
+    }
     owners: dict[str, set[str]] = {}
     supported: set[tuple[str, str]] = set()
     for script in scripts:
@@ -3106,10 +3202,18 @@ def _backfill_evidenced_cast_aliases(scripts: list[dict[str, Any]]) -> int:
                 alias = character_label(alias)
                 if not alias or alias == name:
                     continue
-                if alias not in {"男主", "女主", "主角"} and not re.search(r"先生$|女士$|小姐$|少爷$|夫人$|总裁$", alias):
+                if alias not in _LEAD_ROLE_LABELS and not re.search(r"先生$|女士$|小姐$|少爷$|夫人$|总裁$", alias):
                     continue
                 owners.setdefault(alias, set()).add(name)
-                if name in evidence and alias in evidence and not re.search(r"待核|待确认|疑似|猜测|暂定|可能", evidence):
+                # Lead-role aliases are structured identity links rather than
+                # source dialogue. Accept them only when the proper name has
+                # direct source support and exactly one named owner across the
+                # entire batch. Honorifics still require both labels in the
+                # evidence sentence because many people can share one title.
+                if (alias in _LEAD_ROLE_LABELS and name in directly_supported_names) or (
+                    name in evidence and alias in evidence
+                    and not re.search(r"待核|待确认|疑似|猜测|暂定|可能", evidence)
+                ):
                     supported.add((alias, name))
     mapping = {alias: next(iter(names)) for alias, names in owners.items()
                if len(names) == 1 and (alias, next(iter(names))) in supported}
@@ -3142,6 +3246,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
     promoted = sum(_promote_evidenced_profile_names(script) for script in scripts)
     if len(scripts) < 2:
         return promoted
+    proper_name_drift = _backfill_unproven_proper_name_drift(scripts)
     backfilled = _backfill_evidenced_cast_aliases(scripts)
     first = scripts[0] if isinstance(scripts[0], dict) else None
     if not first:
@@ -3350,7 +3455,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
             return contained[0]
         return None
 
-    total_changes = promoted + backfilled
+    total_changes = promoted + proper_name_drift + backfilled
     for script in scripts[1:]:
         if not isinstance(script, dict):
             continue
@@ -3390,50 +3495,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
             add_identity_evidence(script)
             register(script)
             continue
-        def replace_label(value: Any) -> Any:
-            if value is None:
-                return value
-            text = str(value).strip()
-            return mapping.get(text, text)
-
-        script["characters"] = list(dict.fromkeys(replace_label(value) for value in script.get("characters") or []))
-        script["characterNameScope"] = "labels"
-        merged_profiles: list[dict[str, Any]] = []
-        profile_by_name: dict[str, dict[str, Any]] = {}
-        for profile in script.get("characterProfiles") or []:
-            if not isinstance(profile, dict):
-                continue
-            old_name = str(profile.get("name") or "").strip()
-            new_name = replace_label(old_name)
-            profile = dict(profile)
-            profile["name"] = new_name
-            profile["aliases"] = list(dict.fromkeys(
-                [alias for alias in profile.get("aliases") or [] if character_label(alias)]
-                + ([old_name] if old_name and old_name != new_name else [])
-            ))
-            if profile.get("relationships"):
-                profile["relationships"] = [{**relationship, "target": replace_label(relationship.get("target"))}
-                                            for relationship in profile["relationships"] if isinstance(relationship, dict)]
-            existing = profile_by_name.get(_character_key(new_name))
-            if existing:
-                existing["aliases"] = list(dict.fromkeys(existing.get("aliases", []) + profile["aliases"]))
-                for field in ("appearance", "clothing", "firstAppearance"):
-                    if not existing.get(field) and profile.get(field):
-                        existing[field] = profile[field]
-            else:
-                profile_by_name[_character_key(new_name)] = profile
-                merged_profiles.append(profile)
-        script["characterProfiles"] = merged_profiles
-        for scene in script.get("scenes") or []:
-            if not isinstance(scene, dict):
-                continue
-            scene["characters"] = list(dict.fromkeys(replace_label(value) for value in scene.get("characters") or []))
-            for block in scene.get("blocks") or []:
-                if not isinstance(block, dict):
-                    continue
-                for key in ("speaker", "visibleSpeaker"):
-                    if key in block:
-                        block[key] = replace_label(block.get(key))
+        _replace_cast_labels(script, mapping)
         total_changes += len(mapping)
         add_identity_evidence(script, mapping)
         register(script)

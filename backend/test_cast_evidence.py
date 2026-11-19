@@ -82,6 +82,48 @@ class CastEvidenceTests(unittest.TestCase):
         apply_batch_character_continuity(scripts)
         self.assertEqual(scripts[1]["characters"], ["女主"])
 
+    def test_unique_evidenced_lead_alias_locks_later_generic_name(self):
+        first = episode("甄珠", nameEvidence="画面姓名条显示甄珠")
+        generic = episode("女主")
+        generic["scenes"][0]["blocks"].insert(0, {
+            "type": "action", "text": "女主走到门边，女主角海报挂在墙上。",
+            "object": "女主手里的门卡", "result": "女主停下",
+            "startSec": 0, "endSec": 1,
+        })
+        confirmation = episode(
+            "甄珠", aliases=["女主"],
+            nameEvidence="黎爷爷询问你就是甄珠吧，甄珠开口应答。",
+        )
+        original_dialogue = generic["scenes"][0]["blocks"][1]["text"]
+
+        self.assertGreater(apply_batch_character_continuity([first, generic, confirmation]), 0)
+
+        self.assertEqual(generic["characters"], ["甄珠"])
+        self.assertEqual(generic["scenes"][0]["characters"], ["甄珠"])
+        self.assertEqual(generic["scenes"][0]["blocks"][1]["speaker"], "甄珠")
+        self.assertEqual(generic["scenes"][0]["blocks"][1]["visibleSpeaker"], "甄珠")
+        self.assertEqual(generic["scenes"][0]["blocks"][1]["text"], original_dialogue)
+        self.assertEqual(generic["scenes"][0]["blocks"][0]["text"], "甄珠走到门边，女主角海报挂在墙上。")
+        self.assertEqual(generic["scenes"][0]["blocks"][0]["object"], "甄珠手里的门卡")
+        self.assertEqual(generic["scenes"][0]["blocks"][0]["result"], "甄珠停下")
+
+    def test_ambiguous_lead_alias_is_not_guessed(self):
+        scripts = [
+            episode("张三", aliases=["男主"], nameEvidence="姓名条显示张三"),
+            episode("李四", aliases=["男主"], nameEvidence="姓名条显示李四"),
+            episode("男主"),
+        ]
+        apply_batch_character_continuity(scripts)
+        self.assertEqual(scripts[2]["characters"], ["男主"])
+
+    def test_unsupported_later_proper_name_returns_to_evidenced_first_name(self):
+        first = episode("张三", nameEvidence="画面姓名条显示张三")
+        later = episode("李四", aliases=["张三"], identityEvidence="与张三为同一角色")
+        apply_batch_character_continuity([first, later])
+        self.assertEqual(later["characters"], ["张三"])
+        self.assertEqual(later["scenes"][0]["blocks"][0]["speaker"], "张三")
+        self.assertIn("李四", later["characterProfiles"][0]["aliases"])
+
     def test_missing_profile_for_invented_full_name_requires_review(self):
         raw = episode("顾青山")
         raw.pop("characterProfiles")

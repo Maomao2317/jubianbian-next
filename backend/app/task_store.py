@@ -151,6 +151,10 @@ def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
                 continue
             compact = {key: profile[key] for key in ("name", "aliases", "appearance", "clothing", "species",
                                                      "nameEvidence", "identityEvidence", "relationships") if key in profile}
+            # Names in this context already came from an earlier episode.
+            # Expose the lock explicitly so the provider cannot downgrade an
+            # established name to 男主/女主 or invent a replacement name.
+            compact["canonicalNameLocked"] = True
             existing = profiles.setdefault(profile["name"], compact)
             existing["aliases"] = list(dict.fromkeys(existing.get("aliases", []) + compact.get("aliases", [])))
             for key, value in compact.items():

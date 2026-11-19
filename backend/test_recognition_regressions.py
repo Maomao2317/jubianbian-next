@@ -92,7 +92,7 @@ class RecognitionRegressions(unittest.TestCase):
                                     "text": "我在门外"}])
         self.assertEqual(outside["scenes"][0]["blocks"][0]["voKind"], "offscreen")
 
-    def test_first_established_name_only_changes_cast_and_speaker_labels(self):
+    def test_first_established_name_changes_cast_speaker_and_action_subject(self):
         first = episode(["周向东", "周守田"], [
             {"type": "dialogue", "speaker": "周守田", "text": "向东，过来"}],
             [{"name": "周向东"}, {"name": "周守田", "relationships": [{"target": "周向东", "relation": "父亲"}]}])
@@ -109,10 +109,10 @@ class RecognitionRegressions(unittest.TestCase):
         self.assertEqual(second["scenes"][0]["characters"], ["周守田", "丁大旺"])
         self.assertEqual(second["scenes"][0]["blocks"][1]["speaker"], "周守田")
         self.assertEqual(second["scenes"][0]["blocks"][1]["text"], "你爸来了。")
-        self.assertIn("向东爸", second["scenes"][0]["blocks"][0]["text"])
+        self.assertIn("周守田", second["scenes"][0]["blocks"][0]["text"])
         self.assertEqual(third["scenes"][0]["blocks"][0]["speaker"], "周守田")
         self.assertEqual(third["scenes"][0]["blocks"][1]["speaker"], "丁大旺")
-        self.assertIn("向东爸", normalize_script(second, "第2集")["scenes"][0]["blocks"][0]["text"])
+        self.assertIn("周守田", normalize_script(second, "第2集")["scenes"][0]["blocks"][0]["text"])
 
     def test_relational_label_never_resolves_to_child_without_relation(self):
         first = episode(["周向东"], [{"type": "dialogue", "speaker": "周向东", "text": "你好"}])

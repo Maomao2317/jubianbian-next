@@ -542,9 +542,15 @@ class ProviderDeliveryTests(unittest.TestCase):
             connection.execute("UPDATE tasks SET status='done',result_json=? WHERE id='one'", (cast,))
             context = task_store.batch_character_context(row)
         self.assertEqual(context["referenceTitle"], "第1集")
+        self.assertTrue(context["characterProfiles"][0]["canonicalNameLocked"])
         prompt = providers.ark_prompt("第2集", 100, {"batchCharacterContext": context})
+        compact_prompt = providers._ark_compact_prompt("第2集", 100, {"batchCharacterContext": context})
         self.assertIn("苏婉晴", prompt)
         self.assertIn("原始称谓仍逐字保留", prompt)
+        self.assertIn("canonicalNameLocked=true", prompt)
+        self.assertIn("不得把已锁定姓名改成男主、女主", prompt)
+        self.assertIn("苏婉晴", compact_prompt)
+        self.assertIn("prior-episode cast names are locked", compact_prompt)
         connection.close()
 
     def test_identity_review_instructions_require_script_correction_not_user_todo(self):
