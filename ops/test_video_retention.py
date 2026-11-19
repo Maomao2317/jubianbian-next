@@ -49,8 +49,9 @@ class VideoRetentionTests(unittest.TestCase):
         class Client:
             def delete_objects(self, *, Bucket, Delete):
                 self.assert_bucket = Bucket
-                return {"Deleted": [{"Key": Delete["Object"][0]["Key"]}],
-                        "Error": [{"Key": Delete["Object"][1]["Key"]}]}
+                assert Delete["Quiet"] is False
+                return {"Deleted": [{"Key": Delete["Objects"][0]["Key"]}],
+                        "Error": [{"Key": Delete["Objects"][1]["Key"]}]}
 
         plans = [{"objects": ("s3://bucket/one.mp4", "s3://bucket/two.mp4")}]
         with patch.object(retention.storage, "_client", return_value=Client()):
@@ -59,8 +60,8 @@ class VideoRetentionTests(unittest.TestCase):
     def test_shared_proxy_is_not_sent_for_deletion(self):
         class Client:
             def delete_objects(self, *, Bucket, Delete):
-                self.keys = [entry["Key"] for entry in Delete["Object"]]
-                return {"Deleted": Delete["Object"]}
+                self.keys = [entry["Key"] for entry in Delete["Objects"]]
+                return {"Deleted": Delete["Objects"]}
 
         client = Client()
         plans = [{"objects": ("s3://bucket/original.mp4", "s3://bucket/shared.mp4")}]

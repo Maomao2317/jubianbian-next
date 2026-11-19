@@ -21,9 +21,9 @@ from release_gpu_transport import stop_when_compute_idle
 
 REF = "codex/multilingual-performance-quality"
 BASELINE = "e18dba831668d7a68a8d02de204c218ef74d637a"
-STAGING_BASE_BUILD = "environment-parity-20261119-e18dba8"
-PRODUCTION_BASE_BUILD = STAGING_BASE_BUILD
-BUILD_PREFIX = "video-retention-20261119-"
+STAGING_BASE_BUILD = "video-retention-20261119-93901ed"
+PRODUCTION_BASE_BUILD = "environment-parity-20261119-e18dba8"
+BUILD_PREFIX = "video-retention-fix-20261119-"
 RELEASE_FILES = {
     ".env.example",
     "docker-compose.yml",

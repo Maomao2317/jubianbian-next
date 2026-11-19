@@ -133,7 +133,7 @@ def bulk_delete(plans: list[dict], protected: set[str] | None = None) -> set[str
             batch = names[start:start + 1000]
             try:
                 result = storage._client().delete_objects(
-                    Bucket=bucket, Delete={"Object": [{"Key": name} for name in batch], "Quiet": "false"})
+                    Bucket=bucket, Delete={"Objects": [{"Key": name} for name in batch], "Quiet": False})
                 confirmed = {entry["Key"] for entry in result.get("Deleted", [])}
                 errors = {entry["Key"] for entry in result.get("Error", [])}
                 if not confirmed <= set(batch) or confirmed & errors:
