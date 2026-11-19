@@ -763,7 +763,8 @@ class ScriptQualityRegressionTests(unittest.TestCase):
         markdown = script_to_markdown({"title": "测试", "result": script})
         self.assertNotIn("需核对", markdown)
         self.assertIn("你来了", markdown)
-        self.assertIn("模糊字幕", markdown)
+        self.assertNotIn("【字幕：", markdown)
+        self.assertNotIn("模糊字幕", markdown)
         self.assertIn("未知人物拿起文件", markdown)
 
     def test_mixed_speaker_line_is_split_and_marked_uncertain(self):

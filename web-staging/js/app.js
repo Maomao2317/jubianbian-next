@@ -791,16 +791,14 @@
     if (!script) return "";
     outputLanguage = outputLanguage || script.outputLanguage || "zh";
     const english = outputLanguage === "en";
-    const bilingual = outputLanguage === "both";
-    const label = (chinese, englishLabel) => bilingual
-      ? `${chinese} / ${englishLabel}`
-      : english ? englishLabel : chinese;
+    const label = (chinese, englishLabel) => english ? englishLabel : chinese;
     const scriptText = (value) => escapeHtml(value || "").replace(/\r?\n/g, "<br>");
     const sceneCounts = new Map();
     // Keep caption evidence in task data, but do not print an empty heading
     // when every block was suppressed. Match screenplay export numbering.
     const visibleScenes = (script.scenes || []).filter(scene => (scene.blocks || []).some(block =>
-      !block.suppressInOutput && (String(block.text || "").trim() || block.type === "transition")
+      !block.suppressInOutput && !(block.type === "screen_text" && block.screenType === "subtitle")
+      && (String(block.text || "").trim() || block.type === "transition")
     )).map(scene => {
       const heading = String(scene.heading || "");
       const match = heading.match(/^\s*(\d+)-\d+/);
@@ -819,7 +817,7 @@
     function renderBlock(block) {
       // The screenplay follows 剧拆拆's readable text layout; timestamps stay
       // in the underlying data for review but are not printed in the body.
-      if (block.suppressInOutput) return "";
+      if (block.suppressInOutput || (block.type === "screen_text" && block.screenType === "subtitle")) return "";
       const time = "";
       if (block.type === "dialogue") {
         const performance = block.performance ? `<em>${escapeHtml(block.performance)}</em>` : "";
@@ -845,7 +843,7 @@
         return `<p class="action-line">${time}<strong>${english ? `[${escapeHtml(emotionLabel)}]` : `【${escapeHtml(emotionLabel)}】`}</strong><span>${scriptText(block.text)}</span></p>`;
       }
       if (block.type === "screen_text") {
-        const screenLabel = label("字幕", "On-screen text");
+        const screenLabel = label("画面文字", "On-screen text");
         return `<p class="sound-line">${time}<strong>${english ? `[${escapeHtml(screenLabel)}]` : `【${escapeHtml(screenLabel)}】`}</strong><span>${scriptText(block.text)}</span></p>`;
       }
       if (block.type === "transition") {

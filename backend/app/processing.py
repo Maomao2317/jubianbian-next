@@ -701,7 +701,7 @@ async def _focused_dialogue_review(row, path, duration, script, quality, evidenc
     visited = []
     for _ in range(2):
         issues = [issue for issue in _automated_review_issues(quality)
-                  if issue.get("tag") in {"疑似漏台词片段", "字幕对白遗漏", "字幕语音待核实", "漏台词"}]
+                  if issue.get("tag") in {"疑似漏台词片段", "字幕对白遗漏", "字幕语音待核实", "漏台词", "台词字词需核对"}]
         windows = recovery_windows(issues, duration, limit=40, max_seconds=24)
         window = next((item for item in windows if not any(
             item["startSec"] < old["endSec"] and old["startSec"] < item["endSec"] for old in visited)), None)

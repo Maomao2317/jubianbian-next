@@ -272,6 +272,11 @@ def translate_delivery(
     started = time.perf_counter()
     delivery = deepcopy(script)
     fields = _text_fields(delivery)
+    # Overseas bilingual delivery keeps prose in Chinese. Only spoken lines
+    # carry both languages; English source prose still needs translation.
+    if output_language == "both" and source_language == "zh":
+        fields = [field for field in fields if field[3].get("kind") in {"dialogue", "vo", "os"}
+                  and field[1] == "text"]
     needs_translation = output_language == "both" or output_language != source_language
     if not needs_translation or not fields:
         return delivery, {"provider": None, "callCount": 0, "chunkCount": 0,
@@ -377,6 +382,10 @@ def translate_delivery(
         except ArkError as exc:
             exc.usage = usage_summary
             raise
-        owner[key] = f"{original.strip()}\n{translated}" if output_language == "both" else translated
+        if output_language == "both" and context.get("kind") in {"dialogue", "vo", "os"} and key == "text":
+            owner[key] = (f"{original.strip()}\n{translated}" if source_language == "zh"
+                          else f"{translated}\n{original.strip()}")
+        else:
+            owner[key] = translated
 
     return delivery, usage_summary

@@ -128,6 +128,26 @@ class GenerationCompletenessTests(unittest.TestCase):
         quality = script_quality(script, "test", audio_evidence(speech))
         self.assertNotIn("疑似漏台词片段", [issue["tag"] for issue in quality["issues"]])
 
+    def test_audio_and_timed_caption_agreement_flags_one_character_error(self):
+        script = normalize_script({"scenes": [scene("1-1", [line("这封信现在给你", 1, 3)])]}, "第1集")
+        evidence = audio_evidence([line("这封信现在交给你", 1, 3)])
+        evidence["sources"].append({"kind": "ocr", "status": "available", "items": [
+            {"text": "这封信现在交给你", "screenType": "subtitle", "startSec": 1, "endSec": 3},
+        ]})
+        quality = script_quality(script, "test", evidence)
+        self.assertIn("台词字词需核对", [issue["tag"] for issue in quality["issues"]])
+        self.assertFalse(quality_gate(quality)[0])
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "这封信现在给你。")
+
+    def test_timed_caption_without_audio_agreement_does_not_change_dialogue(self):
+        script = normalize_script({"scenes": [scene("1-1", [line("这封信现在给你", 1, 3)])]}, "第1集")
+        evidence = audio_evidence([line("这封信现在给你", 1, 3)])
+        evidence["sources"].append({"kind": "ocr", "status": "available", "items": [
+            {"text": "这封信现在交给你", "screenType": "subtitle", "startSec": 1, "endSec": 3},
+        ]})
+        quality = script_quality(script, "test", evidence)
+        self.assertNotIn("台词字词需核对", [issue["tag"] for issue in quality["issues"]])
+
     def test_every_repeated_occurrence_with_timing_drift_can_still_be_matched(self):
         speech = [line("这个秘密千万不要告诉别人", 1, 3), line("这个秘密千万不要告诉别人", 50, 53)]
         script = normalize_script({"scenes": [scene("1-1", [
@@ -215,6 +235,20 @@ class GenerationCompletenessTests(unittest.TestCase):
         self.assertIn("三年之后", exported)
         self.assertIn("项目负责人", exported)
         self.assertIn("任务完成", exported)
+
+    def test_orphan_subtitle_remains_qa_evidence_but_not_screenplay_text(self):
+        script = normalize_script({"scenes": [scene("1-1", [
+            line("我明白了", 1, 2),
+            {"type": "screen_text", "screenType": "subtitle", "text": "另一个人的台词", "startSec": 3, "endSec": 4},
+        ])]}, "第1集")
+        caption = script["scenes"][0]["blocks"][1]
+        self.assertFalse(caption.get("suppressInOutput"))
+        exported = script_to_markdown({"result": script})
+        self.assertNotIn("【字幕：", exported)
+        self.assertNotIn("另一个人的台词", exported)
+        evidence = audio_evidence([line("另一个人的台词", 3, 4)])
+        quality = script_quality(script, "test", evidence)
+        self.assertIn("字幕对白遗漏", [issue["tag"] for issue in quality["issues"]])
 
     def test_caption_crosses_adjacent_scenes_but_not_different_episodes(self):
         caption = {"type": "screen_text", "screenType": "subtitle", "text": "跟我走，到了。", "startSec": 1, "endSec": 5}

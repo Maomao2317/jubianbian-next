@@ -76,10 +76,10 @@ class TranslationTests(unittest.TestCase):
         self.assertIn("[Flashback]", english)
         self.assertIn("VO: It begins.", english)
         self.assertNotIn("出场人物", english)
-        self.assertIn("出场人物 / Cast: 林夏", bilingual)
-        self.assertIn("【环境音 / Ambience：Rain】", bilingual)
-        self.assertIn("【字幕 / On-screen text：No entry】", bilingual)
-        self.assertIn("【闪回 / Flashback】", bilingual)
+        self.assertIn("出场人物: 林夏", bilingual)
+        self.assertIn("【环境音：Rain】", bilingual)
+        self.assertIn("【画面文字：No entry】", bilingual)
+        self.assertIn("【闪回】", bilingual)
 
     def test_translation_and_bilingual_delivery_preserve_structure_and_names(self):
         def translate(items, source, target):
@@ -97,6 +97,9 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(translated["scenes"][0]["blocks"][0]["speaker"], "林夏")
         self.assertEqual(translated["scenes"][0]["blocks"][0]["text"], "EN 你是谁？")
         self.assertEqual(bilingual["scenes"][0]["blocks"][0]["text"], "你是谁？\nEN 你是谁？")
+        self.assertEqual(bilingual["title"], original["title"])
+        self.assertEqual(bilingual["scenes"][0]["heading"], original["scenes"][0]["heading"])
+        self.assertEqual(bilingual["scenes"][0]["blocks"][1]["text"], "林夏关上门。")
         self.assertEqual(len(translated["scenes"][0]["blocks"]), len(original["scenes"][0]["blocks"]))
         self.assertEqual(original["scenes"][0]["blocks"][0]["text"], "你是谁？")
         self.assertEqual(usage["callCount"], 1)
@@ -255,8 +258,37 @@ class TranslationTests(unittest.TestCase):
         bilingual, _ = translate_delivery(original, "en", "both", translate_items=translate)
 
         self.assertEqual(translated["scenes"][0]["blocks"][0]["text"], "ZH Who are you?")
-        self.assertEqual(bilingual["scenes"][0]["blocks"][0]["text"], "Who are you?\nZH Who are you?")
+        self.assertEqual(bilingual["scenes"][0]["blocks"][0]["text"], "ZH Who are you?\nWho are you?")
         self.assertEqual(len(translated["scenes"][0]["blocks"]), 1)
+
+    def test_english_source_bilingual_delivery_keeps_only_dialogue_bilingual(self):
+        original = {
+            "title": "The Door", "characters": ["甲"],
+            "scenes": [{"heading": "1-1 Night INT Hall", "characters": ["甲"], "blocks": [
+                {"type": "action", "text": "He steps back.", "performance": "Uneasy"},
+                {"type": "dialogue", "speaker": "甲", "text": "Wait!", "performance": "Shouting"},
+                {"type": "vo", "speaker": "甲", "voKind": "os", "text": "I must go."},
+                {"type": "sound", "text": "Door slams."},
+            ]}],
+        }
+        translated_fields = []
+
+        def translate(items, source, target):
+            self.assertEqual((source, target), ("en", "zh"))
+            translated_fields.extend((item["kind"], item["field"]) for item in items)
+            return [{"id": item["id"], "text": f"中{item['text']}"} for item in items], {}
+
+        delivery, _ = translate_delivery(original, "en", "both", translate_items=translate)
+        blocks = delivery["scenes"][0]["blocks"]
+        self.assertTrue(delivery["title"].startswith("中"))
+        self.assertTrue(delivery["scenes"][0]["heading"].startswith("中"))
+        self.assertEqual(blocks[0]["text"], "中He steps back.")
+        self.assertEqual(blocks[0]["performance"], "中Uneasy")
+        self.assertEqual(blocks[1]["text"], "中Wait!\nWait!")
+        self.assertEqual(blocks[1]["performance"], "中Shouting")
+        self.assertEqual(blocks[2]["text"], "中I must go.\nI must go.")
+        self.assertEqual(blocks[3]["text"], "中Door slams.")
+        self.assertIn(("dialogue", "text"), translated_fields)
 
     def test_missing_or_duplicate_translation_ids_fail_closed(self):
         for returned in ([{"id": "t0", "text": "translated"}],

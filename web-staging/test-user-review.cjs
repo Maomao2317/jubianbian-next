@@ -63,6 +63,18 @@ const click = async (action, id) => {
   assert.match(preview, /闪回/);
   assert.equal((preview.match(/<section class="scene">/g) || []).length, 3);
   assert.equal(JSON.stringify(shells), savedShells);
+  const overseas = { title: "海外剧", scenes: [{ heading: "1-1 夜 内 客厅", characters: ["甲"], blocks: [
+    { type: "action", text: "甲退到门边。" },
+    { type: "dialogue", speaker: "甲", text: "等等。\nWait." },
+    { type: "screen_text", screenType: "subtitle", text: "等等。" },
+    { type: "screen_text", screenType: "other", text: "禁止入内" },
+  ] }] };
+  const overseasPreview = ui.scriptPreview(overseas, "both");
+  assert.match(overseasPreview, /甲退到门边/);
+  assert.match(overseasPreview, /等等。<br>Wait\./);
+  assert.match(overseasPreview, /出场人物/);
+  assert.match(overseasPreview, /【画面文字】/);
+  assert.doesNotMatch(overseasPreview, /【字幕】|On-screen text|Cast/);
   const completedTask = ui.normalizeUserTask(task);
   assert.notEqual(completedTask, task);
   assert.equal(completedTask.status, "done");

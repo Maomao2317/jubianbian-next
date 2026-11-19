@@ -3589,7 +3589,9 @@ def screenplay_output_scenes(script: dict[str, Any]) -> list[dict[str, Any]]:
     scenes = []
     counts: dict[str, int] = {}
     for scene in script.get("scenes") or []:
-        if not any(not block.get("suppressInOutput") and (
+        if not any(not block.get("suppressInOutput") and not (
+            block.get("type") == "screen_text" and block.get("screenType") == "subtitle"
+        ) and (
             str(block.get("text") or "").strip() or block.get("type") == "transition"
         ) for block in scene.get("blocks") or []):
             continue
@@ -3607,11 +3609,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
     script = task.get("delivery") or task.get("result") or {}
     output_language = task.get("outputLanguage", "zh")
     english = output_language == "en"
-    bilingual = output_language == "both"
-
     def localized_label(chinese: str, english_label: str) -> str:
-        if bilingual:
-            return f"{chinese} / {english_label}"
         return english_label if english else chinese
 
     if isinstance(script, dict) and script.get("scenes"):
@@ -3672,7 +3670,8 @@ def script_to_markdown(task: dict[str, Any]) -> str:
             lines.append(f"{localized_label('出场人物', 'Cast')}: {separator.join(dict.fromkeys(cast))}")
             lines.append("")
         for block in scene.get("blocks", []):
-            if block.get("suppressInOutput"):
+            if block.get("suppressInOutput") or (block.get("type") == "screen_text"
+                    and block.get("screenType") == "subtitle"):
                 continue
             block_type = block.get("type")
             if block_type == "dialogue":
@@ -3718,7 +3717,7 @@ def script_to_markdown(task: dict[str, Any]) -> str:
                 else:
                     lines.append(f"【{emotion}：{block.get('text', '')}】")
             elif block_type == "screen_text":
-                screen_text = localized_label("字幕", "On-screen text")
+                screen_text = localized_label("画面文字", "On-screen text")
                 if english:
                     lines.append(f"{uncertainty(block, 'screen_text')}[{screen_text}: {block.get('text', '')}]")
                 else:
@@ -4203,6 +4202,25 @@ def script_quality(
         candidate = local_candidate if timed_spoken and isinstance(segment.get("startSec"), (int, float)) else spoken_candidate
         matched, segment_size, _ = matching_character_counts(segment_text, candidate)
         segment_coverage = round(100 * matched / segment_size) if segment_size else 100
+        start = segment.get("startSec")
+        end = segment.get("endSec")
+        ocr_confirmed = any(
+            segment_text == item["text"] and isinstance(item.get("startSec"), (int, float))
+            and isinstance(start, (int, float))
+            and abs(item["startSec"] - start) <= 0.8
+            for item in ocr_segments
+        )
+        # A one-character error can still pass the broad 72% coverage gate.
+        # Require independent audio AND a matching timed caption before
+        # escalating such a near match to a video review; never auto-copy OCR.
+        if ocr_confirmed and 0 < segment_coverage < 100 and segment_size >= 3:
+            issue = add_issue(
+                "台词字词需核对", "P0",
+                f"独立语音与同期画面文字一致，但成稿在 {float(start):.1f}-{float(end):.1f} 秒可能漏字或写错字；须回听原片逐字核对。"
+                if isinstance(end, (int, float)) else "独立语音与同期画面文字一致，但成稿可能漏字或写错字；须回听原片逐字核对。",
+            )
+            issue.update(startSec=start, endSec=end)
+            evidence_warnings += 1
         # Provider timestamps are approximate and often drift across a scene
         # boundary. Accept an ordered match, rather than reusing text from a
         # different occurrence. Short beats keep their strict time checks.
@@ -4212,12 +4230,6 @@ def script_quality(
         if segment_coverage >= 72:
             continue
         filler = evidence_comparison_text(segment_text) in {"咋", "啊", "呵", "嗯", "哦", "哎", "唉", "呃", "哈"}
-        ocr_confirmed = any(
-            segment_text == item["text"] and isinstance(item.get("startSec"), (int, float))
-            and isinstance(segment.get("startSec"), (int, float))
-            and abs(item["startSec"] - segment["startSec"]) <= 0.8
-            for item in ocr_segments
-        )
         # A one-character dramatic beat such as “我” can change the line and
         # must not be silently delivered as complete. Common hesitation fillers
         # remain advisory when independent ASR cannot align them.
