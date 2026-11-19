@@ -104,10 +104,13 @@ def prepare(commit: str, build: str, base: Path) -> None:
     # Staging is the already verified base. Every tracked application source
     # is copied from the pushed revision so both sites receive identical code.
     source_image = common.inspect(SITES["staging"][0])["Image"]
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", source_image)
+    source_tag = "jubianbian-parity-base:" + source_image[7:19]
+    common.run(["docker", "tag", source_image, source_tag])
     image = "jubianbian-release:" + build
     dockerfile = base / "Dockerfile.parity"
     dockerfile.write_text(
-        "FROM " + source_image + "\n"
+        "FROM " + source_tag + "\n"
         + "".join("COPY " + p + " /app/" + p + "\n" for p in files)
         + "COPY ops/purge_disabled_accounts.py /app/ops/purge_disabled_accounts.py\n"
     )
