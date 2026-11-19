@@ -46,29 +46,20 @@ class VideoRetentionTests(unittest.TestCase):
             db.close()
 
     def test_object_bulk_delete_requires_confirmed_keys(self):
-        class Client:
-            def delete_objects(self, *, Bucket, Delete):
-                self.assert_bucket = Bucket
-                assert Delete["Quiet"] is False
-                return {"Deleted": [{"Key": Delete["Objects"][0]["Key"]}],
-                        "Error": [{"Key": Delete["Objects"][1]["Key"]}]}
-
         plans = [{"objects": ("s3://bucket/one.mp4", "s3://bucket/two.mp4")}]
-        with patch.object(retention.storage, "_client", return_value=Client()):
+        def delete(uri):
+            if uri.endswith("two.mp4"):
+                raise OSError("temporary failure")
+
+        with patch.object(retention.storage, "delete_media", side_effect=delete):
             self.assertEqual(retention.bulk_delete(plans), {"s3://bucket/one.mp4"})
 
     def test_shared_proxy_is_not_sent_for_deletion(self):
-        class Client:
-            def delete_objects(self, *, Bucket, Delete):
-                self.keys = [entry["Key"] for entry in Delete["Objects"]]
-                return {"Deleted": Delete["Objects"]}
-
-        client = Client()
         plans = [{"objects": ("s3://bucket/original.mp4", "s3://bucket/shared.mp4")}]
-        with patch.object(retention.storage, "_client", return_value=client):
+        with patch.object(retention.storage, "delete_media") as delete:
             self.assertEqual(retention.bulk_delete(plans, {"s3://bucket/shared.mp4"}),
                              {"s3://bucket/original.mp4"})
-        self.assertEqual(client.keys, ["original.mp4"])
+        delete.assert_called_once_with("s3://bucket/original.mp4")
 
     def test_out_of_scope_local_file_is_rejected(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

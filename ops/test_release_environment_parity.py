@@ -13,7 +13,7 @@ import release_environment_parity as release
 class EnvironmentParityReleaseTests(unittest.TestCase):
     def test_site_baselines_and_release_scope(self):
         self.assertEqual(release.SITES["staging"], (
-            "jubianbian-staging", 18000, "video-retention-20261119-93901ed"))
+            "jubianbian-staging", 18000, "video-retention-fix-20261119-e39cbdb"))
         self.assertEqual(release.SITES["production"], (
             "jubianbian", 8000, "environment-parity-20261119-e18dba8"))
         self.assertEqual(release.BASELINE, "e18dba831668d7a68a8d02de204c218ef74d637a")

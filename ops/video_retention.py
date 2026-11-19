@@ -6,7 +6,8 @@ existing weekly cleanup command. Active tasks are never eligible.
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -119,30 +120,19 @@ def protected_proxies(db: sqlite3.Connection, eligible_ids: set[str]) -> set[str
 
 def bulk_delete(plans: list[dict], protected: set[str] | None = None) -> set[str]:
     protected = protected or set()
-    grouped = defaultdict(lambda: defaultdict(set))
-    for item in plans:
-        for uri in item["objects"]:
-            if uri in protected:
-                continue
-            bucket, key = storage._object_parts(uri)
-            grouped[bucket][key].add(uri)
-    deleted = set()
-    for bucket, keys in grouped.items():
-        names = list(keys)
-        for start in range(0, len(names), 1000):
-            batch = names[start:start + 1000]
-            try:
-                result = storage._client().delete_objects(
-                    Bucket=bucket, Delete={"Objects": [{"Key": name} for name in batch], "Quiet": False})
-                confirmed = {entry["Key"] for entry in result.get("Deleted", [])}
-                errors = {entry["Key"] for entry in result.get("Error", [])}
-                if not confirmed <= set(batch) or confirmed & errors:
-                    continue
-                for name in confirmed:
-                    deleted.update(keys[name])
-            except Exception:
-                continue
-    return deleted
+    uris = sorted({uri for item in plans for uri in item["objects"] if uri not in protected})
+
+    def delete_one(uri: str) -> str | None:
+        try:
+            storage.delete_media(uri)
+            return uri
+        except Exception:
+            return None
+
+    # COS accepts single-object deletion for this bucket but rejects its S3
+    # compatibility batch endpoint. Keep request fan-out bounded.
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        return {uri for uri in workers.map(delete_one, uris) if uri is not None}
 
 
 def still_eligible(db: sqlite3.Connection, item: dict, cutoff: datetime) -> bool:
