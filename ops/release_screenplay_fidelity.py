@@ -39,7 +39,13 @@ APP_FILES = [
 FRONTEND_TEST_FILES = [
     "web-staging/test-user-review.cjs",
 ]
-CHANGED_TEST_FILES = ["backend/test_generation_completeness.py", "backend/test_script_quality.py", "backend/test_translation.py"]
+CHANGED_TEST_FILES = [
+    "backend/test_dialogue_export.py",
+    "backend/test_generation_completeness.py",
+    "backend/test_script_quality.py",
+    "backend/test_subtitle_priority.py",
+    "backend/test_translation.py",
+]
 RELEASE_SUPPORT_FILES = [
     "ops/screenplay-fidelity-staging-release-2026-11-19.md",
     "ops/release_screenplay_fidelity.py",

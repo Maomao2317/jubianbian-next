@@ -33,8 +33,9 @@ class DialogueExportTests(unittest.TestCase):
         output = script_to_markdown({"title": "第1集", "result": script})
         self.assertEqual(output.count("林川：走。"), 2)
         self.assertIn("任务完成", output)
-        self.assertIn("【字幕：林川】", output)
+        self.assertIn("【画面文字：林川】", output)
         self.assertNotIn("【字幕：客厅】", output)
+        self.assertNotIn("【字幕：", output)
 
     def task(self, text, block_type="dialogue"):
         return {"id": "fixture", "title": "第1集", "status": "done", "result": {
@@ -72,7 +73,7 @@ class DialogueExportTests(unittest.TestCase):
         task["result"]["scenes"][0]["blocks"].append({"type": "screen_text", "text": '告示：“请安静”'})
         output = script_to_markdown(task)
         self.assertIn("“请进。”", output)
-        self.assertIn('【字幕：告示：“请安静”】', output)
+        self.assertIn('【画面文字：告示：“请安静”】', output)
 
     def test_single_batch_and_all_downloads_in_txt_and_md(self):
         task = self.task("“他说‘别动’，你听见了吗？”")

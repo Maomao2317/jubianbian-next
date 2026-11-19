@@ -26,7 +26,9 @@ class SubtitlePriorityTests(unittest.TestCase):
         self.assertFalse(subtitle.get("suppressInOutput"))
         exported = script_to_markdown({"title": "test", "result": script})
         self.assertIn(audio_text, exported)
-        self.assertIn(subtitle_text, exported)
+        self.assertEqual(subtitle["text"], subtitle_text)
+        self.assertNotIn(subtitle_text, exported)
+        self.assertNotIn("【字幕：", exported)
 
     def fixture(self, audio="这个人是畜生", subtitle="这个人是坏人", dialogue=None, **fields):
         # Default fixtures exercise unclear ASR; clear-speech cases remove this
