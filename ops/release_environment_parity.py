@@ -22,7 +22,7 @@ from release_gpu_transport import stop_when_compute_idle
 REF = "codex/multilingual-performance-quality"
 BASELINE = "8d706c8c9c80fec11579f46fe58f253519f3e114"
 STAGING_BASE_BUILD = "screenplay-fidelity-20261119-8d706c8"
-PRODUCTION_BASE_BUILD = "character-intro-split-20261116-cfdb08"
+PRODUCTION_BASE_BUILD = "character-intro-split-20261116-cfd1b08"
 BUILD_PREFIX = "environment-parity-20261119-"
 RELEASE_FILES = {
     "ops/release_environment_parity.py",

@@ -15,7 +15,7 @@ class EnvironmentParityReleaseTests(unittest.TestCase):
         self.assertEqual(release.SITES["staging"], (
             "jubianbian-staging", 18000, "screenplay-fidelity-20261119-8d706c8"))
         self.assertEqual(release.SITES["production"], (
-            "jubianbian", 8000, "character-intro-split-20261116-cfdb08"))
+            "jubianbian", 8000, "character-intro-split-20261116-cfd1b08"))
         self.assertEqual(release.BASELINE, "8d706c8c9c80fec11579f46fe58f253519f3e114")
         self.assertEqual(len(release.RELEASE_FILES), 5)
 
