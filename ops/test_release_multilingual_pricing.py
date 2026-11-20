@@ -24,6 +24,9 @@ class PricingReleaseTests(unittest.TestCase):
         old = {"services": {"app": {"image": "old", "environment": {"JBB_BUILD_VERSION": "before", "JBB_RETENTION_DAYS": "30"}, "ports": ["18000:8000"]}}}
         new = {"services": {"app": {"image": "new", "environment": {"JBB_BUILD_VERSION": "after", "JBB_RETENTION_DAYS": "30"}, "ports": ["18000:8000"]}}}
         release.verify_config(old, new, "new", "after")
+        old_without_image = {"services": {"app": {"build": {"context": "."}, "environment": {"JBB_BUILD_VERSION": "before", "JBB_RETENTION_DAYS": "30"}, "ports": ["18000:8000"]}}}
+        new_with_overlay = {"services": {"app": {"build": {"context": "."}, "image": "new", "environment": {"JBB_BUILD_VERSION": "after", "JBB_RETENTION_DAYS": "30"}, "ports": ["18000:8000"]}}}
+        release.verify_config(old_without_image, new_with_overlay, "new", "after")
         new["services"]["app"]["ports"] = ["19000:8000"]
         with self.assertRaises(AssertionError):
             release.verify_config(old, new, "new", "after")

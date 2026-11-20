@@ -85,7 +85,10 @@ def verify_config(old: dict, new: dict, image: str, build: str) -> None:
     old_app = old["services"]["app"]
     assert app["image"] == image
     assert app["environment"]["JBB_BUILD_VERSION"] == build
-    app["image"] = old_app["image"]
+    if "image" in old_app:
+        app["image"] = old_app["image"]
+    else:
+        app.pop("image")
     app["environment"]["JBB_BUILD_VERSION"] = old_app["environment"]["JBB_BUILD_VERSION"]
     assert adjusted == old, "compose changed beyond image and build label"
 
