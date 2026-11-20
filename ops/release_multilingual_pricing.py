@@ -94,6 +94,12 @@ def _changed_files(commit: str) -> set[str]:
     return set(common.git("diff", "--name-only", BASELINE, commit).decode().splitlines())
 
 
+def verify_release_scope(commit: str) -> None:
+    changed = _changed_files(commit)
+    unexpected = changed - ALLOWED
+    assert not unexpected, "unexpected release files: " + str(unexpected)
+
+
 def _write_revision_files(commit: str, base: Path) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for path in APP_FILES + CHECK_FILES:
@@ -108,7 +114,7 @@ def _write_revision_files(commit: str, base: Path) -> dict[str, str]:
 
 def prepare(commit: str, build: str, base: Path) -> None:
     fetch_revision(commit)
-    assert _changed_files(commit) == ALLOWED, "unexpected release files: " + str(_changed_files(commit) ^ ALLOWED)
+    verify_release_scope(commit)
     before = {site: common.fingerprint(project) for site, (project, _) in SITES.items()}
     for site, (project, port) in SITES.items():
         environment = common.environment(common.inspect(project))

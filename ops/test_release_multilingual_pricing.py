@@ -35,6 +35,23 @@ class PricingReleaseTests(unittest.TestCase):
         ]):
             release.fetch_revision(sha)
 
+    def test_release_scope_allows_unchanged_check_fixtures(self):
+        changed = set(release.APP_FILES + [
+            "backend/test_language_pricing.py",
+            "backend/test_large_batch.py",
+            "backend/test_upload_flow.py",
+            "ops/release_multilingual_pricing.py",
+            "ops/test_release_multilingual_pricing.py",
+            "web-staging/test-language-pricing.cjs",
+            "web-staging/test-user-review.cjs",
+        ])
+        with patch.object(release, "_changed_files", return_value=changed):
+            release.verify_release_scope("a" * 40)
+
+        with patch.object(release, "_changed_files", return_value=changed | {"unexpected.txt"}):
+            with self.assertRaises(AssertionError):
+                release.verify_release_scope("a" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()
