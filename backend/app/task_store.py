@@ -13,6 +13,7 @@ from .logging_setup import logger
 from .media import default_batch_title, episode_from_filename, is_default_batch_title, title_with_episode
 from .script import apply_batch_character_continuity, normalize_script
 from .recognition_cache import restore_cached_scene_groups
+from .pricing import task_rate
 
 # Read adapters keep the API shape independent from SQLite column names.
 def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, Any]:
@@ -49,6 +50,9 @@ def row_to_task(row: sqlite3.Row, *, include_result: bool = True) -> dict[str, A
     task["durationSec"] = task.pop("duration_sec", 0)
     task["estimatedMinutes"] = task.pop("estimated_minutes", 0)
     task["creditsUsed"] = task.pop("credits_used", 0)
+    task["pointsPerMinute"] = task_rate(task)
+    task.pop("points_per_minute", None)
+    task["pointsUsed"] = task["creditsUsed"] * task["pointsPerMinute"]
     task["progressPercent"] = task.pop("progress_percent", 0)
     stage_progress = task.pop("stage_progress_percent", None)
     task["stageProgressPercent"] = stage_progress if task.get("stage") == "compressing" and task.get("status") == "running" else None

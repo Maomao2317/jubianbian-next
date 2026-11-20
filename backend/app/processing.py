@@ -38,6 +38,7 @@ from .config import (
     GLM_MODEL,
 )
 from .auth_store import db, now_iso
+from .pricing import task_rate
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
 from .content_coverage import content_gaps, merge_gap_repair, repair_windows
 from .dialogue_recovery import dialogue_evidence_issues, recover_audio_blind_spots, recovery_windows
@@ -276,7 +277,7 @@ def _quality_call_budget(
     billed_minutes = _row_number(row, "credits_used")
     if billed_minutes <= 0:
         billed_minutes = max(1.0, (max(0.0, duration) + 59.999) // 60)
-    nominal_revenue = billed_minutes * POINTS_PER_MINUTE / POINTS_PER_YUAN
+    nominal_revenue = billed_minutes * task_rate(row) / POINTS_PER_YUAN
     revenue = nominal_revenue * ARK_REVENUE_REALIZATION_RATIO
     infra_reserve = revenue * ARK_INFRA_RESERVE_RATIO
     current_cost = max(0.0, float(usage.get("api_cost_rmb") or 0))
@@ -1587,8 +1588,15 @@ def _refund_task_once(
     connection: sqlite3.Connection | None = None,
 ) -> bool:
     """Refund a failed task exactly once, including the ledger entry."""
-    refund_points = max(0, int(charged_minutes)) * POINTS_PER_MINUTE
     def apply_refund(connection: sqlite3.Connection) -> bool:
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id)
+        ).fetchone()
+        if not row:
+            return True
+        refund_points = max(0, int(row["credits_used"] or 0)) * task_rate(row)
         claimed = connection.execute(
             "UPDATE tasks SET credits_used = 0, updated_at = ? WHERE id = ? AND credits_used > 0",
             (now_iso(), task_id),
@@ -1598,7 +1606,7 @@ def _refund_task_once(
         user_row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
         if not user_row:
             return True
-        balance_after = int(user_row["credits"] or 0) + refund_points
+        balance_after = round(float(user_row["credits"] or 0) + refund_points, 1)
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance_after, user_id))
         connection.execute(
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",

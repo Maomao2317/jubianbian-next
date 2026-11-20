@@ -5,8 +5,14 @@
 (function () {
   const cfg = window.APP_CONFIG;
   const POINTS_PER_MINUTE = 5;
+  const ENGLISH_POINTS_PER_MINUTE = 8;
   const POINTS_PER_YUAN = 12.8;
   const api = window.AppAPI;
+  const languageRate = (source, output) => source === "en" || ["en", "both"].includes(output)
+    ? ENGLISH_POINTS_PER_MINUTE : POINTS_PER_MINUTE;
+  // Old tasks keep their original price even when their languages include English.
+  const taskPoints = task => Number(task.pointsUsed ?? (Number(task.creditsUsed ?? task.estimatedMinutes ?? 0)
+    * Number(task.pointsPerMinute || POINTS_PER_MINUTE)));
   const $ = (selector, root = document) => root.querySelector(selector);
   let rechargeReturnFocus = null;
   let rechargeReturnOffer = "";
@@ -358,7 +364,7 @@
       const billing = overview.apiCostSource === "provider_billing";
       let body = `<div class="admin-stats"><article><span>用户总数</span><strong>${overview.users.total || 0}</strong><small>正常账号 ${overview.users.active || 0}</small></article><article><span>用户积分余额合计</span><strong>${Number(overview.users.credits || 0).toFixed(1)}</strong><small>积分</small></article><article><span>视频任务总数</span><strong>${overview.tasks.total || 0}</strong><small>进行中 ${overview.tasks.running || 0} · 排队 ${overview.tasks.queued || 0}</small><small>完成 ${overview.tasks.done || 0} · 有检查提示 ${overview.tasks.review || 0} · 失败 ${overview.tasks.failed || 0}</small></article><article><span>${billing ? "本月 API 账单" : "API 调用成本"}</span><strong>¥ ${Number(overview.apiCostRmb || 0).toFixed(2)}</strong><small>${billing ? `${escapeHtml(overview.apiCostMonth || "")} · 服务商账单有延迟` : "累计本地记录 · 本月账单暂未获取"}</small></article></div>`;
       if (tab === "users") {
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>人民币充值与账号启停；1 分钟 = ${POINTS_PER_MINUTE} 积分</p></div><span>${users.total} 个账号</span></div><div class="admin-toolbar"><input id="adminUserKeyword" aria-label="搜索用户名称或邮箱" value="${escapeHtml(state.adminUserKeyword)}" placeholder="搜索用户名称或邮箱" /><select id="adminUserStatus" aria-label="账号状态"><option value="all" ${state.adminUserStatus === "all" ? "selected" : ""}>全部账号</option><option value="active" ${state.adminUserStatus === "active" ? "selected" : ""}>正常</option><option value="disabled" ${state.adminUserStatus === "disabled" ? "selected" : ""}>已停用</option></select><button class="admin-action admin-search-btn" data-action="admin-user-search">筛选</button><button class="admin-action" data-action="admin-user-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>角色</th><th>状态</th><th>剩余积分</th><th>累计计费 / 可用时长</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td>${adminUserIdentity(user)}</td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${Number(user.credits || 0).toFixed(1)}</strong> 积分</td><td><strong>已用 ${Number(user.totalUsed || 0).toFixed(1)} 分钟</strong><small>可用 ${(Number(user.credits || 0) / POINTS_PER_MINUTE).toFixed(1)} 分钟</small></td><td><button class="admin-action" data-action="admin-credit" data-id="${escapeHtml(user.id)}">人民币充值</button><button class="admin-action ${user.isActive ? "admin-danger" : ""}" data-action="admin-status" data-id="${escapeHtml(user.id)}" data-active="${user.isActive ? "0" : "1"}" ${user.id === state.profile.id ? 'disabled title="不能停用当前登录账号"' : ""}>${user.id === state.profile.id ? "当前账号" : user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无匹配用户，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-user-page", state.adminUserPage, users.total, 20)}</div>`;
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>用户管理</h2><p>人民币充值与账号启停；纯中文 ${POINTS_PER_MINUTE} 积分/分钟，涉及英文 ${ENGLISH_POINTS_PER_MINUTE} 积分/分钟</p></div><span>${users.total} 个账号</span></div><div class="admin-toolbar"><input id="adminUserKeyword" aria-label="搜索用户名称或邮箱" value="${escapeHtml(state.adminUserKeyword)}" placeholder="搜索用户名称或邮箱" /><select id="adminUserStatus" aria-label="账号状态"><option value="all" ${state.adminUserStatus === "all" ? "selected" : ""}>全部账号</option><option value="active" ${state.adminUserStatus === "active" ? "selected" : ""}>正常</option><option value="disabled" ${state.adminUserStatus === "disabled" ? "selected" : ""}>已停用</option></select><button class="admin-action admin-search-btn" data-action="admin-user-search">筛选</button><button class="admin-action" data-action="admin-user-reset">重置</button></div><div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>角色</th><th>状态</th><th>剩余积分</th><th>累计计费 / 可用时长</th><th>操作</th></tr></thead><tbody>${users.items.map(user => `<tr><td>${adminUserIdentity(user)}</td><td>${user.role === "admin" ? "管理员" : "用户"}</td><td><span class="admin-status ${user.isActive ? "on" : "off"}">${user.isActive ? "正常" : "已停用"}</span></td><td><strong>${Number(user.credits || 0).toFixed(1)}</strong> 积分</td><td><strong>已用 ${(Number(user.totalUsed || 0) * POINTS_PER_MINUTE).toFixed(1)} 积分</strong><small>纯中文 ${(Number(user.credits || 0) / POINTS_PER_MINUTE).toFixed(1)} 分钟 / 涉及英文 ${(Number(user.credits || 0) / ENGLISH_POINTS_PER_MINUTE).toFixed(1)} 分钟</small></td><td><button class="admin-action" data-action="admin-credit" data-id="${escapeHtml(user.id)}">人民币充值</button><button class="admin-action ${user.isActive ? "admin-danger" : ""}" data-action="admin-status" data-id="${escapeHtml(user.id)}" data-active="${user.isActive ? "0" : "1"}" ${user.id === state.profile.id ? 'disabled title="不能停用当前登录账号"' : ""}>${user.id === state.profile.id ? "当前账号" : user.isActive ? "停用" : "启用"}</button></td></tr>`).join("") || `<tr><td colspan="6">暂无匹配用户，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-user-page", state.adminUserPage, users.total, 20)}</div>`;
       } else if (tab === "credits") {
         body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>充值与积分流水</h2><p>充值按 1 元 = 12.8 积分入账；退费为积分退回，扣款为积分消费。为用户充值请前往“用户管理”。</p></div><span>${rechargePage.total} 笔流水</span></div><div class="ledger-legend" aria-label="流水类型说明">${["recharge", "refund", "consume", "grant", "adjustment"].map(ledgerBadge).join("")}<span class="ledger-legend-note">＋ 积分增加 / − 积分减少</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" aria-label="搜索用户账号或备注" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户名称、账号或备注" /><select id="adminRechargeType" aria-label="流水类型"><option value="all">全部类型</option>${Object.entries(ledgerTypes).map(([key, value]) => `<option value="${key}" ${state.adminRechargeType === key ? "selected" : ""}>${value.symbol} ${value.label}</option>`).join("")}</select><label class="admin-date-label">开始日期<input id="adminRechargeFrom" aria-label="流水开始日期" title="开始日期" type="date" value="${state.adminRechargeFrom}" /></label><label class="admin-date-label">结束日期<input id="adminRechargeTo" aria-label="流水结束日期" title="结束日期" type="date" value="${state.adminRechargeTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div>${adminLedgerSummary(rechargePage.summary)}<div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>流水类型</th><th>充值金额（元）</th><th>积分变动</th><th>变动后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(adminLedgerRow).join("") || `<tr><td colspan="7">暂无匹配的流水，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-recharge-page", state.adminRechargePage, rechargePage.total, 10)}</div>`;
       } else if (tab === "tasks" || tab === "usage") {
@@ -469,7 +475,7 @@
     const meta = [
       task.fileName || "未命名视频",
       formatDuration(task.durationSec),
-      `${(Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE).toFixed(1)} 积分`,
+      `${taskPoints(task).toFixed(1)} 积分`,
       timeAgo(task.createdAt),
     ];
     const compressing = task.status === "running" && task.stage === "compressing";
@@ -666,7 +672,7 @@
 
   function homeTaskRow(task) {
     const kind = taskKind(task);
-    const points = Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE;
+    const points = taskPoints(task);
     const action = isCompletedTask(task)
       ? `<button type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button type="button" data-action="download" data-id="${task.id}" data-format="md">下载</button>`
       : `<button type="button" data-action="open-task" data-id="${task.id}">查看进度</button>`;
@@ -894,7 +900,7 @@
           <strong class="aside-file">${escapeHtml(task.fileName)}</strong>
           <dl class="meta-list">
             <div><dt>视频时长</dt><dd>${formatDuration(task.durationSec)}</dd></div>
-            <div><dt>消耗积分</dt><dd>${(Number(task.creditsUsed ?? task.estimatedMinutes ?? 0) * POINTS_PER_MINUTE).toFixed(1)} 积分</dd></div>
+            <div><dt>消耗积分</dt><dd>${taskPoints(task).toFixed(1)} 积分</dd></div>
             <div><dt>完成时间</dt><dd>${formatDate(task.completedAt || task.createdAt)}</dd></div>
           </dl>
         </div>
@@ -1035,7 +1041,8 @@
     // The six-minute limit applies to each file, never to the batch total.
     // setUploadFiles validates every probed duration independently.
     const overDuration = false;
-    const estimatedPoints = estimate * POINTS_PER_MINUTE;
+    const rate = languageRate(upload.sourceLanguage, upload.outputLanguage);
+    const estimatedPoints = estimate * rate;
     const insufficient = estimatedPoints > credits;
     const durationSummary = upload.reading
       ? "正在读取视频总时长…"
@@ -1084,7 +1091,7 @@
         </div>
         <div class="billing-note ${upload.error || overDuration || insufficient ? "warning" : ""}">
           <span>${upload.error || overDuration || insufficient ? "!" : "i"}</span>
-          <div><strong>${billing}</strong><p>${durationSummary ? `${durationSummary} · ` : ""}按本批视频总时长向上取整预扣；任务失败自动退回。</p></div>
+          <div><strong>${billing}</strong><p>${upload.sourceLanguage && upload.outputLanguage ? `每分钟 ${rate} 积分` : `纯中文每分钟 ${POINTS_PER_MINUTE} 积分，涉及英文每分钟 ${ENGLISH_POINTS_PER_MINUTE} 积分`}；${durationSummary ? `${durationSummary} · ` : ""}按本批视频总时长向上取整预扣；任务失败自动退回。</p></div>
         </div>
         <div class="modal-actions">
           <button class="cancel-btn" type="button" data-action="close-modal">取消</button>
@@ -1610,7 +1617,7 @@
         const restoreButton = task.recheck && task.recheck.pending ? `<button class="secondary-btn" type="button" data-action="admin-review-restore" data-id="${task.id}">恢复上次已完成版本</button>` : "";
         const episodes = Array.isArray(task.episodes) ? task.episodes : [];
         const episodeLinks = episodes.length > 1 ? `<nav class="review-episodes" aria-label="选择剧集">${episodes.map(episode => `<button class="${episode.id === task.id ? "primary-btn" : "secondary-btn"}" data-action="admin-review" data-id="${episode.id}" ${episode.id === task.id ? "disabled" : ""}>${escapeHtml(episode.fileName || episode.title)} · ${escapeHtml(cfg.statusText[episode.status] || episode.status)}</button>`).join("")}</nav>` : "";
-        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="adminTaskDetailTitle"><div class="modal-head"><h2 id="adminTaskDetailTitle">任务详情</h2><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${episodeLinks}<div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong>${statusBadge(task)}<span>${escapeHtml(task.fileName || "")}</span></div><p class="quality-note">时长 ${formatDuration(task.durationSec)} · 消耗 ${Number(task.creditsUsed ?? task.estimatedMinutes ?? 0).toFixed(1)} 分钟 · 进度 ${Number(task.progressPercent) || 0}% · 创建 ${formatDate(task.createdAt)}</p>${task.error ? `<p class="quality-note quality-warning">${escapeHtml(task.error)}</p>` : ""}${task.status === "review" ? `<p class="quality-note quality-warning">该剧本已向用户开放下载；以下检查提示仍保留供核对。</p>` : ""}${reviewIssuesMarkup(task)}<p class="quality-note">${escapeHtml(evidenceLabel)}</p><div class="admin-review-script">${task.result ? scriptPreview(task.result) : "<p>暂无剧本正文。</p>"}</div>${renderTaskTimeline(task, true)}<div class="modal-actions">${restoreButton}<button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
+        $("#modalRoot").innerHTML = `<div class="modal-mask" id="modalMask"><div class="modal admin-review-modal" role="dialog" aria-modal="true" aria-labelledby="adminTaskDetailTitle"><div class="modal-head"><h2 id="adminTaskDetailTitle">任务详情</h2><button class="close-btn" type="button" data-action="close-modal" aria-label="关闭">×</button></div>${episodeLinks}<div class="admin-review-meta"><strong>${escapeHtml(task.title || task.id)}</strong>${statusBadge(task)}<span>${escapeHtml(task.fileName || "")}</span></div><p class="quality-note">时长 ${formatDuration(task.durationSec)} · 消耗 ${taskPoints(task).toFixed(1)} 积分 · 进度 ${Number(task.progressPercent) || 0}% · 创建 ${formatDate(task.createdAt)}</p>${task.error ? `<p class="quality-note quality-warning">${escapeHtml(task.error)}</p>` : ""}${task.status === "review" ? `<p class="quality-note quality-warning">该剧本已向用户开放下载；以下检查提示仍保留供核对。</p>` : ""}${reviewIssuesMarkup(task)}<p class="quality-note">${escapeHtml(evidenceLabel)}</p><div class="admin-review-script">${task.result ? scriptPreview(task.result) : "<p>暂无剧本正文。</p>"}</div>${renderTaskTimeline(task, true)}<div class="modal-actions">${restoreButton}<button class="cancel-btn" type="button" data-action="close-modal">关闭</button></div></div></div>`;
       } catch (error) { toast(error.message || "任务详情加载失败", "error"); }
       finally {
         if (actionElement.isConnected) {

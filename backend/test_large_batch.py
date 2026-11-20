@@ -30,7 +30,7 @@ class LargeBatchTests(unittest.TestCase):
             CREATE TABLE tasks (
                 id TEXT PRIMARY KEY, user_id TEXT, title TEXT, file_name TEXT,
                 stored_path TEXT, file_size INTEGER, mime_type TEXT, duration_sec REAL,
-                estimated_minutes INTEGER, credits_used INTEGER, source_language TEXT,
+                estimated_minutes INTEGER, credits_used INTEGER, points_per_minute INTEGER NOT NULL DEFAULT 5, source_language TEXT,
                 output_language TEXT, status TEXT, stage TEXT,
                 progress_percent INTEGER, error TEXT, created_at TEXT, updated_at TEXT,
                 batch_id TEXT, batch_title TEXT, batch_index INTEGER, batch_total INTEGER

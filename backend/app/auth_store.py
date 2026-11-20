@@ -397,6 +397,7 @@ def init_db() -> None:
             ("delivery_json", "TEXT"),
             ("source_language", "TEXT NOT NULL DEFAULT 'zh'"),
             ("output_language", "TEXT NOT NULL DEFAULT 'zh'"),
+            ("points_per_minute", "INTEGER NOT NULL DEFAULT 5"),
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")

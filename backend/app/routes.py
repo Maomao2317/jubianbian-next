@@ -58,6 +58,7 @@ from .config import (
     UPLOAD_DIR,
 )
 from .billing import fetch_monthly_ark_cost
+from .pricing import language_rate
 from .ledger_summary import ledger_components, ledger_totals
 from .logging_setup import _email_log_id, logger, safe_error_text
 from .media import (
@@ -178,14 +179,15 @@ def _charge_user(
     connection: sqlite3.Connection,
     user_id: str,
     minutes: int,
-) -> tuple[int, int] | None:
+    points_per_minute: int = POINTS_PER_MINUTE,
+) -> tuple[int, float] | None:
     """Atomically reserve points and return the resulting balance.
 
     The conditional UPDATE prevents two concurrent uploads from spending the
     same balance.  Callers run this inside their task transaction so a later
     insert/update failure rolls the charge back together with the task.
     """
-    charge_points = max(0, int(minutes)) * POINTS_PER_MINUTE
+    charge_points = max(0, int(minutes)) * points_per_minute
     row = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
     if not row or charge_points > int(row["credits"] or 0):
         return None
@@ -195,7 +197,7 @@ def _charge_user(
     ).rowcount
     if changed != 1:
         return None
-    balance_after = int(connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()["credits"])
+    balance_after = round(float(connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()["credits"]), 1)
     return charge_points, balance_after
 
 
@@ -517,7 +519,7 @@ def admin_users(request: Request, keyword: str = "", status: str = "all", limit:
                 CASE WHEN EXISTS (SELECT 1 FROM credit_ledger c WHERE c.user_id = u.id AND c.entry_type = 'consume')
                 THEN MAX(0, -(SELECT COALESCE(SUM(c.amount), 0) FROM credit_ledger c
                               WHERE c.user_id = u.id AND c.entry_type IN ('consume', 'refund'))) / ?
-                ELSE (SELECT COALESCE(SUM(t.credits_used), 0) FROM tasks t WHERE t.user_id = u.id)
+                ELSE (SELECT COALESCE(SUM(t.credits_used * t.points_per_minute), 0) / 5.0 FROM tasks t WHERE t.user_id = u.id)
                 END AS total_used FROM users u {where} ORDER BY u.created_at DESC, u.id LIMIT ? OFFSET ?""",
             (float(POINTS_PER_MINUTE), *params, limit, offset),
         ).fetchall()
@@ -745,6 +747,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             CAST(ROUND(AVG(COALESCE(t.progress_percent, 0))) AS INTEGER) AS progress_percent,
             SUM(COALESCE(t.estimated_minutes, 0)) AS estimated_minutes,
             SUM(COALESCE(t.credits_used, 0)) AS credits_used,
+            SUM(COALESCE(t.credits_used, 0) * t.points_per_minute) AS points_used,
             MAX(t.error) AS error,
             MAX(t.created_at) AS created_at,
             MAX(t.updated_at) AS updated_at,
@@ -804,8 +807,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             item["batch_title"] = default_batch_title(item["created_at"])
             if not item.get("title") or is_default_batch_title(item.get("title")):
                 item["title"] = item["batch_title"]
-        billed_minutes = float(item.get("credits_used") or 0)
-        item["points_used"] = round(billed_minutes * POINTS_PER_MINUTE, 1)
+        item["points_used"] = round(float(item.get("points_used") or 0), 1)
         item["points_value_rmb"] = round(item["points_used"] / POINTS_PER_YUAN, 2)
         task_usage_rows = usage_rows.get(row["group_id"], [])
         item["model_usage"] = _admin_model_usage(task_usage_rows)
@@ -914,8 +916,9 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
             "message": "已免费重新复核，原完成版本已保留" if task_status == "done" else "已退回复核并免费重新识别",
         }
 
+    rate = language_rate(row["source_language"], row["output_language"])
     with db() as connection:
-        charged = _charge_user(connection, user_id, retry_minutes)
+        charged = _charge_user(connection, user_id, retry_minutes, rate)
         if charged is None:
             current = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
             available = int(current["credits"] or 0) if current else 0
@@ -923,20 +926,20 @@ async def admin_retry_task(request: Request, task_id: str, background: Backgroun
         changed = connection.execute(
             """
             UPDATE tasks
-            SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
+            SET credits_used = ?, points_per_minute = ?, status = 'queued', stage = 'queued', progress_percent = 4,
                 error = NULL, result_json = NULL, delivery_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                 model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                 api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
             WHERE id = ? AND user_id = ? AND status = 'failed'
             """,
-            (retry_minutes, now_iso(), task_id, user_id),
+            (retry_minutes, rate, now_iso(), task_id, user_id),
         ).rowcount
         if changed != 1:
             raise HTTPException(status_code=409, detail="任务已被其他请求重新排队")
-        _, balance = charged
+        charge_points, balance = charged
         connection.execute(
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, -retry_minutes * POINTS_PER_MINUTE, balance, "consume", "admin task retry", now_iso()),
+            (user_id, -charge_points, balance, "consume", "admin task retry", now_iso()),
         )
     record_task_event(task_id, "admin_retry", "管理员重新排队", status="queued", stage="queued", progress_percent=4)
     _admin_audit(admin["id"], "task_retry", "task", task_id)
@@ -994,7 +997,7 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
     # completed screenplays can be large, and their full payload is fetched by
     # the detail endpoint only when the user opens a task.
     list_columns = """
-        id, title, file_name, duration_sec, estimated_minutes, credits_used,
+        id, title, file_name, duration_sec, estimated_minutes, credits_used, points_per_minute,
         status, stage, progress_percent, stage_progress_percent, error, created_at, updated_at,
         completed_at, batch_id, batch_title, batch_index, batch_total,
         source_language, output_language
@@ -1136,7 +1139,8 @@ async def create_upload_batch(request: Request) -> dict[str, Any]:
     total_duration = sum(float(item["duration"]) for item in prepared)
     total_minutes = max(1, math.ceil(total_duration / 60))
     _allocate_batch_billing_minutes(prepared, total_minutes)
-    total_points = total_minutes * POINTS_PER_MINUTE
+    rate = language_rate(source_language, output_language)
+    total_points = total_minutes * rate
     if total_points > int(user["credits"]):
         raise HTTPException(status_code=402, detail=f"积分不足，预计需要 {total_points:.1f} 积分")
     with db() as connection:
@@ -1163,20 +1167,20 @@ async def create_upload_batch(request: Request) -> dict[str, Any]:
     batch_title = title or default_batch_title(created)
     prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item["input_index"])))
     with db() as connection:
-        charged = _charge_user(connection, user["id"], total_minutes)
+        charged = _charge_user(connection, user["id"], total_minutes, rate)
         if charged is None:
             raise HTTPException(status_code=402, detail="积分不足，请刷新后重试")
         for index, item in enumerate(prepared, start=1):
             connection.execute(
                 """INSERT INTO tasks
                 (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec,
-                 estimated_minutes, credits_used, source_language, output_language, status, stage, progress_percent, created_at, updated_at,
+                 estimated_minutes, credits_used, points_per_minute, source_language, output_language, status, stage, progress_percent, created_at, updated_at,
                  batch_id, batch_title, batch_index, batch_total)
-                VALUES (?, ?, ?, ?, ?, ?, 'video/mp4', ?, ?, ?, ?, ?, 'queued', 'uploading', 1, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, 'video/mp4', ?, ?, ?, ?, ?, ?, 'queued', 'uploading', 1, ?, ?, ?, ?, ?, ?)""",
                 (
                     item["id"], user["id"], title_with_episode(title or title_from_filename(item["name"]), item["name"]),
                     item["name"], item["stored_path"], item["size"], item["duration"], item["minutes"],
-                    item["billing_minutes"], item["source_language"], item["output_language"], created, created,
+                    item["billing_minutes"], rate, item["source_language"], item["output_language"], created, created,
                     batch_id, batch_title, index, len(prepared),
                 ),
             )
@@ -1353,14 +1357,15 @@ async def create_task(
     created = now_iso()
     task_title = title_with_episode(title.strip() or title_from_filename(file_name), file_name)
     estimated = max(1, math.ceil(duration / 60)) if duration else 1
+    rate = language_rate(source_language, output_language)
     with db() as connection:
         connection.execute(
             """
             INSERT INTO tasks
               (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec,
-               estimated_minutes, credits_used, source_language, output_language, status, stage, progress_percent,
+               estimated_minutes, credits_used, points_per_minute, source_language, output_language, status, stage, progress_percent,
                created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?)
             """,
             (
                 task_id,
@@ -1373,13 +1378,14 @@ async def create_task(
                 duration,
                 estimated,
                 estimated,
+                rate,
                 source_language,
                 output_language,
                 created,
                 created,
             ),
         )
-        charged = _charge_user(connection, user["id"], estimated)
+        charged = _charge_user(connection, user["id"], estimated, rate)
         if charged is None:
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {user['credits']} 积分")
@@ -1439,7 +1445,8 @@ async def create_tasks_batch(
     total_duration = sum(float(item["duration"] or 0) for item in prepared)
     total_minutes = max(1, math.ceil(total_duration / 60))
     _allocate_batch_billing_minutes(prepared, total_minutes)
-    total_points = total_minutes * POINTS_PER_MINUTE
+    rate = language_rate(source_language, output_language)
+    total_points = total_minutes * rate
     if total_points > int(user["credits"]):
         for item in prepared:
             item["target"].unlink(missing_ok=True)
@@ -1455,7 +1462,7 @@ async def create_tasks_batch(
     batch_title = title.strip() or default_batch_title(created)
     prepared.sort(key=lambda item: episode_sort_key(item["name"], int(item.get("input_index") or 0)))
     with db() as connection:
-        charged = _charge_user(connection, user["id"], total_minutes)
+        charged = _charge_user(connection, user["id"], total_minutes, rate)
         if charged is None:
             for item in prepared:
                 item["target"].unlink(missing_ok=True)
@@ -1463,7 +1470,7 @@ async def create_tasks_batch(
             available = int(current["credits"] or 0) if current else 0
             raise HTTPException(status_code=402, detail=f"积分不足，当前剩余 {available} 积分")
         for index, item in enumerate(prepared, start=1):
-            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, source_language, output_language, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["billing_minutes"], source_language, output_language, created, created, batch_id, batch_title, index, len(prepared)))
+            connection.execute("INSERT INTO tasks (id, user_id, title, file_name, stored_path, file_size, mime_type, duration_sec, estimated_minutes, credits_used, points_per_minute, source_language, output_language, status, stage, progress_percent, created_at, updated_at, batch_id, batch_title, batch_index, batch_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 4, ?, ?, ?, ?, ?, ?)", (item["id"], user["id"], title_with_episode(title.strip() or title_from_filename(item["name"]), item["name"]), item["name"], str(item["target"]), item["size"], "video/mp4", item["duration"], item["minutes"], item["billing_minutes"], rate, source_language, output_language, created, created, batch_id, batch_title, index, len(prepared)))
         _, balance = charged
         connection.execute("UPDATE users SET credits = ? WHERE id = ?", (balance, user["id"]))
         connection.execute("INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], -total_points, balance, "consume", "视频识别消费", created))
@@ -1484,8 +1491,9 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
     if not media_exists(row["stored_path"]):
         raise HTTPException(status_code=409, detail="原始视频已不存在，无法重试")
     retry_minutes = max(1, int(row["estimated_minutes"] or 1))
+    rate = language_rate(row["source_language"], row["output_language"])
     with db() as connection:
-        charged = _charge_user(connection, user_id, retry_minutes)
+        charged = _charge_user(connection, user_id, retry_minutes, rate)
         if charged is None:
             current = connection.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
             available = int(current["credits"] or 0) if current else 0
@@ -1493,20 +1501,20 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
         changed = connection.execute(
             """
             UPDATE tasks
-            SET credits_used = ?, status = 'queued', stage = 'queued', progress_percent = 4,
+            SET credits_used = ?, points_per_minute = ?, status = 'queued', stage = 'queued', progress_percent = 4,
                 error = NULL, result_json = NULL, delivery_json = NULL, quality_json = NULL, evidence_json = NULL, provider = NULL,
                 model = NULL, input_tokens = NULL, output_tokens = NULL, total_tokens = NULL,
                 api_cost_rmb = 0, attempts = 0, completed_at = NULL, updated_at = ?
             WHERE id = ? AND user_id = ? AND status = 'failed'
             """,
-            (retry_minutes, now_iso(), task_id, user_id),
+            (retry_minutes, rate, now_iso(), task_id, user_id),
         ).rowcount
         if changed != 1:
             raise HTTPException(status_code=409, detail="任务已被其他请求重新排队")
-        _, balance = charged
+        charge_points, balance = charged
         connection.execute(
             "INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, -retry_minutes * POINTS_PER_MINUTE, balance, "consume", "failed task retry", now_iso()),
+            (user_id, -charge_points, balance, "consume", "failed task retry", now_iso()),
         )
     record_task_event(task_id, "retry", "任务已重新排队", status="queued", stage="queued", progress_percent=4)
     logger.info("task_retry task_id=%s request_id=%s", task_id, REQUEST_ID.get())

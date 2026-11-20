@@ -18,7 +18,7 @@ class AdminConsoleTests(unittest.TestCase):
             CREATE TABLE users(id TEXT, email TEXT, name TEXT, credits REAL, is_active INTEGER);
             CREATE TABLE tasks(id TEXT, user_id TEXT, title TEXT, file_name TEXT,
                 batch_title TEXT, status TEXT, stage TEXT, progress_percent REAL,
-                estimated_minutes REAL, credits_used REAL, error TEXT,
+                estimated_minutes REAL, credits_used REAL, points_per_minute INTEGER NOT NULL DEFAULT 5, error TEXT,
                 created_at TEXT, updated_at TEXT, batch_id TEXT, batch_index INTEGER,
                 batch_total INTEGER, api_cost_rmb REAL, quality_json TEXT, provider TEXT,
                 model TEXT, input_tokens INTEGER, output_tokens INTEGER,

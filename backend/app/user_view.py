@@ -118,7 +118,7 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
     fields = {"id", "title", "status", "stage", "fileName", "episodeNumber", "fileSize", "mimeType",
               "durationSec", "estimatedMinutes", "creditsUsed", "progressPercent", "stageProgressPercent",
               "createdAt", "updatedAt", "completedAt", "batchId", "batchTitle", "batchIndex", "batchTotal",
-              "sourceLanguage", "outputLanguage"}
+              "sourceLanguage", "outputLanguage", "pointsPerMinute", "pointsUsed"}
     result = {key: value for key, value in task.items() if key in fields}
     internal_status = task.get("status")
     status = "done" if internal_status == "review" else internal_status

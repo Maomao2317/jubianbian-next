@@ -287,7 +287,8 @@
       const batchId = "batch-" + Date.now();
       const createdAt = new Date().toISOString();
       const totalMinutes = Math.max(1, Math.ceil(Number(durationSec || 0) / 60), Number(estimatedMinutes || 0));
-      if (totalMinutes * 5 > mockStore.profile.credits) {
+      const rate = payload.sourceLanguage === "en" || ["en", "both"].includes(payload.outputLanguage) ? 8 : 5;
+      if (totalMinutes * rate > mockStore.profile.credits) {
         throw new Error(`额度不足，当前剩余 ${mockStore.profile.credits} 积分`);
       }
       const perFileMinutes = Math.max(1, Math.ceil(totalMinutes / selected.length));
@@ -309,12 +310,14 @@
         durationSec: Math.round(Number(durationSec || 0) / selected.length),
         estimatedMinutes: perFileMinutes,
         creditsUsed: baseBilling + (index < remainder ? 1 : 0),
+        pointsPerMinute: rate,
+        pointsUsed: (baseBilling + (index < remainder ? 1 : 0)) * rate,
         sourceLanguage: payload.sourceLanguage,
         outputLanguage: payload.outputLanguage,
         createdAt,
         result: null,
       }));
-      mockStore.profile.credits -= totalMinutes * 5;
+      mockStore.profile.credits -= totalMinutes * rate;
       mockStore.tasks.unshift(...tasks.reverse());
       persist();
       return clone({ tasks, count: tasks.length });

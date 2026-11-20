@@ -110,7 +110,7 @@ const click = async (action, id) => {
   assert.match(node("#modalRoot").innerHTML, /P0.*独立 OCR 覆盖率 0%/);
   assert.match(node("#modalRoot").innerHTML, /Lite 模型当前不可用/);
   assert.match(node("#modalRoot").innerHTML, /1125125 ms/);
-  assert.match(node("#modalRoot").innerHTML, /消耗 0.0 分钟/);
+  assert.match(node("#modalRoot").innerHTML, /消耗 0.0 积分/);
   assert.doesNotMatch(node("#modalRoot").innerHTML, /data-action="admin-approve"|免费重试|免费重新复核/);
   assert.doesNotMatch(source, /admin-done-recheck|admin-review-retry/);
   ui.renderHeader();
@@ -126,7 +126,7 @@ const click = async (action, id) => {
   ui.state.profile = { role: "admin" };
   await ui.renderAdmin();
   assert.match(node("#main").innerHTML, /1330.0<\/strong> 积分/);
-  assert.match(node("#main").innerHTML, /已用 73.0 分钟.*可用 266.0 分钟/s);
+  assert.match(node("#main").innerHTML, /已用 365.0 积分.*纯中文 266.0 分钟 \/ 涉及英文 166.3 分钟/s);
   assert.doesNotMatch(node("#main").innerHTML, /999 \/|调整分钟额度/);
   mobile = true;
   const beforeUpload = calls.length;
