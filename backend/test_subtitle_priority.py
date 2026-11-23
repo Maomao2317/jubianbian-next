@@ -30,6 +30,27 @@ class SubtitlePriorityTests(unittest.TestCase):
         self.assertNotIn(subtitle_text, exported)
         self.assertNotIn("【字幕：", exported)
 
+    def test_legacy_asr_source_label_cannot_overwrite_confirmed_subtitle(self):
+        good = "肠胃弱得跟纸似的"
+        script, evidence = self.fixture("常味弱得跟指示", good, good, textSource="subtitle")
+        evidence["sources"][0]["items"][0]["confidence"] = "local_asr"
+
+        self.evaluate(script, evidence)
+
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], good + "。")
+        self.assertIn(good, script_to_markdown({"title": "第1集", "result": script}))
+
+    def test_uncertain_asr_cannot_add_words_to_an_existing_line(self):
+        segment = {"type": "transcript_segment", "text": "你现在赶紧出去吧",
+                   "confidence": "low", "startSec": 1, "endSec": 3}
+        evidence = {"sources": [{"kind": "audio", "status": "available", "items": [segment]}]}
+        script, _ = self.fixture(dialogue="赶紧出去")
+        script["scenes"][0]["blocks"].pop()
+
+        self.assertEqual(restore_short_transcript_segments(script, evidence)["blocks"], 0)
+        self.assertEqual(restore_evidence_boundary_segments(script, evidence)["blocks"], 0)
+        self.assertEqual(script["scenes"][0]["blocks"][0]["text"], "赶紧出去。")
+
     def fixture(self, audio="这个人是畜生", subtitle="这个人是坏人", dialogue=None, **fields):
         # Default fixtures exercise unclear ASR; clear-speech cases remove this
         # confidence explicitly. Set it before normalization, as in production.

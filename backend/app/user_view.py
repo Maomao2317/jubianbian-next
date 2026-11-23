@@ -53,6 +53,7 @@ STAGE_MESSAGES = {
     "vision": "正在整理人物和画面内容", "repairing": "正在核对并补全内容",
     "reviewing": "正在核对台词和画面内容", "merging": "正在整理剧本内容",
     "exporting": "正在生成下载文件", "done": "处理完成，剧本可下载",
+    "batch_finalizing": "正在统一批次人物名称",
     "review": "处理完成，剧本可下载；内容检查提示见详情底部", "failed": "本次处理未完成，请查看任务详情",
 }
 

@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
-from app import auth_store, routes, worker
+from app import auth_store, routes, task_store, worker
+from test_cast_evidence import episode
 
 
 class RouteQueueTests(unittest.TestCase):
@@ -58,6 +59,46 @@ class RouteQueueTests(unittest.TestCase):
         result = asyncio.run(routes.create_task(None, background,
             UploadFile(filename="1.mp4", file=BytesIO(b"fixture")), "Episode", 60, "zh", "zh"))
         self.assert_queued_once(result["id"], background)
+
+    def test_out_of_order_batch_publishes_only_reconciled_screenplays(self):
+        stamp = auth_store.now_iso()
+        scripts = [
+            episode("年轻女子"),
+            episode("年轻女子"),
+            episode("沈宁", aliases=["年轻女子"], nameEvidence="年轻女子的画面姓名条显示沈宁"),
+        ]
+        with auth_store.db() as c:
+            for index, script in enumerate(scripts, 1):
+                body = json.dumps(script, ensure_ascii=False)
+                c.execute(
+                    """INSERT INTO tasks(id,user_id,title,file_name,stored_path,status,stage,progress_percent,
+                       estimated_minutes,credits_used,created_at,updated_at,result_json,delivery_json,batch_id,batch_index,batch_total)
+                       VALUES (?,'owner',?,?,'fixture.mp4',?,?,98,1,1,?,?,?,?,'batch',?,3)""",
+                    (str(index), f"第{index}集", f"{index}.mp4",
+                     "running" if index == 1 else "finalizing", "batch_finalizing",
+                     stamp, stamp, body, body, index),
+                )
+
+        self.assertEqual(task_store.reconcile_batch_character_continuity("batch"), 0)
+        self.assertIsNone(routes.task_detail(None, "2")["result"])
+        for export, args in ((routes.download_task, ("2",)), (routes.download_batch, ("batch",)),
+                             (routes.download_all_tasks, ())):
+            with self.assertRaises(HTTPException) as denied:
+                export(None, *args, fmt="md")
+            self.assertEqual(denied.exception.status_code, 409)
+
+        task_store.update_task("1", status="finalizing")
+        task_store.finalize_ready_batches()
+
+        rendered = routes.download_batch(None, "batch", fmt="md").body.decode()
+        self.assertEqual(rendered.count("沈宁"), 6, rendered)
+        self.assertNotIn("年轻女子", rendered)
+        self.assertEqual(rendered.count("林先生，你到底是不是顾青山"), 3)
+        for index in range(1, 4):
+            detail = routes.task_detail(None, str(index))
+            self.assertEqual(detail["status"], "done")
+            self.assertEqual(detail["result"]["scenes"][0]["blocks"][0]["speaker"], "沈宁")
+        self.assertEqual(task_store.reconcile_batch_character_continuity("batch"), 0)
 
     def test_owner_retry_is_only_started_by_worker(self):
         self.seed("failed")

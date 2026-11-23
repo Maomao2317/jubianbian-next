@@ -13,7 +13,7 @@ from .logging_setup import logger, safe_error_text
 from .processing import _refund_task_once, process_task
 from .rechecks import restore_recheck_snapshot_with_connection
 from .storage import delete_media, media_info
-from .task_store import record_task_event, record_task_events, reconcile_batch_character_continuity
+from .task_store import finalize_ready_batches, record_task_event, record_task_events, reconcile_batch_character_continuity
 
 
 def _claim_next_task(connection, active_users: Counter, last_user: str | None):
@@ -215,6 +215,7 @@ async def run_worker() -> None:
     active_users: Counter = Counter()
     last_user = None
     last_upload_cleanup = 0.0
+    last_batch_finalization = float("-inf")
     while True:
         now = asyncio.get_running_loop().time()
         if not recovery_scan_complete:
@@ -251,6 +252,12 @@ async def run_worker() -> None:
                 )
             else:
                 pending_recoveries.pop(task_id, None)
+        if now - last_batch_finalization >= 5:
+            last_batch_finalization = now
+            try:
+                await asyncio.to_thread(finalize_ready_batches)
+            except Exception:
+                logger.exception("worker_batch_finalization_failed retry_in=5")
         if now - last_upload_cleanup >= 60:
             last_upload_cleanup = now
             try:

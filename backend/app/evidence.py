@@ -9,6 +9,7 @@ or cloud credentials produce ``unavailable`` records instead of guessed text.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -217,7 +218,7 @@ def _asr_items_from_audio(audio: Any, source_name: str, language: str | None = N
                     "text": text,
                     "startSec": _time(getattr(segment, "start", 0.0)),
                     "endSec": _time(getattr(segment, "end", 0.0)),
-                    "confidence": "local_asr",
+                    "confidence": "unknown",
                 }
             # Keep the original segment, with finer anchors for cut-spanning
             # lines and very short interjections. Words are never deduplicated.
@@ -225,13 +226,20 @@ def _asr_items_from_audio(audio: Any, source_name: str, language: str | None = N
             for word in getattr(segment, "words", None) or []:
                 word_text = str(getattr(word, "word", "") or "").strip()
                 if word_text:
-                    words.append({"text": word_text, "startSec": _time(getattr(word, "start", 0)),
-                                  "endSec": _time(getattr(word, "end", 0))})
+                    observation = {"text": word_text, "startSec": _time(getattr(word, "start", 0)),
+                                   "endSec": _time(getattr(word, "end", 0))}
+                    probability = getattr(word, "probability", None)
+                    if isinstance(probability, (int, float)) and math.isfinite(probability) and 0 <= probability <= 1:
+                        observation["probability"] = round(probability, 4)
+                    words.append(observation)
             # Whisper words can include a leading space or trailing comma;
             # compare actual characters before trusting their time anchors.
             comparable = lambda value: re.sub(r"[\W_]+", "", value, flags=re.UNICODE)
             if words and comparable("".join(word["text"] for word in words)) == comparable(text):
                 item["words"] = words
+                probabilities = [word["probability"] for word in words if "probability" in word]
+                if len(probabilities) == len(words):
+                    item["confidence"] = "high" if min(probabilities) >= 0.85 else "low" if min(probabilities) < 0.55 else "medium"
             items.append(item)
             captured_chars += len(text)
     return items

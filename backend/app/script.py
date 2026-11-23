@@ -656,6 +656,18 @@ def ordered_segment_coverages(segments: list[dict[str, Any]], candidate: str) ->
     return result
 
 
+def _transcript_supports_repair(item: dict[str, Any]) -> bool:
+    """A source label or ambiguous transcription cannot rewrite spoken text."""
+    confidence = str(item.get("confidence") or "").strip().casefold()
+    clarity = str(item.get("speechClarity") or "").strip().casefold()
+    return (
+        not item.get("uncertain")
+        and item.get("audioUnclear") is not True
+        and clarity not in {"low", "unclear", "inaudible", "unintelligible", "noise", "不清晰", "听不清"}
+        and confidence in {"", "high", "confirmed"}
+    )
+
+
 def subtitle_aligned_evidence(
     script: dict[str, Any],
     evidence: dict[str, Any] | None,
@@ -737,12 +749,22 @@ def subtitle_aligned_evidence(
         reference = evidence_comparison_text(item.get("text"))
         candidate = evidence_comparison_text(block.get("text"))
         subtitle_text = evidence_comparison_text(raw)
+        # An independently matched caption already adopted by the model can
+        # stand when the conflicting transcript has no reliable confidence.
+        # Keep the raw ASR untouched and use the aligned copy for coverage.
+        caption_selected = block.get("textSource") == "subtitle" and candidate == subtitle_text
+        if caption_selected and not _transcript_supports_repair(item):
+            proposals.setdefault(index, []).append((block, raw, str(block.get("text") or "")))
+            continue
         if not audio_is_unclear(item, block):
             # A provider that selected a subtitle despite clear speech must be
             # restored to the audible wording. Only replace a whole subtitle
             # line; a partial caption is intentionally left for review.
-            if (update_script and block.get("textSource") == "subtitle"
-                    and candidate == subtitle_text and reference and reference != subtitle_text):
+            if (update_script and caption_selected and reference and reference != subtitle_text
+                    and _transcript_supports_repair(item)
+                    and (str(block.get("speechClarity") or "").casefold() == "clear"
+                         or block.get("audioUnclear") is False
+                         or not item.get("confidence"))):
                 replacement = normalize_dialogue_text(item.get("text"))
                 block["text"] = replacement
                 for key in ("sourceText", "rawText", "finalText"):
@@ -827,7 +849,7 @@ def restore_spoken_subtitles(script: dict[str, Any], evidence: dict[str, Any] | 
              if isinstance(source, dict) and source.get("kind") == "audio" and source.get("status") == "available"
              for item in source.get("items") or [] if isinstance(item, dict)
              and item.get("type") == "transcript_segment" and span(item)
-             and str(item.get("confidence") or "").lower() != "low" and not item.get("uncertain")]
+             and _transcript_supports_repair(item)]
     scenes = [scene for scene in script.get("scenes", []) if isinstance(scene, dict)]
     def episode(scene):
         match = re.match(r"^\s*(\d+)-\d+", str(scene.get("heading") or ""))
@@ -982,7 +1004,8 @@ def restore_short_transcript_segments(
         return result
     segments = []
     for item in audio.get("items") or []:
-        if not isinstance(item, dict) or item.get("type") != "transcript_segment":
+        if (not isinstance(item, dict) or item.get("type") != "transcript_segment"
+                or not _transcript_supports_repair(item)):
             continue
         comparison = evidence_comparison_text(item.get("text"))
         start = item.get("startSec")
@@ -1134,7 +1157,8 @@ def restore_transcript_gap_segments(
 
     repaired_blocks: set[tuple[int, int]] = set()
     for item in audio.get("items") or []:
-        if not isinstance(item, dict) or item.get("type") != "transcript_segment":
+        if (not isinstance(item, dict) or item.get("type") != "transcript_segment"
+                or not _transcript_supports_repair(item)):
             continue
         raw_text = str(item.get("text") or "").strip()
         reference = evidence_comparison_text(raw_text)
@@ -1234,6 +1258,8 @@ def restore_evidence_boundary_segments(
                 continue
             expected_type = "transcript_segment" if kind == "audio" else "screen_text"
             if item.get("type") != expected_type:
+                continue
+            if kind == "audio" and not _transcript_supports_repair(item):
                 continue
             raw_text = str(item.get("text") or "").strip()
             reference = evidence_comparison_text(raw_text)
@@ -3202,7 +3228,8 @@ def _backfill_evidenced_cast_aliases(scripts: list[dict[str, Any]]) -> int:
                 alias = character_label(alias)
                 if not alias or alias == name:
                     continue
-                if alias not in _LEAD_ROLE_LABELS and not re.search(r"先生$|女士$|小姐$|少爷$|夫人$|总裁$", alias):
+                if (alias not in _LEAD_ROLE_LABELS and not _DESCRIPTIVE_NAME_RE.search(alias)
+                        and not re.search(r"先生$|女士$|小姐$|少爷$|夫人$|总裁$", alias)):
                     continue
                 owners.setdefault(alias, set()).add(name)
                 # Lead-role aliases are structured identity links rather than
@@ -3211,7 +3238,7 @@ def _backfill_evidenced_cast_aliases(scripts: list[dict[str, Any]]) -> int:
                 # entire batch. Honorifics still require both labels in the
                 # evidence sentence because many people can share one title.
                 if (alias in _LEAD_ROLE_LABELS and name in directly_supported_names) or (
-                    name in evidence and alias in evidence
+                    name in directly_supported_names and name in evidence and alias in evidence
                     and not re.search(r"待核|待确认|疑似|猜测|暂定|可能", evidence)
                 ):
                     supported.add((alias, name))
@@ -3470,8 +3497,7 @@ def apply_batch_character_continuity(scripts: list[dict[str, Any]]) -> int:
             # A new full name must not be replaced by an earlier honorific
             # merely because its profile lists that honorific as an alias.
             # The evidence prepass above handles confirmed role -> full name.
-            full_name_candidate = bool(re.fullmatch(r"[\u4e00-\u9fff]{3,4}", candidate)) and not re.search(
-                r"先生|女士|小姐|少爷|夫人|总裁|男主|女主|主角|男子|女子|男生|女生|男人|女人|男孩|女孩|老人|老头|老太|妇人|大叔|阿姨|小伙|少年|少女|老师|医生|老板|校服|[红白黑蓝绿黄紫]衣", candidate)
+            full_name_candidate = _looks_like_explicit_name(candidate)
             if not resolved and not full_name_candidate:
                 matches = {resolve(alias) for alias in profile.get("aliases") or [] if character_label(alias)} - {None}
                 if len(matches) == 1:

@@ -989,6 +989,8 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
     if status and status != "all":
         if status == "done":
             clauses.append("status IN ('done', 'review')")
+        elif status == "running":
+            clauses.append("status IN ('running', 'finalizing')")
         else:
             clauses.append("status = ?")
             params.append(status)

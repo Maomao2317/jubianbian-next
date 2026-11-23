@@ -137,7 +137,7 @@ def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
     scripts = []
     reference_title = None
     for earlier in earlier_rows:
-        if earlier["status"] not in {"done", "review"}:
+        if earlier["status"] not in {"done", "review", "finalizing"}:
             continue
         try:
             script = json.loads(earlier["result_json"] or "")
@@ -168,7 +168,7 @@ def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
 
 
 def reconcile_batch_character_continuity(batch_id: str | None) -> int:
-    """Persist one stable cast naming table across completed batch episodes.
+    """Publish batch drafts and their reconciled cast together.
 
     Recognition runs independently per episode and may finish out of order.
     Reconcile once, after every task in the batch is terminal, so the O(batch
@@ -179,17 +179,21 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
     if not batch_id:
         return 0
     with db() as connection:
-        statuses = connection.execute(
-            "SELECT status FROM tasks WHERE batch_id = ?",
-            (batch_id,),
-        ).fetchall()
-        if not statuses or any(row["status"] not in {"done", "review", "failed"} for row in statuses):
+        blocking_task = """SELECT 1 FROM tasks WHERE batch_id = ?
+                           AND status NOT IN ('done', 'review', 'failed', 'finalizing') LIMIT 1"""
+        if connection.execute(blocking_task, (batch_id,)).fetchone():
+            return 0
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        # Recheck after obtaining the write lock in case an episode was retried
+        # or another worker finished publishing this batch.
+        if connection.execute(blocking_task, (batch_id,)).fetchone():
             return 0
         rows = connection.execute(
             """
             SELECT id, result_json, delivery_json
             FROM tasks
-            WHERE batch_id = ? AND status IN ('done', 'review') AND result_json IS NOT NULL
+            WHERE batch_id = ? AND status IN ('done', 'review', 'finalizing') AND result_json IS NOT NULL
             ORDER BY COALESCE(batch_index, 2147483647), created_at ASC, id ASC
             """,
             (batch_id,),
@@ -216,25 +220,49 @@ def reconcile_batch_character_continuity(batch_id: str | None) -> int:
             if isinstance(candidate, dict):
                 delivery = candidate
             deliveries.append(delivery)
-        if len(scripts) < 2:
-            return 0
-        changed = apply_batch_character_continuity(scripts)
+        changed = apply_batch_character_continuity(scripts) if len(scripts) >= 2 else 0
         delivery_changed = apply_batch_character_continuity(
             [delivery for delivery in deliveries if delivery is not None]
         ) if any(delivery is not None for delivery in deliveries) else 0
-        if not changed and not delivery_changed:
-            return 0
         timestamp = now_iso()
-        for row, script, delivery in zip(usable_rows, scripts, deliveries):
-            values = {"result_json": json.dumps(script, ensure_ascii=False), "updated_at": timestamp}
-            if delivery is not None:
-                values["delivery_json"] = json.dumps(delivery, ensure_ascii=False)
-            assignments = ", ".join(f"{key} = ?" for key in values)
+        if changed or delivery_changed:
+            for row, script, delivery in zip(usable_rows, scripts, deliveries):
+                connection.execute(
+                    "UPDATE tasks SET result_json = ?, delivery_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(script, ensure_ascii=False),
+                     json.dumps(delivery, ensure_ascii=False) if delivery is not None else row["delivery_json"],
+                     timestamp, row["id"]),
+                )
+        waiting = connection.execute(
+            "SELECT id FROM tasks WHERE batch_id = ? AND status = 'finalizing'",
+            (batch_id,),
+        ).fetchall()
+        if waiting:
             connection.execute(
-                f"UPDATE tasks SET {assignments} WHERE id = ?",
-                (*values.values(), row["id"]),
+                """UPDATE tasks SET status = 'done', stage = 'done', progress_percent = 100,
+                   completed_at = ?, updated_at = ? WHERE batch_id = ? AND status = 'finalizing'""",
+                (timestamp, timestamp, batch_id),
             )
+            record_task_events(connection, [
+                {"task_id": row["id"], "event_type": "completed", "status": "done",
+                 "stage": "done", "progress_percent": 100, "message": "人物名称已统一，剧本可下载"}
+                for row in waiting
+            ])
         return changed + delivery_changed
+
+
+def finalize_ready_batches() -> None:
+    """Recover drafts left waiting after interruption or a database lock."""
+    with db() as connection:
+        batches = connection.execute(
+            """SELECT DISTINCT waiting.batch_id FROM tasks waiting
+               WHERE waiting.status = 'finalizing' AND NOT EXISTS (
+                   SELECT 1 FROM tasks sibling WHERE sibling.batch_id = waiting.batch_id
+                   AND sibling.status NOT IN ('done', 'review', 'failed', 'finalizing')
+               )"""
+        ).fetchall()
+    for batch in batches:
+        reconcile_batch_character_continuity(batch["batch_id"])
 
 
 def record_task_event(
@@ -361,7 +389,7 @@ def task_counts() -> dict[str, int]:
     counts = {str(row["status"]): int(row["count"]) for row in rows}
     return {
         "queued": counts.get("queued", 0),
-        "running": counts.get("running", 0),
+        "running": counts.get("running", 0) + counts.get("finalizing", 0),
         "review": counts.get("review", 0),
         "done": counts.get("done", 0),
         "failed": counts.get("failed", 0),

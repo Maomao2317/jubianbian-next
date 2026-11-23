@@ -1693,9 +1693,9 @@ async def process_task(task_id: str) -> None:
         final_message = "识别完成，剧本可下载" if approved else "识别完成，剧本可下载；请查看内容检查提示"
         update_task(
             task_id,
-            status="done",
-            stage="done",
-            progress_percent=100,
+            status="finalizing" if batch_id else "done",
+            stage="batch_finalizing" if batch_id else "done",
+            progress_percent=98 if batch_id else 100,
             result_json=json.dumps(script, ensure_ascii=False),
             delivery_json=json.dumps(delivery, ensure_ascii=False),
             quality_json=json.dumps(quality, ensure_ascii=False),
@@ -1706,41 +1706,29 @@ async def process_task(task_id: str) -> None:
             output_tokens=usage.get("output_tokens"),
             total_tokens=usage.get("total_tokens"),
             api_cost_rmb=usage.get("api_cost_rmb", 0),
-            completed_at=now_iso(),
+            completed_at=None if batch_id else now_iso(),
         )
         if completed_recheck:
             with db() as connection:
                 mark_recheck_resolved(connection, task_id, "approved")
-        await asyncio.to_thread(discard_local_proxy, task_id)
-        if batch_id:
-            try:
-                continuity_changes = reconcile_batch_character_continuity(batch_id)
-                if continuity_changes:
-                    logger.info(
-                        "batch_character_continuity batch_id=%s task_id=%s changes=%s",
-                        batch_id,
-                        task_id,
-                        continuity_changes,
-                    )
-            except Exception as continuity_error:  # pragma: no cover - defensive persistence boundary
-                # A naming reconciliation must never turn an otherwise valid
-                # screenplay into a failed task. The next episode completion
-                # will retry the same deterministic pass.
-                logger.warning(
-                    "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
-                    batch_id,
-                    task_id,
-                    safe_error_text(continuity_error),
-                )
         record_task_event(
             task_id,
-            "completed" if approved else "completed_with_findings",
-            final_message,
-            status="done",
-            stage="done",
-            progress_percent=100,
+            "stage" if batch_id else "completed" if approved else "completed_with_findings",
+            "本集识别完成，正在统一批次人物名称" if batch_id else final_message,
+            status="running" if batch_id else "done",
+            stage="batch_finalizing" if batch_id else "done",
+            progress_percent=98 if batch_id else 100,
             duration_ms=elapsed_ms,
         )
+        if batch_id:
+            try:
+                await asyncio.to_thread(reconcile_batch_character_continuity, batch_id)
+            except Exception as continuity_error:  # worker retries ready batches
+                logger.warning(
+                    "batch_character_continuity_failed batch_id=%s task_id=%s error=%s",
+                    batch_id, task_id, safe_error_text(continuity_error),
+                )
+        await asyncio.to_thread(discard_local_proxy, task_id)
         logger.info(
             "task_done task_id=%s provider=%s duration_ms=%.1f scenes=%s",
             task_id,
@@ -1820,22 +1808,23 @@ async def process_task(task_id: str) -> None:
             failure_accounting["quality_json"] = json.dumps(failure_quality, ensure_ascii=False)
         if isinstance(failure_candidate, dict):
             failure_accounting["result_json"] = json.dumps(failure_candidate, ensure_ascii=False)
+        waiting_for_batch = review_required and bool(batch_id)
         update_task(
             task_id,
-            status="done" if review_required else "failed",
-            stage="done" if review_required else "quality_blocked" if quality_failure else "failed",
-            progress_percent=100,
+            status="finalizing" if waiting_for_batch else "done" if review_required else "failed",
+            stage="batch_finalizing" if waiting_for_batch else "done" if review_required else "quality_blocked" if quality_failure else "failed",
+            progress_percent=98 if waiting_for_batch else 100,
             error=None if review_required else message,
-            completed_at=now_iso(),
+            completed_at=None if waiting_for_batch else now_iso(),
             **failure_accounting,
         )
         record_task_event(
             task_id,
-            "completed_with_findings" if review_required else "quality_blocked" if quality_failure else "failed",
-            message,
-            status="done" if review_required else "failed",
-            stage="done" if review_required else "quality_blocked" if quality_failure else "failed",
-            progress_percent=100,
+            "stage" if waiting_for_batch else "completed_with_findings" if review_required else "quality_blocked" if quality_failure else "failed",
+            "本集识别完成，正在统一批次人物名称" if waiting_for_batch else message,
+            status="running" if waiting_for_batch else "done" if review_required else "failed",
+            stage="batch_finalizing" if waiting_for_batch else "done" if review_required else "quality_blocked" if quality_failure else "failed",
+            progress_percent=98 if waiting_for_batch else 100,
             duration_ms=(time.perf_counter() - started) * 1000,
         )
         if batch_id:

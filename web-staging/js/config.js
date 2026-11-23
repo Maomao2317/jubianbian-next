@@ -71,6 +71,7 @@ window.APP_CONFIG = {
     reviewing: "复核台词和画面内容",
     merging: "整理字幕与画面",
     exporting: "生成导出文件",
+    batch_finalizing: "统一批次人物名称",
     review: "内容检查完成",
     done: "识别完成",
     failed: "识别失败",
