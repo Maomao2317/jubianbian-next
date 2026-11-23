@@ -40,7 +40,7 @@ from .config import (
 from .auth_store import db, now_iso
 from .pricing import task_rate
 from .evidence import collect_evidence, evidence_json, transcript_from_evidence
-from .content_coverage import content_gaps, merge_gap_repair, repair_windows
+from .content_coverage import content_gaps, merge_gap_repair, repair_windows, valid_time
 from .dialogue_recovery import dialogue_evidence_issues, recover_audio_blind_spots, recovery_windows
 from .errors import ArkAcceptedResponseError, ArkError, is_account_balance_error
 from .logging_setup import logger, safe_error_text
@@ -51,6 +51,7 @@ from .recognition_cache import RecognitionCache, recognition_cache, discard_loca
 from .rechecks import has_pending_recheck, mark_recheck_resolved, restore_recheck_snapshot
 from .script import (
     apply_batch_character_context,
+    evidence_comparison_text,
     has_screenplay_body,
     normalize_script,
     quality_gate,
@@ -512,7 +513,7 @@ def _issue_identity(issue: dict[str, Any]) -> str:
 
 
 def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any]) -> str | None:
-    """Keep a draft only when review actually loses spoken content.
+    """Reject regressions in the evidence checks after automatic review.
 
     A full video review is allowed to change scene/action structure and its
     precision score can move slightly when it restores omitted lines.  The
@@ -542,10 +543,71 @@ def _review_regression_reason(initial: dict[str, Any], reviewed: dict[str, Any])
     return None
 
 
+def _review_loses_visual_content(script: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Protect existing visual beats even if the review improves dialogue QA."""
+    def visual_blocks(screenplay):
+        for scene in screenplay.get("scenes") or []:
+            for block in scene.get("blocks") or []:
+                if block.get("suppressInOutput"):
+                    continue
+                kind = block.get("type")
+                if kind == "screen_text" and block.get("screenType") in {"subtitle", "name_card", "scene_label"}:
+                    continue
+                if kind not in {"action", "screen_text", "transition"}:
+                    continue
+                text = evidence_comparison_text(block.get("text"))
+                if text:
+                    yield kind, text, block.get("startSec"), block.get("endSec")
+
+    def overlaps(start, end, other_start, other_end):
+        if not all(map(valid_time, (start, end, other_start, other_end))):
+            return True
+        # Allow rounding drift for a point event. Distinct adjacent action
+        # spans cannot stand in for a dropped action on the same timeline.
+        if start == end or other_start == other_end:
+            return other_start <= end + 0.25 and other_end >= start - 0.25
+        return max(start, other_start) < min(end, other_end)
+
+    names = sorted({
+        name for screenplay in (script, candidate)
+        for profile in screenplay.get("characterProfiles") or []
+        for label in [profile.get("name"), *(profile.get("aliases") or [])]
+        if (name := evidence_comparison_text(label))
+    }, key=len, reverse=True)
+
+    def without_actor(text):
+        for name in names:
+            if text.startswith(name) and len(text) > len(name):
+                return text[len(name):]
+        return text
+
+    reviewed_blocks = list(visual_blocks(candidate))
+    for kind, original, start, end in visual_blocks(script):
+        nearby = [
+            text for other_kind, text, left, right in reviewed_blocks
+            if kind == other_kind and overlaps(start, end, left, right)
+        ]
+        if not nearby:
+            return True
+        # Joining local blocks permits a review to split an existing beat.
+        joined = "".join(nearby)
+        if original in joined:
+            continue
+        # A corrected cast label may change the subject, while the wording
+        # for the actual action, object and outcome should still be present.
+        if kind != "action" or without_actor(original) not in joined:
+            return True
+    return False
+
+
 def _review_acceptance_reason(initial, reviewed, script, candidate):
     regression = _review_regression_reason(initial, reviewed)
-    if regression or quality_gate(reviewed)[0]:
+    if regression:
         return regression
+    if _review_loses_visual_content(script, candidate):
+        return "lost_visual_content"
+    if quality_gate(reviewed)[0]:
+        return None
     if script == candidate:
         return "no_effective_change"
     before, after = quality_gate(initial)[1], quality_gate(reviewed)[1]

@@ -166,6 +166,36 @@ class AudioRetryTests(unittest.TestCase):
 
 
 class ReviewProgressTests(unittest.TestCase):
+    def test_review_cannot_trade_a_plot_action_for_better_dialogue_coverage(self):
+        kept = block("action", "林夏转过身看向门口。", 5, 7)
+        missing = block("action", "林夏把房产证递给母亲，母亲接过后锁进抽屉。", 7, 11)
+        dialogue = block("dialogue", "那就这么定了。", 7, 11, speaker="母亲")
+        before = quality(issue(), coverage=80)
+        after = quality(coverage=100)
+        for changed in (
+            script(kept, dialogue),
+            script(kept, dialogue, {**missing, "startSec": 19, "endSec": 23}),
+            script(kept, dialogue, {**missing, "text": "林夏把房产证递给母亲。"}),
+            script(kept, dialogue, {**missing, "suppressInOutput": True}),
+        ):
+            self.assertEqual(processing._review_acceptance_reason(before, after, script(kept, missing), changed),
+                             "lost_visual_content")
+
+    def test_review_can_split_a_beat_while_retaining_its_contents(self):
+        before = script(block("action", "林夏把房产证递给母亲，母亲接过后锁进抽屉。", 7, 11))
+        after = script(block("action", "林夏把房产证递给母亲。", 7, 9),
+                       block("action", "母亲接过后锁进抽屉。", 9, 11))
+        self.assertIsNone(processing._review_acceptance_reason(quality(issue()), quality(), before, after))
+
+    def test_review_distinguishes_plot_text_from_internal_captions(self):
+        message = block("screen_text", "今晚八点到车站。", 6, 8, screenType="message")
+        caption = block("screen_text", "我知道了。", 8, 10, screenType="subtitle")
+        self.assertIsNone(processing._review_acceptance_reason(quality(issue()), quality(),
+                                                             script(message, caption), script(message)))
+        self.assertEqual(processing._review_acceptance_reason(quality(issue()), quality(),
+                                                              script(message, caption), script(caption)),
+                         "lost_visual_content")
+
     def test_no_op_and_cosmetic_edits_do_not_count_as_repairs(self):
         q = quality(issue())
         self.assertEqual(processing._review_acceptance_reason(q, q, {}, {}), "no_effective_change")
