@@ -45,6 +45,8 @@ window.APP_CONFIG = {
 
   statusText: {
     queued: "待开始",
+    paused: "已暂停",
+    deleting: "正在删除",
     running: "进行中",
     review: "已完成（有检查提示）",
     done: "已完成",
@@ -54,6 +56,7 @@ window.APP_CONFIG = {
   stageText: {
     uploading: "上传视频",
     queued: "等待处理",
+    paused: "已暂停",
     probing: "读取视频信息",
     source_download_wait: "等待读取原视频",
     source_download: "读取原视频",

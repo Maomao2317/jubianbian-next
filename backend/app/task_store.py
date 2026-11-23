@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sqlite3
 from typing import Any
 
 from .auth_store import db, now_iso
 from .config import REQUEST_ID
 from .errors import ArkError
-from .logging_setup import logger
+from .logging_setup import logger, safe_error_text
 from .media import default_batch_title, episode_from_filename, is_default_batch_title, title_with_episode
 from .script import apply_batch_character_continuity, normalize_script
-from .recognition_cache import restore_cached_scene_groups
+from .recognition_cache import cleanup_task_cache, restore_cached_scene_groups
+from .storage import delete_media
 from .pricing import task_rate
 
 # Read adapters keep the API shape independent from SQLite column names.
@@ -98,18 +100,61 @@ def get_task(task_id: str, user_id: str | None = None) -> dict[str, Any] | None:
     return row_to_task(row) if row else None
 
 
-def update_task(task_id: str, **values: Any) -> None:
+def update_task(task_id: str, *, respect_batch_pause: bool = False, **values: Any) -> str | None:
     if not values:
-        return
+        return None
     if "stage" in values:
         values.setdefault("stage_progress_percent", None)
     values["updated_at"] = now_iso()
     assignments = ", ".join(f"{key} = ?" for key in values)
     with db() as connection:
+        if respect_batch_pause:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            if batch_is_paused(connection, task_id):
+                values.update(status="paused", stage="paused")
         connection.execute(
             f"UPDATE tasks SET {assignments} WHERE id = ?",
             (*values.values(), task_id),
         )
+    return values.get("status")
+
+
+def batch_is_paused(connection: sqlite3.Connection, task_id: str) -> bool:
+    return connection.execute(
+        """SELECT 1 FROM tasks AS task JOIN tasks AS sibling
+           ON sibling.batch_id = task.batch_id AND sibling.user_id IS task.user_id
+           WHERE task.id = ? AND sibling.status = 'paused' LIMIT 1""",
+        (task_id,),
+    ).fetchone() is not None
+
+
+def finish_task_upload(
+    connection: sqlite3.Connection, task_id: str,
+    *, local_files: tuple[Path, Path] | None = None, expected_updated_at: str | None = None,
+    media: tuple[int, float] | None = None,
+) -> str | None:
+    """Publish an uploaded file without letting an in-flight upload undo a pause."""
+    media_fields = "file_size = ?, duration_sec = ?," if media is not None else ""
+    accepted = connection.execute(
+        f"""UPDATE tasks SET stage = status, {media_fields}
+           progress_percent = 4, error = NULL, updated_at = ?
+           WHERE id = ? AND status IN ('queued', 'paused') AND stage = 'uploading'
+           AND (? IS NULL OR updated_at = ?) RETURNING status""",
+        (*(media or ()), now_iso(), task_id, expected_updated_at, expected_updated_at),
+    ).fetchone()
+    if accepted is None:
+        return None
+    if local_files:
+        temporary, target = local_files
+        temporary.replace(target)
+    status = accepted["status"]
+    record_task_events(connection, [dict(
+        task_id=task_id, event_type="upload_reconciled" if expected_updated_at is not None else "uploaded",
+        status=status, stage=status, progress_percent=4,
+        message="视频上传完成，等待继续" if status == "paused" else "视频上传完成，已进入识别队列",
+    )])
+    return status
 
 
 def batch_character_context(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any] | None:
@@ -263,6 +308,35 @@ def finalize_ready_batches() -> None:
         ).fetchall()
     for batch in batches:
         reconcile_batch_character_continuity(batch["batch_id"])
+
+
+def purge_deleted_tasks(active_ids: set[str] | None = None, limit: int = 20) -> None:
+    """Remove media before dropping the row needed to retry a failed deletion."""
+    with db() as connection:
+        rows = connection.execute(
+            """SELECT id, stored_path FROM tasks WHERE status = 'deleting'
+               ORDER BY updated_at, id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    for row in rows:
+        task_id = row["id"]
+        if active_ids and task_id in active_ids:
+            continue
+        try:
+            cleanup_task_cache(task_id, strict=True)
+            delete_media(row["stored_path"])
+        except Exception as exc:
+            logger.warning("admin_task_purge_failed task_id=%s error=%s", task_id, safe_error_text(exc))
+            # Move failed rows to the back so other pending deletions can run.
+            with db() as connection:
+                connection.execute("UPDATE tasks SET updated_at = ? WHERE id = ? AND status = 'deleting'",
+                                   (now_iso(), task_id))
+            continue
+        with db() as connection:
+            deleted = connection.execute("DELETE FROM tasks WHERE id = ? AND status = 'deleting'", (task_id,)).rowcount
+            if deleted:
+                connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+                connection.execute("DELETE FROM task_recheck_snapshots WHERE task_id = ?", (task_id,))
 
 
 def record_task_event(

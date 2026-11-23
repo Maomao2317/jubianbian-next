@@ -1744,8 +1744,11 @@ async def process_task(task_id: str) -> None:
         review_required = quality_failure and isinstance(failure_candidate, dict) and has_screenplay_body(failure_candidate)
         attempts = int(row["attempts"] or 0) + 1
         if not quality_failure and attempts <= 2 and not _is_non_retryable_provider_error(exc):
-            update_task(task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts, error=f"第 {attempts} 次处理失败，正在自动重试：{_task_error_message(exc)}")
-            record_task_event(task_id, "retry", "处理失败，任务已自动重新排队", status="queued", stage="queued", progress_percent=4)
+            retry_status = update_task(
+                task_id, status="queued", stage="queued", progress_percent=4, attempts=attempts,
+                respect_batch_pause=bool(batch_id), error=f"第 {attempts} 次处理失败：{_task_error_message(exc)}",
+            ) or "queued"
+            record_task_event(task_id, "retry", "处理失败，等待重试", status=retry_status, stage=retry_status, progress_percent=4)
             logger.warning("task_retry_auto task_id=%s attempt=%s error=%s", task_id, attempts, safe_error_text(exc))
             return
         message = (

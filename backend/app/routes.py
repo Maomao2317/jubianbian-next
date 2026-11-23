@@ -100,6 +100,7 @@ def _required_languages(source_language: Any, output_language: Any) -> tuple[str
         raise HTTPException(status_code=400, detail="请选择生成剧本语言")
     return source, output
 from .task_store import (
+    finish_task_upload,
     get_task,
     record_task_event,
     record_task_events,
@@ -719,7 +720,9 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
         clauses.append("(t.title LIKE ? OR t.file_name LIKE ? OR u.email LIKE ? OR u.name LIKE ?)")
         value = f"%{keyword.strip()}%"
         params.extend([value, value, value, value])
-    if status != "all":
+    if status == "running":
+        clauses.append("t.status IN ('running', 'finalizing')")
+    elif status != "all":
         clauses.append("t.status = ?"); params.append(status)
     if user_id:
         clauses.append("t.user_id = ?"); params.append(user_id)
@@ -737,8 +740,10 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             COALESCE(NULLIF(MAX(t.batch_title), ''), MAX(t.title)) AS title,
             MAX(t.batch_title) AS batch_title,
             CASE
+                WHEN SUM(CASE WHEN t.status = 'deleting' THEN 1 ELSE 0 END) > 0 THEN 'deleting'
+                WHEN SUM(CASE WHEN t.status = 'paused' THEN 1 ELSE 0 END) > 0 THEN 'paused'
                 WHEN SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) > 0 THEN 'failed'
-                WHEN SUM(CASE WHEN t.status = 'running' THEN 1 ELSE 0 END) > 0 THEN 'running'
+                WHEN SUM(CASE WHEN t.status IN ('running', 'finalizing') THEN 1 ELSE 0 END) > 0 THEN 'running'
                 WHEN SUM(CASE WHEN t.status = 'review' THEN 1 ELSE 0 END) > 0 THEN 'review'
                 WHEN SUM(CASE WHEN t.status = 'queued' THEN 1 ELSE 0 END) > 0 THEN 'queued'
                 ELSE 'done'
@@ -762,7 +767,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS done_count,
             SUM(CASE WHEN t.status = 'review' THEN 1 ELSE 0 END) AS review_count,
             SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
-            SUM(CASE WHEN t.status = 'running' THEN 1 ELSE 0 END) AS running_count,
+            SUM(CASE WHEN t.status IN ('running', 'finalizing') THEN 1 ELSE 0 END) AS running_count,
             SUM(CASE WHEN t.status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
             GROUP_CONCAT(CASE WHEN t.status = 'review' THEN t.id END) AS review_task_ids,
             GROUP_CONCAT(CASE WHEN t.status = 'done' THEN t.id END) AS done_task_ids,
@@ -770,7 +775,7 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
         FROM tasks t
         LEFT JOIN users u ON u.id = t.user_id
         {where}
-        GROUP BY {group_key}
+        GROUP BY {group_key}, t.user_id
     """
     with db() as connection:
         total = connection.execute(f"SELECT COUNT(*) AS count FROM ({grouped_select}) grouped", params).fetchone()["count"]
@@ -779,18 +784,22 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             (*params, limit, offset),
         ).fetchall()
         group_ids = [row["group_id"] for row in rows]
-        usage_rows: dict[str, list[Any]] = {group_id: [] for group_id in group_ids}
+        usage_rows: dict[tuple[str, str | None], list[Any]] = {
+            (row["group_id"], row["user_id"]): [] for row in rows
+        }
         if group_ids:
             placeholders = ",".join("?" for _ in group_ids)
             all_usage_rows = connection.execute(
-                f"""SELECT COALESCE(batch_id, id) AS group_id, id, quality_json, provider,
+                f"""SELECT COALESCE(batch_id, id) AS group_id, user_id, id, status, stage, quality_json, provider,
                            model, input_tokens, output_tokens, total_tokens, api_cost_rmb
                     FROM tasks
                     WHERE COALESCE(batch_id, id) IN ({placeholders})""",
                 group_ids,
             ).fetchall()
             for usage_row in all_usage_rows:
-                usage_rows[usage_row["group_id"]].append(usage_row)
+                group = (usage_row["group_id"], usage_row["user_id"])
+                if group in usage_rows:
+                    usage_rows[group].append(usage_row)
     grouped: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -802,14 +811,22 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
             item["id"] = failed_task_id
         item["review_task_ids"] = review_ids
         item["done_task_ids"] = done_ids
-        item["file_name"] = f"{int(item.get('task_count') or 0)} 集"
         if is_default_batch_title(item.get("batch_title")) and item.get("created_at"):
             item["batch_title"] = default_batch_title(item["created_at"])
             if not item.get("title") or is_default_batch_title(item.get("title")):
                 item["title"] = item["batch_title"]
         item["points_used"] = round(float(item.get("points_used") or 0), 1)
         item["points_value_rmb"] = round(item["points_used"] / POINTS_PER_YUAN, 2)
-        task_usage_rows = usage_rows.get(row["group_id"], [])
+        task_usage_rows = usage_rows[(row["group_id"], row["user_id"])]
+        item["group_task_count"] = len(task_usage_rows)
+        item["file_name"] = f"{item['group_task_count']} 集"
+        item["paused_count"] = sum(task["status"] == "paused" for task in task_usage_rows)
+        item["can_pause"] = any(task["status"] == "queued" for task in task_usage_rows)
+        item["can_delete"] = not any(
+            task["status"] in {"running", "deleting"} or
+            task["stage"] == "uploading"
+            for task in task_usage_rows
+        )
         item["model_usage"] = _admin_model_usage(task_usage_rows)
         item["api_cost_rmb"] = round(sum(
             max(0.0, float(usage_row["api_cost_rmb"] or 0)) for usage_row in task_usage_rows
@@ -834,12 +851,65 @@ def admin_tasks(request: Request, keyword: str = "", status: str = "all", user_i
     return {"items": grouped, "total": int(total), "limit": limit, "offset": offset}
 
 
+def admin_control_task_group(request: Request, task_id: str, action: str) -> dict[str, Any]:
+    """Apply queue controls to the full owner-scoped group behind the admin row."""
+    admin = _require_admin(request)
+    if action not in {"pause", "resume", "delete"}:
+        raise HTTPException(status_code=404, detail="操作不存在")
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        anchor = connection.execute("SELECT user_id, batch_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if anchor is None:
+            if action == "delete":
+                return {"status": "deleted", "count": 0}
+            raise HTTPException(status_code=404, detail="任务不存在")
+        scope = "user_id IS ? AND batch_id = ?" if anchor["batch_id"] else "user_id IS ? AND id = ?"
+        scope_params = (anchor["user_id"], anchor["batch_id"] or task_id)
+        rows = connection.execute(f"SELECT id, status, stage, progress_percent FROM tasks WHERE {scope}",
+                                  scope_params).fetchall()
+        stamp = now_iso()
+        if action == "delete":
+            if any(row["status"] == "running" or row["stage"] == "uploading" for row in rows):
+                raise HTTPException(status_code=409, detail="仍有视频正在上传或识别，请暂停排队任务，等当前处理结束后再删除")
+            changed = connection.execute(
+                f"""UPDATE tasks SET status = 'deleting', stage = 'deleting', updated_at = ?
+                    WHERE {scope} AND status != 'deleting'""",
+                (stamp, *scope_params),
+            ).rowcount
+            status = "deleting"
+        else:
+            source, status = ("queued", "paused") if action == "pause" else ("paused", "queued")
+            affected = [row for row in rows if row["status"] == source]
+            changed = connection.execute(
+                f"""UPDATE tasks SET status = ?, stage = CASE WHEN stage = 'uploading' THEN stage ELSE ? END,
+                    updated_at = ? WHERE {scope} AND status = ?""",
+                (status, status, stamp, *scope_params, source),
+            ).rowcount
+            if not changed and not any(row["status"] == status for row in rows):
+                raise HTTPException(status_code=409, detail="该批次没有可以暂停或继续的排队任务")
+            record_task_events(connection, [
+                {"task_id": row["id"], "event_type": f"admin_task_{action}", "status": status,
+                 "stage": "uploading" if status == "queued" and row["stage"] == "uploading" else status,
+                 "progress_percent": row["progress_percent"], "message": "管理员已暂停" if action == "pause" else "管理员已恢复排队"}
+                for row in affected
+            ])
+        if changed:
+            connection.execute(
+                "INSERT INTO admin_audit_logs(admin_user_id, action, target_type, target_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (admin["id"], f"task_{action}", "batch" if anchor["batch_id"] else "task",
+                 anchor["batch_id"] or task_id, f"episodes={changed}", stamp),
+            )
+    return {"status": status, "count": changed}
+
+
 def admin_task_detail(request: Request, task_id: str) -> dict[str, Any]:
     """Return full task details and batch navigation to an administrator."""
     _require_admin(request)
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    if task["status"] == "deleting":
+        raise HTTPException(status_code=409, detail="正在删除该任务")
     task["events"] = task_events(task_id)
     snapshot = pending_recheck_snapshot(task_id)
     task["recheck"] = {
@@ -982,6 +1052,7 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
     clauses: list[str] = []
     params: list[Any] = [user["id"]]
     clauses.append("user_id = ?")
+    clauses.append("status != 'deleting'")
     if keyword.strip():
         clauses.append("(title LIKE ? OR file_name LIKE ?)")
         value = f"%{keyword.strip()}%"
@@ -1014,7 +1085,7 @@ def list_tasks(request: Request, keyword: str = "", status: str = "all") -> list
 
 def task_detail(request: Request, task_id: str) -> dict[str, Any]:
     task = get_task(task_id, current_user(request)["id"])
-    if not task:
+    if not task or task["status"] == "deleting":
         raise HTTPException(status_code=404, detail="任务不存在或已被删除")
     task["events"] = task_events(task_id)
     return user_task(task)
@@ -1228,7 +1299,7 @@ async def upload_task_media(request: Request, task_id: str) -> dict[str, Any]:
         # A lost PUT response can be retried after a worker has already
         # claimed/completed this episode. Never overwrite its source again.
         return {"taskId": task_id, "status": row["status"]}
-    if row["status"] != "queued" or row["stage"] != "uploading" or is_object_uri(row["stored_path"]):
+    if row["status"] not in {"queued", "paused"} or row["stage"] != "uploading" or is_object_uri(row["stored_path"]):
         raise HTTPException(status_code=409, detail="该任务当前不能上传")
     expected_size = int(row["file_size"] or 0)
     content_length = request.headers.get("content-length")
@@ -1246,24 +1317,22 @@ async def upload_task_media(request: Request, task_id: str) -> dict[str, Any]:
                 output.write(chunk)
         if size <= 0 or (expected_size and size != expected_size):
             raise HTTPException(status_code=400, detail="上传文件不完整，请重试")
-        current = task_row(task_id, user_id)
-        if not current or current["status"] != "queued" or current["stage"] != "uploading":
-            raise HTTPException(status_code=409, detail="上传任务已取消或状态已变化")
-        temporary.replace(target)
-        duration = await asyncio.to_thread(probe_duration, target)
+        duration = await asyncio.to_thread(probe_duration, temporary)
         if duration and duration > MAX_DURATION_SECONDS:
-            target.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"视频超过 {MAX_DURATION_MINUTES} 分钟")
-        update_task(task_id, file_size=size, duration_sec=duration or float(row["duration_sec"] or 0), stage="queued", progress_percent=4, error=None)
+        with db() as connection:
+            status = finish_task_upload(connection, task_id, local_files=(temporary, target),
+                                        media=(size, duration or float(row["duration_sec"] or 0)))
+            if status is None:
+                raise HTTPException(status_code=409, detail="上传任务已取消或状态已变化")
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
-    record_task_event(task_id, "uploaded", "视频上传完成，已进入识别队列", status="queued", stage="queued", progress_percent=4)
-    return {"taskId": task_id, "status": "queued"}
+    return {"taskId": task_id, "status": status}
 
 
 def _upload_already_accepted(row: sqlite3.Row | dict[str, Any]) -> bool:
-    return (row["status"] == "queued" and row["stage"] == "queued") or row["status"] in {"running", "done", "review"}
+    return row["stage"] != "uploading" and row["status"] in {"queued", "paused", "running", "finalizing", "done", "review"}
 
 
 async def complete_task_upload(request: Request, task_id: str) -> dict[str, Any]:
@@ -1274,7 +1343,7 @@ async def complete_task_upload(request: Request, task_id: str) -> dict[str, Any]
         raise HTTPException(status_code=404, detail="上传任务不存在")
     if _upload_already_accepted(row):
         return {"taskId": task_id, "status": row["status"]}
-    if row["status"] != "queued" or row["stage"] != "uploading" or not is_object_uri(row["stored_path"]):
+    if row["status"] not in {"queued", "paused"} or row["stage"] != "uploading" or not is_object_uri(row["stored_path"]):
         raise HTTPException(status_code=409, detail="该任务当前不能确认上传")
     info = await asyncio.to_thread(media_info, row["stored_path"])
     expected_size = int(row["file_size"] or 0)
@@ -1283,21 +1352,13 @@ async def complete_task_upload(request: Request, task_id: str) -> dict[str, Any]
     # A HEAD request can overlap an abort/expiry or a second confirmation.
     # Only the still-uploading reservation may transition into the queue.
     with db() as connection:
-        claimed = connection.execute(
-            "UPDATE tasks SET stage = 'queued', progress_percent = 4, error = NULL, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'queued' AND stage = 'uploading'",
-            (now_iso(), task_id, user_id),
-        ).rowcount
-        if claimed:
-            record_task_events(connection, [{
-                "task_id": task_id, "event_type": "uploaded", "message": "视频直传完成，已进入识别队列",
-                "status": "queued", "stage": "queued", "progress_percent": 4,
-            }])
-    if not claimed:
+        status = finish_task_upload(connection, task_id)
+    if status is None:
         current = task_row(task_id, user_id)
         if current and _upload_already_accepted(current):
             return {"taskId": task_id, "status": current["status"]}
         raise HTTPException(status_code=409, detail="上传任务已取消或状态已变化")
-    return {"taskId": task_id, "status": "queued"}
+    return {"taskId": task_id, "status": status}
 
 
 async def abort_task_upload(request: Request, task_id: str) -> dict[str, Any]:
@@ -1306,22 +1367,23 @@ async def abort_task_upload(request: Request, task_id: str) -> dict[str, Any]:
     row = task_row(task_id, user_id)
     if not row:
         raise HTTPException(status_code=404, detail="上传任务不存在")
-    if row["status"] != "queued" or row["stage"] != "uploading":
+    if row["status"] not in {"queued", "paused"} or row["stage"] != "uploading":
         raise HTTPException(status_code=409, detail="只有未完成上传可以取消")
     completed = now_iso()
     with db() as connection:
         claimed = connection.execute(
-            "UPDATE tasks SET status = 'failed', stage = 'failed', progress_percent = 100, error = ?, completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'queued' AND stage = 'uploading'",
+            "UPDATE tasks SET status = 'failed', stage = 'failed', progress_percent = 100, error = ?, completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status IN ('queued', 'paused') AND stage = 'uploading'",
             ("视频上传未完成，已退回本集积分", completed, completed, task_id, user_id),
         ).rowcount
-    if claimed != 1:
-        raise HTTPException(status_code=409, detail="上传状态已变化")
+        if claimed != 1:
+            raise HTTPException(status_code=409, detail="上传状态已变化")
+        _refund_task_once(task_id, user_id, int(row["credits_used"] or 0), connection=connection)
+        record_task_events(connection, [dict(task_id=task_id, event_type="upload_aborted",
+            message="视频上传失败，已退回本集积分", status="failed", stage="failed", progress_percent=100)])
     try:
         await asyncio.to_thread(delete_media, row["stored_path"])
     except Exception:
         logger.warning("upload_abort_delete_failed task_id=%s", task_id)
-    _refund_task_once(task_id, user_id, int(row["credits_used"] or 0))
-    record_task_event(task_id, "upload_aborted", "视频上传失败，已退回本集积分", status="failed", stage="failed", progress_percent=100)
     return {"taskId": task_id, "status": "failed"}
 
 
@@ -1526,6 +1588,8 @@ async def retry_task(request: Request, task_id: str, background: BackgroundTasks
 def delete_task(request: Request, task_id: str) -> Response:
     row = task_row(task_id, current_user(request)["id"])
     if not row:
+        return Response(status_code=204)
+    if row["status"] == "deleting":
         return Response(status_code=204)
     try:
         delete_media(row["stored_path"])

@@ -194,7 +194,7 @@ def _prune_local_proxies() -> None:
     try:
         with closing(sqlite3.connect(config.DB_PATH)) as connection:
             active = {cache_directory(row[0]).name for row in connection.execute(
-                "SELECT id FROM tasks WHERE status IN ('queued','running')")}
+                "SELECT id FROM tasks WHERE status IN ('queued','running','paused','deleting')")}
         root = config.DATA_DIR / "recognition-cache"
         for directory in root.iterdir() if root.exists() else []:
             if directory.name not in active:
@@ -207,7 +207,7 @@ def _prune_local_proxies() -> None:
         logger.warning("recognition_cache_prune_failed")
 
 
-def cleanup_task_cache(task_id: str) -> None:
+def cleanup_task_cache(task_id: str, *, strict: bool = False) -> None:
     """Used by normal task retention, with a strict guard against original keys."""
     from .storage import delete_media, _object_parts
     directory = cache_directory(task_id)
@@ -221,11 +221,16 @@ def cleanup_task_cache(task_id: str) -> None:
             if bucket == config.OBJECT_STORAGE_BUCKET and key.startswith(prefix) and len(filename) == 68 and filename.endswith(".mp4"):
                 int(filename[:-4], 16)
                 delete_media(uri)
-        except (OSError, ValueError, KeyError, TypeError):
+        except FileNotFoundError:
+            pass
+        except (ValueError, KeyError, TypeError):
             pass
         except Exception:
+            if strict:
+                raise
             logger.warning("recognition_cache_cleanup_failed kind=object_proxy")
-    shutil.rmtree(directory, ignore_errors=True)
+    if directory.exists():
+        shutil.rmtree(directory, ignore_errors=not strict)
 
 
 def recognition_cache(task_id: str, source_uri: str) -> RecognitionCache | None:

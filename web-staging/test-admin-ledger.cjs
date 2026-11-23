@@ -11,6 +11,9 @@ const node = selector => {
 };
 const calls = [];
 const userCalls = [], taskCalls = [];
+const controls = [];
+let confirmDelete = false;
+let pausedCount = 0;
 let overviewCalls = 0;
 const user = { id: "u", name: "测试用户<名称>", email: "user@example.test", credits: 128.4, totalUsed: 2, isActive: true };
 const summary = entryType => ({ by_type: Object.fromEntries([
@@ -24,6 +27,7 @@ const api = {
   getAdminUsers: async query => { userCalls.push(query); return { total: 1, items: [user] }; },
   getAdminTasks: async query => { taskCalls.push(query); return { total: 1, items: [{ ...user,
     title: "测试批次", status: "failed", task_count: 3, failed_count: 1, running_count: 1, queued_count: 1,
+    can_pause: true, can_delete: true, paused_count: pausedCount,
     file_name: "3 集", credits_used: 4, points_used: 20, points_value_rmb: 1.56,
     api_cost_rmb: 0.15, gross_profit_rmb: 1.41, gross_margin: 0.9038,
     model_mix_status: "lite_dominant", economics_status: "healthy",
@@ -35,8 +39,13 @@ const api = {
   getAdminRecharges: async query => { calls.push(query); return { total: 25, summary: summary(query.entry_type), items: [
     { entry_type: "consume", points_amount: -10, balance_after: 90, reason: "test", created_at: "2026-10-27" },
   ] }; },
+  controlAdminTaskGroup: async (id, action) => {
+    controls.push({ id, action });
+    pausedCount = action === "pause" ? 1 : 0;
+    return { status: action === "delete" ? "deleting" : "queued" };
+  },
 };
-const context = vm.createContext({ window: { AppAPI: api, addEventListener() {} },
+const context = vm.createContext({ window: { AppAPI: api, addEventListener() {}, confirm: () => confirmDelete },
   document: { querySelector: node, querySelectorAll: () => [],
     addEventListener: (event, handler) => { (handlers[event] ||= []).push(handler); } },
   location: { protocol: "http:" }, console, Intl, Date, setTimeout, clearTimeout });
@@ -114,7 +123,17 @@ const click = async (action, extra = {}) => {
     assert.match(html, /Lite.*2 次 · 1,234 Tokens · 约 ¥ 0\.0042.*Turbo.*1 次 · 600 Tokens · ¥ 0\.0030/s);
     assert.match(html, /2026-10-28/);
     assert.doesNotMatch(html, /测试用户<名称>/);
+    assert.equal(html.includes('data-control="pause"'), tab === "tasks");
   }
+  ui.state.adminTab = "tasks";
+  await click("admin-task-control", { id: "u", control: "pause" });
+  assert.match(node("#main").innerHTML, /data-control="resume"[^>]*>继续/);
+  await click("admin-task-control", { id: "u", control: "resume" });
+  await click("admin-task-control", { id: "u", control: "delete", count: "3" });
+  assert.deepEqual(controls.map(item => item.action), ["pause", "resume"]);
+  confirmDelete = true;
+  await click("admin-task-control", { id: "u", control: "delete", count: "3" });
+  assert.deepEqual(controls.at(-1), { id: "u", action: "delete" });
   ui.state.adminTaskPage = 9;
   await ui.renderAdmin();
   assert.equal(ui.state.adminTaskPage, 0);

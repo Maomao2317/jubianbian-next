@@ -13,7 +13,15 @@ from .logging_setup import logger, safe_error_text
 from .processing import _refund_task_once, process_task
 from .rechecks import restore_recheck_snapshot_with_connection
 from .storage import delete_media, media_info
-from .task_store import finalize_ready_batches, record_task_event, record_task_events, reconcile_batch_character_continuity
+from .task_store import (
+    batch_is_paused,
+    finalize_ready_batches,
+    finish_task_upload,
+    purge_deleted_tasks,
+    record_task_event,
+    record_task_events,
+    reconcile_batch_character_continuity,
+)
 
 
 def _claim_next_task(connection, active_users: Counter, last_user: str | None):
@@ -57,22 +65,8 @@ async def _accept_completed_upload(row) -> bool:
     if not info or int(info.get("size") or 0) != int(row["file_size"] or 0):
         return False
     with db() as connection:
-        claimed = connection.execute(
-            """UPDATE tasks SET stage = 'queued', progress_percent = 4, error = NULL,
-               updated_at = ? WHERE id = ? AND status = 'queued' AND stage = 'uploading'
-               AND updated_at = ?""",
-            (now_iso(), row["id"], row["updated_at"]),
-        ).rowcount
-        if claimed:
-            record_task_events(connection, [{
-                "task_id": row["id"],
-                "event_type": "upload_reconciled",
-                "message": "检测到视频已完整上传，任务已自动进入识别队列",
-                "status": "queued",
-                "stage": "queued",
-                "progress_percent": 4,
-            }])
-    return claimed == 1
+        return finish_task_upload(connection, row["id"],
+                                  expected_updated_at=row["updated_at"]) is not None
 
 
 async def _reconcile_completed_uploads() -> int:
@@ -80,7 +74,7 @@ async def _reconcile_completed_uploads() -> int:
         try:
             rows = connection.execute(
                 """SELECT id, stored_path, file_size, updated_at FROM tasks
-                   WHERE status = 'queued' AND stage = 'uploading' AND stored_path LIKE 's3://%'
+                   WHERE status IN ('queued', 'paused') AND stage = 'uploading' AND stored_path LIKE 's3://%'
                    ORDER BY created_at DESC LIMIT 200"""
             ).fetchall()
         except sqlite3.OperationalError as exc:
@@ -103,7 +97,7 @@ async def _expire_incomplete_uploads() -> None:
     with db() as connection:
         rows = connection.execute(
             """SELECT id, user_id, stored_path, file_size, credits_used, batch_id, updated_at
-               FROM tasks WHERE status = 'queued' AND stage = 'uploading' AND created_at < ?""",
+               FROM tasks WHERE status IN ('queued', 'paused') AND stage = 'uploading' AND created_at < ?""",
             (cutoff,),
         ).fetchall()
     for row in rows:
@@ -112,17 +106,18 @@ async def _expire_incomplete_uploads() -> None:
         completed = now_iso()
         with db() as connection:
             claimed = connection.execute(
-                "UPDATE tasks SET status = 'failed', stage = 'failed', progress_percent = 100, error = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued' AND stage = 'uploading'",
+                "UPDATE tasks SET status = 'failed', stage = 'failed', progress_percent = 100, error = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'paused') AND stage = 'uploading'",
                 ("视频上传超时，已退回本集积分", completed, completed, row["id"]),
             ).rowcount
-        if claimed != 1:
-            continue
+            if claimed != 1:
+                continue
+            _refund_task_once(row["id"], row["user_id"], int(row["credits_used"] or 0), connection=connection)
+            record_task_events(connection, [dict(task_id=row["id"], event_type="upload_expired",
+                message="视频上传超时，已退回本集积分", status="failed", stage="failed", progress_percent=100)])
         try:
             await asyncio.to_thread(delete_media, row["stored_path"])
         except Exception:
             logger.warning("upload_expiry_delete_failed task_id=%s", row["id"])
-        _refund_task_once(row["id"], row["user_id"], int(row["credits_used"] or 0))
-        record_task_event(row["id"], "upload_expired", "视频上传超时，已退回本集积分", status="failed", stage="failed", progress_percent=100)
         if row["batch_id"]:
             try:
                 await asyncio.to_thread(reconcile_batch_character_continuity, row["batch_id"])
@@ -137,6 +132,8 @@ def _recover_unexpected_task_exit(task_id: str, error: BaseException | None) -> 
     outcome = None
     task = None
     with db() as connection:
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         task = connection.execute(
             "SELECT * FROM tasks WHERE id = ?",
             (task_id,),
@@ -146,9 +143,12 @@ def _recover_unexpected_task_exit(task_id: str, error: BaseException | None) -> 
         stage = str(task["stage"] or "")
         attempts = int(task["attempts"] or 0)
         if stage in {"queued", "probing"} and attempts < 2:
+            retry_status = ("paused" if "batch_id" in task.keys() and task["batch_id"]
+                            and batch_is_paused(connection, task_id) else "queued")
             changed = connection.execute(
-                "UPDATE tasks SET status = 'queued', stage = 'queued', progress_percent = 4, attempts = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running' AND stage = ?",
-                (attempts + 1, retry_message, now_iso(), task_id, stage),
+                """UPDATE tasks SET status = ?, stage = ?, progress_percent = 4, attempts = ?, error = ?,
+                   updated_at = ? WHERE id = ? AND status = 'running' AND stage = ?""",
+                (retry_status, retry_status, attempts + 1, retry_message, now_iso(), task_id, stage),
             ).rowcount
             outcome = "retry" if changed == 1 else None
         elif restore_recheck_snapshot_with_connection(
@@ -175,7 +175,7 @@ def _recover_unexpected_task_exit(task_id: str, error: BaseException | None) -> 
                 outcome = "failed"
 
     if outcome == "retry":
-        record_task_event(task_id, "worker_recovered", retry_message, status="queued", stage="queued", progress_percent=4)
+        record_task_event(task_id, "worker_recovered", retry_message, status=retry_status, stage=retry_status, progress_percent=4)
         logger.warning("worker_task_recovered task_id=%s outcome=retry stage=%s error=%s", task_id, stage, detail)
     elif outcome == "restored":
         record_task_event(task_id, "worker_recovered", "复核处理意外中断，已恢复上次完成版本。", status="done", stage="done", progress_percent=100)
@@ -216,6 +216,7 @@ async def run_worker() -> None:
     last_user = None
     last_upload_cleanup = 0.0
     last_batch_finalization = float("-inf")
+    deletion_work: asyncio.Task | None = None
     while True:
         now = asyncio.get_running_loop().time()
         if not recovery_scan_complete:
@@ -258,6 +259,11 @@ async def run_worker() -> None:
                 await asyncio.to_thread(finalize_ready_batches)
             except Exception:
                 logger.exception("worker_batch_finalization_failed retry_in=5")
+            if deletion_work is None or deletion_work.done():
+                if deletion_work is not None and not deletion_work.cancelled() and deletion_work.exception():
+                    logger.error("worker_task_purge_failed", exc_info=deletion_work.exception())
+                active_ids = {task_id for task_id, _ in task_users.values()}
+                deletion_work = asyncio.create_task(asyncio.to_thread(purge_deleted_tasks, active_ids))
         if now - last_upload_cleanup >= 60:
             last_upload_cleanup = now
             try:

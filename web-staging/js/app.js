@@ -270,13 +270,31 @@
   }
 
   function adminTaskStatus(item) {
-    const labels = { done: "成功", review: "有检查提示", failed: "失败", running: "进行中", queued: "排队中" };
+    const labels = { done: "成功", review: "有检查提示", failed: "失败", running: "进行中", queued: "排队中",
+      paused: "已暂停", deleting: "正在删除", finalizing: "整理中" };
     const partial = item.status === "failed" && Number(item.failed_count) < Number(item.task_count);
     const label = partial ? "部分失败" : Object.hasOwn(labels, item.status) ? labels[item.status] : "状态未知";
     const tone = item.status === "done" ? "on" : item.status === "failed" ? "off" : "wait";
-    const counts = [["done_count", "完成"], ["running_count", "进行中"], ["queued_count", "排队"], ["review_count", "有检查提示"], ["failed_count", "失败"]];
+    const counts = [["done_count", "完成"], ["running_count", "进行中"], ["queued_count", "排队"],
+      ["paused_count", "暂停"], ["review_count", "有检查提示"], ["failed_count", "失败"]];
     const detail = Number(item.task_count) > 1 ? counts.filter(([key]) => Number(item[key]) > 0).map(([key, text]) => `${text} ${Number(item[key])}`).join(" · ") : "";
     return `<span class="admin-status ${tone}">${label}</span>${detail ? `<small class="admin-task-counts">${detail}</small>` : ""}`;
+  }
+
+  function adminTaskActions(item, reviewId, allowControls) {
+    if (item.status === "deleting") return "";
+    const id = escapeHtml(item.id);
+    const buttons = [`<button class="admin-action" data-action="admin-review" data-id="${escapeHtml(reviewId)}">查看详情</button>`];
+    if (item.status === "failed") {
+      buttons.push(`<button class="admin-action" data-action="admin-retry" data-id="${id}" title="重试失败任务通常会重新扣费，已有免费复核任务除外">重试</button>`);
+    }
+    if (allowControls) {
+      const pause = !item.paused_count;
+      const control = pause ? "pause" : "resume";
+      buttons.push(`<button class="admin-action" data-action="admin-task-control" data-control="${control}" data-id="${id}" ${pause && !item.can_pause ? "disabled" : ""} title="${pause ? "暂停尚未开始识别的集数" : "让暂停的集数重新排队"}">${pause ? "暂停" : "继续"}</button>`);
+      buttons.push(`<button class="admin-action admin-danger" data-action="admin-task-control" data-control="delete" data-id="${id}" data-count="${Number(item.group_task_count || item.task_count)}" ${item.can_delete ? "" : "disabled"} title="${item.can_delete ? "删除整批任务、视频和剧本" : "上传和识别结束后可删除"}">删除</button>`);
+    }
+    return buttons.join("");
   }
 
   function adminModelUsage(item) {
@@ -368,9 +386,9 @@
       } else if (tab === "credits") {
         body += `<div class="admin-panel recharge-ledger-panel"><div class="admin-panel-head"><div><h2>充值与积分流水</h2><p>充值按 1 元 = 12.8 积分入账；退费为积分退回，扣款为积分消费。为用户充值请前往“用户管理”。</p></div><span>${rechargePage.total} 笔流水</span></div><div class="ledger-legend" aria-label="流水类型说明">${["recharge", "refund", "consume", "grant", "adjustment"].map(ledgerBadge).join("")}<span class="ledger-legend-note">＋ 积分增加 / − 积分减少</span></div><div class="admin-toolbar recharge-toolbar"><input id="adminRechargeKeyword" aria-label="搜索用户账号或备注" value="${escapeHtml(state.adminRechargeKeyword)}" placeholder="搜索用户名称、账号或备注" /><select id="adminRechargeType" aria-label="流水类型"><option value="all">全部类型</option>${Object.entries(ledgerTypes).map(([key, value]) => `<option value="${key}" ${state.adminRechargeType === key ? "selected" : ""}>${value.symbol} ${value.label}</option>`).join("")}</select><label class="admin-date-label">开始日期<input id="adminRechargeFrom" aria-label="流水开始日期" title="开始日期" type="date" value="${state.adminRechargeFrom}" /></label><label class="admin-date-label">结束日期<input id="adminRechargeTo" aria-label="流水结束日期" title="结束日期" type="date" value="${state.adminRechargeTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-recharge-search">筛选</button><button class="admin-action" data-action="admin-recharge-reset">重置</button></div>${adminLedgerSummary(rechargePage.summary)}<div class="admin-table-wrap"><table><thead><tr><th>用户名称 / 账号</th><th>流水类型</th><th>充值金额（元）</th><th>积分变动</th><th>变动后余额</th><th>备注</th><th>时间</th></tr></thead><tbody>${rechargePage.items.map(adminLedgerRow).join("") || `<tr><td colspan="7">暂无匹配的流水，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-recharge-page", state.adminRechargePage, rechargePage.total, 10)}</div>`;
       } else if (tab === "tasks" || tab === "usage") {
-        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按批次汇总；默认 Lite 优先，质量检查提示不影响用户下载。</p></div><span>${tasks.total} 个批次</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" aria-label="搜索任务、用户名称或账号" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务、用户名称或账号" /><select id="adminTaskUser" aria-label="任务所属用户"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${escapeHtml(user.id)}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.name || "未命名用户")} · ${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus" aria-label="任务状态"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>有检查提示</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option></select><label class="admin-date-label">开始日期<input id="adminTaskFrom" type="date" aria-label="任务开始日期" title="开始日期" value="${state.adminTaskFrom}" /></label><label class="admin-date-label">结束日期<input id="adminTaskTo" type="date" aria-label="任务结束日期" title="结束日期" value="${state.adminTaskTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button><button class="admin-action" data-action="admin-task-reset">重置</button></div><div class="admin-table-wrap"><table class="admin-task-table"><thead><tr><th>任务 / 用户</th><th>状态</th><th>计费 / 模型</th><th>收益</th><th>时间 / 操作</th></tr></thead><tbody>${tasks.items.map(item => {
+        body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>${tab === "usage" ? "用量记录" : "任务管理"}</h2><p>按批次汇总；默认 Lite 优先，质量检查提示不影响用户下载。</p></div><span>${tasks.total} 个批次</span></div><div class="admin-toolbar"><input id="adminTaskKeyword" aria-label="搜索任务、用户名称或账号" value="${escapeHtml(state.adminTaskKeyword)}" placeholder="搜索任务、用户名称或账号" /><select id="adminTaskUser" aria-label="任务所属用户"><option value="">全部用户</option>${taskUsers.items.map(user => `<option value="${escapeHtml(user.id)}" ${state.adminTaskUser === user.id ? "selected" : ""}>${escapeHtml(user.name || "未命名用户")} · ${escapeHtml(user.email)}</option>`).join("")}</select><select id="adminTaskStatus" aria-label="任务状态"><option value="all" ${state.adminTaskStatus === "all" ? "selected" : ""}>全部状态</option><option value="done" ${state.adminTaskStatus === "done" ? "selected" : ""}>成功</option><option value="review" ${state.adminTaskStatus === "review" ? "selected" : ""}>有检查提示</option><option value="failed" ${state.adminTaskStatus === "failed" ? "selected" : ""}>失败</option><option value="running" ${state.adminTaskStatus === "running" ? "selected" : ""}>进行中</option><option value="queued" ${state.adminTaskStatus === "queued" ? "selected" : ""}>排队中</option><option value="paused" ${state.adminTaskStatus === "paused" ? "selected" : ""}>已暂停</option></select><label class="admin-date-label">开始日期<input id="adminTaskFrom" type="date" aria-label="任务开始日期" title="开始日期" value="${state.adminTaskFrom}" /></label><label class="admin-date-label">结束日期<input id="adminTaskTo" type="date" aria-label="任务结束日期" title="结束日期" value="${state.adminTaskTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-search">筛选</button><button class="admin-action" data-action="admin-task-reset">重置</button></div><div class="admin-table-wrap"><table class="admin-task-table"><thead><tr><th>任务 / 用户</th><th>状态</th><th>计费 / 模型</th><th>收益</th><th>时间 / 操作</th></tr></thead><tbody>${tasks.items.map(item => {
           const reviewId = (Array.isArray(item.review_task_ids) && item.review_task_ids[0]) || item.id;
-          const actions = `<button class="admin-action" data-action="admin-review" data-id="${escapeHtml(reviewId)}">查看详情</button>` + (item.status === "failed" ? `<button class="admin-action" data-action="admin-retry" data-id="${escapeHtml(item.id)}" title="重试失败任务通常会重新扣费，已有免费复核任务除外">重试</button>` : "");
+          const actions = adminTaskActions(item, reviewId, tab === "tasks");
           return `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(reviewId)}">${escapeHtml(item.title || item.id)}</button><small>${escapeHtml(item.file_name || "")}</small><span class="admin-task-user">${adminUserIdentity(item)}</span></td><td>${adminTaskStatus(item)}</td><td>${adminTaskBilling(item)}${adminModelUsage(item)}</td><td>${adminEconomics(item)}</td><td><span class="admin-task-time"><small>创建 ${formatDate(item.created_at)}</small><small>完成 ${item.completed_at ? formatDate(item.completed_at) : "—"}</small></span><span class="admin-task-actions">${actions}</span></td></tr>`;
         }).join("") || `<tr><td colspan="5">暂无匹配任务，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-page", state.adminTaskPage, tasks.total, 20)}</div>`;
       } else {
@@ -531,7 +549,7 @@
     const running = group.tasks.filter((task) => task.status === "running").length;
     const failed = group.tasks.filter((task) => task.status === "failed").length;
     const expanded = Boolean(state.expandedBatches[group.id]);
-    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    const status = group.tasks.some(task => task.status === "paused") ? "已暂停" : failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     return `<div class="batch-group ${expanded ? "is-expanded" : ""}"><button class="batch-row" type="button" data-action="toggle-batch" data-id="${group.id}" aria-expanded="${expanded}"><span class="batch-chevron">${expanded ? "⌄" : "›"}</span><span class="batch-main"><strong>${escapeHtml(group.title)}</strong><small>${group.tasks.length} 集 · 已完成 ${done} 集${running ? ` · 进行中 ${running} 集` : ""}</small></span><span class="batch-status ${failed ? "failed" : done === group.tasks.length ? "done" : "pending"}">${status}</span></button>${expanded ? `<div class="batch-children">${group.tasks.map(taskRow).join("")}</div>` : ""}</div>`;
   }
 
@@ -553,8 +571,8 @@
     const failed = group.tasks.filter((task) => task.status === "failed").length;
     const expanded = Boolean(state.expandedBatches[group.id]);
     const remaining = group.tasks.reduce((sum, task) => !["queued", "running"].includes(task.status) ? sum : sum + Number(task.estimatedMinutes || 1) * Math.max(0.05, 1 - Number(task.progressPercent || 0) / 100), 0);
-    const eta = remaining ? formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8)))) : failed ? "请检查失败任务" : "已完成";
-    const status = failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
+    const eta = remaining ? formatEta(Math.ceil(remaining / Math.max(1, Number(state.queue.workerConcurrency || 8)))) : group.tasks.some(task => task.status === "paused") ? "等待继续" : failed ? "请检查失败任务" : "已完成";
+    const status = group.tasks.some(task => task.status === "paused") ? "已暂停" : failed ? "部分失败" : done === group.tasks.length ? "已完成" : running ? "进行中" : "待开始";
     const downloads = `<span class="batch-downloads">${done ? `<button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="md">下载 MD</button><button class="row-link" type="button" data-action="download-batch" data-id="${group.id}" data-format="txt">下载 TXT</button>` : ""}</span>`;
     const percent = group.tasks.length ? Math.round(group.tasks.reduce((sum, task) => sum + (task.status === "failed" ? 0 : isCompletedTask(task) ? 100 : Number(task.progressPercent || 0)), 0) / group.tasks.length) : 0;
     const compressionSummary = `${compressing ? ` · 压缩中 ${compressing} 集` : ""}${compressionQueued ? ` · 等待压缩 ${compressionQueued} 集` : ""}`;
@@ -1597,6 +1615,26 @@
     }
     if (action === "admin-retry") {
       try { await api.retryAdminTask(id); state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; toast("任务已重新排队"); await renderAdmin(); } catch (error) { toast(error.message || "任务重试失败", "error"); }
+      return;
+    }
+    if (action === "admin-task-control") {
+      const control = actionElement.dataset.control;
+      const count = Number(actionElement.dataset.count) || 1;
+      if (control === "delete" && !window.confirm(`确定永久删除这 ${count} 集任务及其视频和剧本？删除后无法恢复。`)) return;
+      actionElement.disabled = true;
+      try {
+        const result = await api.controlAdminTaskGroup(id, control);
+        state.adminOverviewCache = null;
+        state.adminOverviewCachedAt = 0;
+        toast(control === "delete" ? (result.status === "deleted" ? "任务已删除" : "正在删除任务、视频和剧本")
+          : control === "pause" ? "已暂停排队中的集数" : "暂停的集数已重新排队");
+        if (control === "delete") state.adminTaskPage = 0;
+        await renderAdmin();
+      } catch (error) {
+        toast(error.message || "任务操作失败", "error");
+      } finally {
+        actionElement.disabled = false;
+      }
       return;
     }
     if (action === "admin-review") {

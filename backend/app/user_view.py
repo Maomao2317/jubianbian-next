@@ -54,6 +54,7 @@ STAGE_MESSAGES = {
     "reviewing": "正在核对台词和画面内容", "merging": "正在整理剧本内容",
     "exporting": "正在生成下载文件", "done": "处理完成，剧本可下载",
     "batch_finalizing": "正在统一批次人物名称",
+    "paused": "任务已暂停，等待管理员继续",
     "review": "处理完成，剧本可下载；内容检查提示见详情底部", "failed": "本次处理未完成，请查看任务详情",
 }
 
@@ -82,7 +83,7 @@ def user_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for event in events:
         raw_status = event.get("status")
         status = "failed" if raw_status == "quality_blocked" else "done" if raw_status == "review" else raw_status
-        status = status if status in {"queued", "running", "done", "failed"} else "running"
+        status = status if status in {"queued", "running", "done", "failed", "paused"} else "running"
         stage = event.get("stage")
         if stage == "quality_blocked":
             stage = "failed"
@@ -123,7 +124,7 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
     result = {key: value for key, value in task.items() if key in fields}
     internal_status = task.get("status")
     status = "done" if internal_status == "review" else internal_status
-    result["status"] = status if status in {"queued", "running", "done", "failed"} else "running"
+    result["status"] = status if status in {"queued", "running", "done", "failed", "paused"} else "running"
     quality_blocked = task.get("status") == "failed" and task.get("stage") == "quality_blocked"
     if quality_blocked:
         # This is an internal gate/audit state. Customers only need the public
@@ -132,6 +133,8 @@ def user_task(task: dict[str, Any]) -> dict[str, Any]:
         result["stage"] = "failed"
     elif task.get("stage") == "review":
         result["stage"] = "done"
+    elif status == "paused":
+        result["stage"] = "paused"
     elif task.get("stage") not in STAGE_MESSAGES:
         result["stage"] = {"queued": "queued", "done": "done", "failed": "failed"}.get(
             result["status"], "reviewing"

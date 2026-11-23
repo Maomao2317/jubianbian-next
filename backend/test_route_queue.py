@@ -54,6 +54,80 @@ class RouteQueueTests(unittest.TestCase):
             row = c.execute("SELECT delivery_json FROM tasks WHERE id = 'task'").fetchone()
         self.assertIsNone(row["delivery_json"])
 
+    def seed_control_group(self):
+        self.seed("done")
+        stamp = auth_store.now_iso()
+        with auth_store.db() as c:
+            c.execute("UPDATE tasks SET batch_id = 'batch', stored_path = ? WHERE id = 'task'",
+                      (str(self.root / "done.mp4"),))
+            for task_id, owner, stage in (("queued", "owner", "queued"), ("upload", "owner", "uploading"),
+                                          ("outside", "other", "queued")):
+                c.execute(
+                    """INSERT INTO tasks(id,user_id,title,file_name,stored_path,status,stage,
+                       file_size,created_at,updated_at,batch_id)
+                       VALUES (?,?,'Episode','1.mp4',?,'queued',?,4,?,?,'batch')""",
+                    (task_id, owner, str(self.root / f"{task_id}.mp4"), stage, stamp, stamp),
+                )
+
+    def test_admin_pause_holds_ready_and_in_flight_uploads_until_resume(self):
+        self.seed_control_group()
+        paused = routes.admin_control_task_group(None, "task", "pause")
+        self.assertEqual(paused, {"status": "paused", "count": 2})
+        self.assertEqual(task_store.update_task("task", status="queued", stage="queued", respect_batch_pause=True),
+                         "paused")
+        task_store.update_task("task", status="done", stage="done")
+        with auth_store.db() as c:
+            self.assertEqual(task_store.finish_task_upload(c, "upload"), "paused")
+        with auth_store.db() as c:
+            self.assertEqual(worker._claim_next_task(c, Counter(), None), ("outside", "other"))
+        with auth_store.db() as c:
+            self.assertIsNone(worker._claim_next_task(c, Counter(), None))
+        self.assertEqual(routes.task_detail(None, "queued")["status"], "paused")
+        self.assertEqual(routes.admin_control_task_group(None, "task", "resume"),
+                         {"status": "queued", "count": 2})
+        with auth_store.db() as c:
+            self.assertEqual(worker._claim_next_task(c, Counter(), None), ("queued", "owner"))
+            self.assertEqual(c.execute("SELECT credits FROM users").fetchone()[0], 100)
+
+    def test_admin_delete_hides_entire_group_and_retries_failed_media_cleanup(self):
+        self.seed_control_group()
+        with self.assertRaises(HTTPException) as blocked:
+            routes.admin_control_task_group(None, "task", "delete")
+        self.assertEqual(blocked.exception.status_code, 409)
+        with auth_store.db() as c:
+            self.assertEqual(task_store.finish_task_upload(c, "upload"), "queued")
+        for filename in ("done.mp4", "queued.mp4", "upload.mp4", "outside.mp4"):
+            (self.root / filename).write_bytes(b"test")
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "model_initial.json").write_text("{}", encoding="utf-8")
+        task_store.record_task_event("task", "completed")
+        self.assertEqual(routes.admin_control_task_group(None, "task", "delete")["count"], 3)
+        self.assertEqual(routes.list_tasks(None), [])
+        with self.assertRaises(HTTPException):
+            routes.download_batch(None, "batch", fmt="md")
+        with patch("app.recognition_cache.cache_directory", return_value=cache):
+            with patch.object(task_store, "delete_media", side_effect=OSError("fixture failure")):
+                task_store.purge_deleted_tasks()
+            self.assertEqual(task_store.task_row("task")["status"], "deleting")
+            task_store.purge_deleted_tasks()
+        self.assertFalse(cache.exists())
+        for task_id, filename in (("task", "done.mp4"), ("queued", "queued.mp4"), ("upload", "upload.mp4")):
+            self.assertIsNone(task_store.task_row(task_id))
+            self.assertFalse((self.root / filename).exists())
+        self.assertTrue((self.root / "outside.mp4").exists())
+        self.assertEqual(task_store.task_events("task"), [])
+        self.assertEqual(routes.admin_control_task_group(None, "task", "delete")["status"], "deleted")
+
+    def test_non_admin_cannot_control_tasks(self):
+        self.seed("queued")
+        with patch.object(routes, "current_user", return_value={"id": "owner", "role": "user"}):
+            for action in ("pause", "resume", "delete"):
+                with self.assertRaises(HTTPException) as denied:
+                    routes.admin_control_task_group(None, "task", action)
+                self.assertEqual(denied.exception.status_code, 403)
+        self.assertEqual(task_store.task_row("task")["status"], "queued")
+
     def test_legacy_single_upload_is_only_started_by_worker(self):
         background = BackgroundTasks()
         result = asyncio.run(routes.create_task(None, background,
