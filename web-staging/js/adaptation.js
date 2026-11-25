@@ -45,7 +45,11 @@
     return scenes.map((scene, index) => [`${episode}-${index + 1} ${scene.setting}`,
       ...scene.blocks.map(block => block.speaker_id ? `${names.get(block.speaker_id)}：${block.text}` : `△ ${block.text}`)].join("\n")).join("\n\n");
   }
-  function currentSource() { return project.sources.find(item => item.id === selected) || project.sources[0]; }
+  function currentSource() {
+    return project.sources.find(item => item.id === selected)
+      || project.sources.find(item => item.text.includes("\n"))
+      || project.sources[0];
+  }
   function renderSource(p) {
     const source = currentSource();
     const hint = source.start_sec == null ? "" : ` · 原片约 ${Math.floor(source.start_sec / 60)}:${String(Math.floor(source.start_sec % 60)).padStart(2, "0")}`;

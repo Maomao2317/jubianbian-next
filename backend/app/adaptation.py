@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import config, glm_provider, providers
 from .errors import ArkError
+from .logging_setup import logger
 from .resource_limits import capacity
 
 PROMPT_VERSION = "adaptation-v1"
@@ -216,9 +217,13 @@ def _ark_schema(schema: dict) -> dict:
             return node
         if "$ref" in node:
             return expand(definitions[node["$ref"].split("/")[-1]])
-        return {key: expand(value) for key, value in node.items()
-                if key not in {"$defs", "title", "minLength", "maxLength", "minItems",
-                               "maxItems", "pattern", "minimum", "maximum"}}
+        ignored = {"$defs", "title", "minLength", "maxLength", "minItems",
+                   "maxItems", "pattern", "minimum", "maximum"}
+        return {
+            key: ({field: expand(shape) for field, shape in value.items()}
+                  if key == "properties" else expand(value))
+            for key, value in node.items() if key not in ignored
+        }
 
     return expand(schema)
 
@@ -260,7 +265,13 @@ def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str,
             "provider": provider, "model": model, "promptVersion": PROMPT_VERSION,
             "inputTokens": usage.get("input_tokens"), "outputTokens": usage.get("output_tokens"),
         }
-    except ValidationError:
+    except ValidationError as exc:
+        logger.warning("adaptation_contract_error kind=%s provider=%s model=%s errors=%s",
+                       kind, provider, model,
+                       [(item["type"], item["loc"][:2]) for item in exc.errors(
+                           include_url=False, include_context=False, include_input=False)][:6])
         raise AdaptationError("模型没有返回完整、可校验的结果，请重试。") from None
-    except ArkError:
+    except ArkError as exc:
+        logger.warning("adaptation_provider_error kind=%s provider=%s model=%s status=%s",
+                       kind, provider, model, exc.status_code)
         raise AdaptationError("模型暂未完成请求，请稍后重试。") from None

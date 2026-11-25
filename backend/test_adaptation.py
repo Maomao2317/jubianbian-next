@@ -146,6 +146,13 @@ class AdaptationTests(unittest.TestCase):
         with self.assertRaises(ad.AdaptationError):
             ad.validate_plan(plan, ad.split_script(SOURCE), 2)
 
+    def test_provider_schema_keeps_fields_named_like_schema_annotations(self):
+        schema = ad._ark_schema(ad.Plan.model_json_schema())
+        self.assertIn("title", schema["properties"])
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertIn("original_name", schema["properties"]["cast"]["items"]["properties"])
+        self.assertNotIn("$defs", schema)
+
     def test_uploaded_docx_preserves_paragraphs_and_runs(self):
         data = io.BytesIO()
         with zipfile.ZipFile(data, "w") as doc:
