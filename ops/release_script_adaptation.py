@@ -21,8 +21,8 @@ import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
 
-BASELINE = "7d17eb818658008cce829381e16686855ff96953"
-BASE_BUILD = "visual-review-20261123-7d17eb8"
+BASELINE = "b9146f1215878d42953a848bca776bf3062f0ce2"
+BASE_BUILD = "script-adaptation-20261125-b9146f1"
 REF = "codex/script-adaptation-staging"
 BUILD_PREFIX = "script-adaptation-20261125-"
 PROJECT = "jubianbian-staging"
@@ -39,10 +39,9 @@ APP_FILES = [
     "web-staging/js/api.js",
     "web-staging/js/adaptation.js",
 ]
-ADDED_RUNTIME_FILES = {"backend/app/adaptation.py", "backend/app/adaptation_routes.py",
-                       "web-staging/js/adaptation.js"}
 SMOKE = "backend/adaptation_smoke.py"
-ALLOWED = set(APP_FILES) | {"backend/test_adaptation.py", "ops/release_script_adaptation.py", SMOKE}
+ALLOWED = set(APP_FILES) | {"backend/test_adaptation.py", "web-staging/test-adaptation-feedback.cjs",
+                            "ops/release_script_adaptation.py", SMOKE}
 
 
 def image_id(image):
@@ -88,7 +87,7 @@ def verify_config(old, new, image, build):
 def prepare(commit, build, base):
     fetch_revision(commit)
     changed = set(common.git("diff", "--name-only", BASELINE, commit).decode().splitlines())
-    assert changed == ALLOWED, "Unexpected release files: " + str(changed.symmetric_difference(ALLOWED))
+    assert changed and changed <= ALLOWED, "Unexpected release files: " + str(changed - ALLOWED)
 
     staging_before = common.fingerprint(PROJECT)
     production_before = common.fingerprint(PROTECTED_PROJECT)
@@ -99,7 +98,7 @@ def prepare(commit, build, base):
     common.health(PORT, SITE, BASE_BUILD)
     common.verify_files(PROJECT, PORT, {
         path: common.digest(common.git("show", BASELINE + ":" + path))
-        for path in APP_FILES if path not in ADDED_RUNTIME_FILES
+        for path in APP_FILES
     })
 
     checks = test_files(commit)
@@ -204,7 +203,7 @@ def deploy(commit, build, base):
     assert old_env["JBB_ENVIRONMENT"] == SITE and old_env["JBB_BUILD_VERSION"] == BASE_BUILD
     files = before["Config"]["Labels"]["com.docker.compose.project.config_files"].split(",")
     assert all(Path(path).parent == root for path in files), "Unexpected staging Compose path"
-    overlay = root / "release-script-adaptation.yml"
+    overlay = root / f"release-{build}.yml"
     assert str(overlay) not in files, "Script-adaptation release overlay is already active"
     compose = common.compose_args(PROJECT, root, files)
     new_compose = common.compose_args(PROJECT, root, files + [str(overlay)])

@@ -146,6 +146,47 @@ class AdaptationTests(unittest.TestCase):
         with self.assertRaises(ad.AdaptationError):
             ad.validate_plan(plan, ad.split_script(SOURCE), 2)
 
+    def test_preview_repairs_unregistered_speaker_with_original_dialogue_intact(self):
+        new_cast = {"id": "C2", "original_name": "伙计", "name": "伙计", "role": "商号伙计"}
+        blocks = SCENE["blocks"] + [{"speaker_id": "C2", "text": "老板回来了。"}]
+        raw = {"source_id": "S2", "scene": {**SCENE, "blocks": blocks},
+               "cast": CAST, "decisions": ["保留账册"], "questions": []}
+        original = ad.Preview.model_validate(raw)
+        repair = ad.PreviewRepair.model_validate({
+            "cast_additions": [new_cast], "corrections": [{"block": 3, "speaker_id": "C2"}], "questions": [],
+        })
+        choice = ("ark", "test-model")
+        context = {"source": {"id": "S2", "text": SOURCE}}
+        with patch.object(ad, "generate", side_effect=[
+            (original, {"inputTokens": 40, "outputTokens": 30}),
+            (repair, {"inputTokens": 70, "outputTokens": 35}),
+        ]) as mocked:
+            result, usage = ad.generate_preview(context, choice)
+        self.assertEqual(result.scene.blocks, original.scene.blocks)
+        self.assertEqual(result.cast[-1].name, "伙计")
+        self.assertEqual(mocked.call_args.args[0], "preview_repair")
+        self.assertEqual(mocked.call_args.args[1]["unregistered_speaker_blocks"], [3])
+        self.assertEqual(usage, {"inputTokens": 110, "outputTokens": 65, "repairAttempts": 1})
+
+        removed = repair.model_copy(update={"corrections": [
+            ad.SpeakerCorrection(block=2, speaker_id="C2"),
+        ]})
+        with patch.object(ad, "generate", side_effect=[(original, {}), (removed, {})]) as mocked:
+            with self.assertRaises(ad.AdaptationError):
+                ad.generate_preview(context, choice)
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_progress_discloses_job_only_to_owner(self):
+        project = self.create(source_text=SOURCE)
+        job = routes.JobInput(kind="preview", revision=project["revision"], source_id="S2")
+        with patch.object(ad, "model_choice", return_value=("ark", "test-model")):
+            routes.start_job(project["id"], None, job, BackgroundTasks())
+        self.assertEqual(routes.get_progress(project["id"], None), {"job": "preview"})
+        self.current_user.return_value = {"id": "other"}
+        with self.assertRaises(HTTPException) as error:
+            routes.get_progress(project["id"], None)
+        self.assertEqual(error.exception.status_code, 404)
+
     def test_provider_schema_keeps_fields_named_like_schema_annotations(self):
         schema = ad._ark_schema(ad.Plan.model_json_schema())
         self.assertIn("title", schema["properties"])

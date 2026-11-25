@@ -13,7 +13,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v1"
+PROMPT_VERSION = "adaptation-v2"
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
 EPISODE_HEADING = re.compile(r"(?m)^\s{0,4}(?:#{1,6}\s+)?(?:第\s*[零〇一二两三四五六七八九十百\d]+\s*[集话]|(?:EP(?:ISODE)?\s*)\d+)(?:\s|[：:、.\-]|$)[^\n]*", re.I)
@@ -55,6 +55,17 @@ class Preview(Contract):
     cast: list[Character] = Field(min_length=1, max_length=18)
     scene: AdaptedScene
     decisions: list[str] = Field(min_length=1, max_length=8)
+    questions: list[str] = Field(max_length=6)
+
+
+class SpeakerCorrection(Contract):
+    block: int = Field(ge=1, le=70)
+    speaker_id: str = Field(pattern=r"^C[1-9][0-9]*$")
+
+
+class PreviewRepair(Contract):
+    cast_additions: list[Character] = Field(max_length=18)
+    corrections: list[SpeakerCorrection] = Field(min_length=1, max_length=70)
     questions: list[str] = Field(max_length=6)
 
 
@@ -183,7 +194,14 @@ SYSTEM = (
 
 INSTRUCTIONS = {
     "preview": "用给定的一场戏试改。提供可逐句对照的改稿，用固定角色编号 C1、C2……。"
-               "举出具体改编决定，并把无法定夺且影响主线的事项写为待确认问题。source_id 必须等于提供的场次。",
+               "每位说话人都必须出现在 cast 中，包括一次性角色、画外音、旁白。"
+               "speaker_id 只能用 cast 中的 id，动作段才留空。身份不清楚时建立标为待核对的角色并写入 questions。"
+               "举出具体改编决定。source_id 必须等于提供的场次。",
+    "preview_repair": "只校准 unregistered_speaker_blocks 列出的段落，编号从 1 开始。"
+                      "为每个段落返回一个 corrections 条目与对应的说话人编号。"
+                      "已有角色能明确对应时复用编号，否则用 cast_additions 新增角色。"
+                      "无法确认姓名就用独立的待核对角色并在 questions 标出，不能猜成其他角色。"
+                      "只返回人物增补、段落编号和疑点，不生成正文。",
     "plan": "根据全部参考场次以及已审试改，制定完整改编大纲。按目标集数从 1 连续编号，每集写目标、冲突、"
             "转折、集尾和上下集衔接。每集用 source_ids 引用承担相应叙事作用的原稿场次。"
             "沿用试改人物的编号。剧本改编需要新角色时，也要固定编号并在人物表列出。",
@@ -228,11 +246,45 @@ def _ark_schema(schema: dict) -> dict:
     return expand(schema)
 
 
+def generate_preview(context: dict, choice: tuple[str, str]):
+    preview, usage = generate("preview", context, Preview, choice)
+    source_id = context["source"]["id"]
+    if preview.source_id != source_id:
+        raise AdaptationError("试改没有对齐选中的原稿场次，请重试。")
+    cast_ids = validate_cast(preview.cast)
+    invalid = {index for index, block in enumerate(preview.scene.blocks)
+               if block.speaker_id and block.speaker_id not in cast_ids}
+    if not invalid:
+        return preview, usage
+
+    repair, retry_usage = generate("preview_repair", {
+        "source": context["source"], "prior_preview": preview.model_dump(),
+        "unregistered_speaker_blocks": sorted(index + 1 for index in invalid),
+    }, PreviewRepair, choice)
+    mapping = {item.block - 1: item.speaker_id for item in repair.corrections}
+    if len(mapping) != len(repair.corrections) or set(mapping) != invalid:
+        raise AdaptationError("试改稿的说话人未能校准。请检查原稿角色标注后重试。")
+    cast = preview.cast + repair.cast_additions
+    if len(cast) > 18:
+        raise AdaptationError("这一场的人物超过试改容量，请选一段较短的场次重试。")
+    blocks = [block.model_copy(update={"speaker_id": mapping[index]}) if index in mapping else block
+              for index, block in enumerate(preview.scene.blocks)]
+    scene = preview.scene.model_copy(update={"blocks": blocks})
+    validate_speakers([scene], validate_cast(cast))
+    questions = list(dict.fromkeys(preview.questions + repair.questions))[:6]
+    corrected = preview.model_copy(update={"cast": cast, "scene": scene, "questions": questions})
+    for key in ("inputTokens", "outputTokens"):
+        if usage.get(key) is not None or retry_usage.get(key) is not None:
+            usage[key] = (usage.get(key) or 0) + (retry_usage.get(key) or 0)
+    usage["repairAttempts"] = 1
+    return corrected, usage
+
+
 def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str, str]):
     provider, model = choice
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     schema = _ark_schema(contract.model_json_schema())
-    maximum = {"preview": 2600, "plan": 10000, "episode": 6500, "impact": 2200}[kind]
+    maximum = {"preview": 3400, "preview_repair": 2200, "plan": 10000, "episode": 6500, "impact": 2200}[kind]
     instruction = f"{SYSTEM}\n{INSTRUCTIONS[kind]}"
     try:
         if provider == "ark":

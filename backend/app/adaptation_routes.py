@@ -110,7 +110,7 @@ def _state(row: sqlite3.Row) -> dict:
 def _project(row: sqlite3.Row) -> dict:
     state = _state(row)
     if row["job_id"] and row["job_started"] < time.time() - LEASE_SECONDS:
-        state["error"] = "上次生成中断，可重新提交。"
+        state.update(error="上次生成中断，可重新提交。", errorKind=row["job_kind"])
         job = None
     else:
         job = row["job_kind"]
@@ -275,6 +275,15 @@ def get_project(project_id: str, request: Request):
         return _project(_get(conn, project_id, owner))
 
 
+@router.get("/{project_id}/progress")
+def get_progress(project_id: str, request: Request):
+    owner = current_user(request)["id"]
+    with closing(db()) as conn:
+        row = _get(conn, project_id, owner)
+        running = row["job_id"] and row["job_started"] >= time.time() - LEASE_SECONDS
+        return {"job": row["job_kind"] if running else None}
+
+
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: str, request: Request):
     owner = current_user(request)["id"]
@@ -355,7 +364,10 @@ def _job_context(state: dict, job: JobInput):
 
 def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
     try:
-        result, usage = ad.generate(job.kind, context, contract, model)
+        if job.kind == "preview":
+            result, usage = ad.generate_preview(context, model)
+        else:
+            result, usage = ad.generate(job.kind, context, contract, model)
         with closing(db()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _get(conn, project_id, owner)
@@ -363,9 +375,6 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                 return
             state = _state(row)
             if job.kind == "preview":
-                if result.source_id != job.source_id:
-                    raise ad.AdaptationError("试改没有对齐选中的原稿场次，请重试。")
-                ad.validate_speakers([result.scene], ad.validate_cast(result.cast))
                 state["preview"] = result.model_dump()
                 if not state.get("confirmed"):
                     state.pop("plan", None)
@@ -403,7 +412,7 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                                (project_id, owner, job_id)).fetchone()
             if row:
                 state = _state(row)
-                state["error"] = error
+                state.update(error=error, errorKind=job.kind)
                 _save(conn, row, state)
 
 
@@ -435,6 +444,7 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
             _fail("已达测试环境每日生成上限，请明天再试。", 429)
         job_id = uuid.uuid4().hex
         state.pop("error", None)
+        state.pop("errorKind", None)
         conn.execute("INSERT INTO adaptation_attempts VALUES(?,?)", (owner, now))
         conn.execute("UPDATE adaptations SET job_id=?,job_kind=?,job_started=?,state_json=?,updated_at=? WHERE id=?",
                      (job_id, body.kind, now, _dump(state), now_iso(), project_id))

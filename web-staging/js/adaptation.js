@@ -5,7 +5,9 @@
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[char]));
   const kinds = { preview: "正在试改这一场", plan: "正在整理分集大纲", episode: "正在写分集正文", impact: "正在核对受影响的集数" };
-  let availability, view = 0, timer, project, selected = "", busy = false;
+  let availability, view = 0, timer, project, selected = "", busy = false, planNotes = "";
+  const sourceDrafts = new Map();
+  const sourceText = value => value.replace(/\r\n?/g, "\n").trim();
 
   const idPath = () => "/" + encodeURIComponent(project.id);
   function leave() { view += 1; clearTimeout(timer); busy = false; }
@@ -50,6 +52,29 @@
       || project.sources.find(item => item.text.includes("\n"))
       || project.sources[0];
   }
+  function feedback(p, kind, id = "") {
+    const issue = p.error && (p.errorKind === kind || (!p.errorKind && kind === "preview"));
+    const running = p.job === kind;
+    const matches = kind === "preview" && p.preview?.source_id === id;
+    return `<div class="adapt-feedback" data-adapt-feedback="${kind}">
+      <p class="adapt-inline-error" role="alert" ${issue ? "" : "hidden"}>${issue ? esc(p.error) : ""}</p>
+      <p class="adapt-inline-status" role="status" ${running || matches && !issue ? "" : "hidden"}>${running ? esc(kinds[kind] + "，完成后会自动显示结果。") :
+        matches ? '试改已完成。 <a href="#adapt-preview" data-adapt="show-preview">查看试改稿</a>' : ""}</p>
+    </div>`;
+  }
+  function feedbackText(element, message, failed = false, isJob = false) {
+    const panel = element?.closest(".adapt-panel");
+    const target = isJob ? panel?.querySelector(`[data-adapt-feedback="${element.dataset.adapt}"]`) : null;
+    if (!target) {
+      if (failed) error(message);
+      return;
+    }
+    for (const node of target.querySelectorAll("p")) node.hidden = true;
+    if (!message) return;
+    const node = target.querySelector(failed ? ".adapt-inline-error" : ".adapt-inline-status");
+    node.textContent = message;
+    node.hidden = false;
+  }
   function renderSource(p) {
     const source = currentSource();
     const hint = source.start_sec == null ? "" : ` · 原片约 ${Math.floor(source.start_sec / 60)}:${String(Math.floor(source.start_sec % 60)).padStart(2, "0")}`;
@@ -58,23 +83,24 @@
       <label class="adapt-label">原稿场次 <select data-adapt-source>${sourceOptions(p.sources, source.id)}</select></label>
       <div class="adapt-note">${esc(source.label + hint)} ${source.task_id ? `<a href="#/task/${encodeURIComponent(source.task_id)}">查看平台原稿</a>` : ""}</div>
       ${p.plan ? `<pre>${esc(source.text)}</pre>` : `<form data-adapt-form="source" class="adapt-form">
-        <textarea name="text" rows="7" maxlength="12000" required aria-label="原稿修订副本">${esc(source.text)}</textarea>
+        <textarea name="text" rows="7" maxlength="12000" required aria-label="原稿修订副本">${esc(sourceDrafts.get(source.id) ?? source.text)}</textarea>
         ${source.originalText ? `<details><summary>查看导入时的原文</summary><pre>${esc(source.originalText)}</pre></details>` : ""}
         <div class="adapt-toolbar"><button class="secondary-btn" type="submit">保存原稿修订</button>
-          <button class="primary-btn" type="button" data-adapt="preview">试改选中场次</button></div>
+          <button class="primary-btn" type="button" data-adapt="preview">${p.job === "preview" ? "正在试改…" : "试改选中场次"}</button></div>
+        ${feedback(p, "preview", source.id)}
       </form>`}</section>`;
   }
   function renderPreview(p) {
     const preview = p.preview;
     if (!preview) return "";
     const original = p.sources.find(item => item.id === preview.source_id);
-    return `<section class="adapt-panel"><h2>2. 审阅这一场的改法</h2><div class="adapt-columns">
+    return `<section class="adapt-panel" id="adapt-preview"><h2 tabindex="-1">2. 审阅这一场的改法</h2><div class="adapt-columns">
       <div><h3>原稿 · ${esc(original.label)}</h3><pre>${esc(original.text)}</pre></div>
       <div><h3>试改稿</h3><pre>${esc(screenplay([preview.scene], preview.cast, 1))}</pre></div>
       </div><ul>${preview.decisions.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
       ${preview.questions.length ? `<div class="adapt-warnings"><strong>建议确认</strong><ul>${preview.questions.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
-      ${p.confirmed ? "" : `<label class="adapt-label">补充改编要求（选填）<textarea id="adapt-plan-notes" rows="2" maxlength="1000" placeholder="说明试改里哪些改法要保留或调整"></textarea></label>
-      <button class="primary-btn" data-adapt="plan" type="button">按这个方向生成分集大纲</button>`}</section>`;
+      ${p.confirmed ? "" : `<label class="adapt-label">补充改编要求（选填）<textarea id="adapt-plan-notes" rows="2" maxlength="1000" placeholder="说明试改里哪些改法要保留或调整">${esc(planNotes)}</textarea></label>
+      <button class="primary-btn" data-adapt="plan" type="button">按这个方向生成分集大纲</button>${feedback(p, "plan")}`}</section>`;
   }
   function lockRow(p, item = {}) {
     return `<div class="adapt-lock-row">
@@ -111,6 +137,7 @@
         <div class="adapt-toolbar"><button class="primary-btn" type="submit">${p.confirmed ? "保存大纲修改" : "确认大纲"}</button>
         ${p.planBeforeEdit ? '<button class="secondary-btn" type="button" data-adapt="impact">查找受影响的集数</button>' : ""}</div>
       </form>
+      ${feedback(p, "impact")}
       ${p.impact ? `<div class="adapt-warnings"><strong>大纲改动影响</strong>${p.impact.length ? `<ul>${p.impact.map(item =>
         `<li>第 ${item.number} 集 · ${esc(item.reason)}<br>建议 · ${esc(item.suggestion)}</li>`).join("")}</ul>` : "<p>本次没有找到可定位的影响，仍可按集核对。</p>"}</div>` : ""}
     </section>`;
@@ -141,6 +168,7 @@
         ${next <= p.episodeCount && !ready?.[1].locked ? `<button class="primary-btn" type="button" data-adapt="episode" data-number="${next}">${ready ? "更新" : "写"}第 ${next} 集</button>` : ""}
         ${outputs.length && !ready ? `<a class="secondary-btn" href="${esc(api.adaptationDownloadUrl(p.id))}">导出已写正文 · Markdown</a>` : ""}
       </div>
+      ${feedback(p, "episode")}
       ${ready ? '<p class="adapt-warnings">有正文需要按最新大纲核对，请从最早受影响的一集更新。已锁定集可手动解锁。</p>' : ""}
       ${outputs.map(([number, output]) => `<details class="adapt-episode" ${number === (ready?.[0] || outputs.at(-1)?.[0]) ? "open" : ""}>
         <summary>第 ${number} 集 ${output.locked ? "· 已锁定" : ""} ${output.stale ? "· 待更新" : ""}</summary>
@@ -165,26 +193,54 @@
         ${renderSource(p)}${renderPreview(p)}${renderPlan(p)}${renderOutputs(p)}
         <button class="secondary-btn adapt-delete" type="button" data-adapt="delete">删除此项目</button>
       </fieldset>`);
-    if (p.error) error(p.error);
-    if (p.job) {
-      const activeView = view;
-      timer = setTimeout(async () => {
-        try {
-          const next = await api.adaptation(idPath());
-          if (activeView !== view) return;
-          renderProject(next);
-        } catch (err) {
-          if (activeView === view) {
-            error(`${err.message}，可刷新页面查看任务状态。`);
-          }
+    if (p.error && !p.errorKind && p.plan) error(p.error);
+    if (p.job) poll(p.job);
+  }
+  function showPreview() {
+    const heading = main().querySelector("#adapt-preview h2");
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: "start" });
+  }
+  function poll(kind, failures = 0) {
+    const active = view;
+    timer = setTimeout(async () => {
+      if (active !== view) return;
+      const path = idPath();
+      try {
+        const status = await api.adaptation(path + "/progress");
+        if (active !== view) return;
+        const element = main().querySelector(`button[data-adapt="${kind}"]`);
+        if (status.job) {
+          if (failures) feedbackText(element, kinds[kind] + "，完成后会自动显示结果。", false, true);
+          poll(kind);
+          return;
         }
-      }, 3000);
-    }
+        const next = await api.adaptation(path);
+        if (active !== view) return;
+        renderProject(next);
+        if (kind === "preview" && next.preview && !next.error && !next.job) {
+          const button = main().querySelector('[data-adapt="preview"]');
+          const bounds = button?.getBoundingClientRect();
+          if (bounds && bounds.bottom >= 0 && bounds.top <= window.innerHeight) showPreview();
+        }
+      } catch (err) {
+        if (active !== view) return;
+        const element = main().querySelector(`button[data-adapt="${kind}"]`);
+        if (err.status === 401 || err.status === 403 || err.status === 404) {
+          feedbackText(element, err.message, true, true);
+          return;
+        }
+        feedbackText(element, "连接暂时中断，正在重查任务状态。", false, true);
+        poll(kind, failures + 1);
+      }
+    }, Math.min(15000, 2200 * (failures + 1)));
   }
   async function open(path) {
     const active = view;
     project = null;
     selected = "";
+    planNotes = "";
+    sourceDrafts.clear();
     main().innerHTML = layout("剧本改编", "", "<p role='status'>正在加载…</p>");
     try {
       const [page, taskId] = path.split("/").filter(Boolean);
@@ -200,16 +256,17 @@
       }
     } catch (err) { if (active === view) error(err.message); }
   }
-  async function action(work, element) {
+  async function action(work, element, pendingText = "", isJob = false) {
     if (busy) return;
     const active = view;
     busy = true;
     if (element) element.disabled = true;
+    feedbackText(element, pendingText, false, isJob);
     try {
       const next = await work();
       if (next && active === view) renderProject(next);
     } catch (err) {
-      if (active === view) error(err.message);
+      if (active === view) feedbackText(element, err.message, true, isJob);
     } finally {
       if (active === view) { busy = false; if (element?.isConnected) element.disabled = false; }
     }
@@ -249,9 +306,12 @@
           episode_count: Number(data.get("episode_count")) });
         if (form.isConnected) go("/" + created.id);
       } else if (kind === "source") {
-        return api.adaptation(idPath() + "/source", "PATCH", {
-          revision: project.revision, source_id: currentSource().id, text: data.get("text")
+        const id = currentSource().id;
+        const saved = await api.adaptation(idPath() + "/source", "PATCH", {
+          revision: project.revision, source_id: id, text: data.get("text")
         });
+        if (form.isConnected) sourceDrafts.delete(id);
+        return saved;
       } else if (kind === "episode") {
         const number = Number(form.dataset.number);
         const draft = {
@@ -267,6 +327,13 @@
         return api.adaptation(idPath() + "/episodes/" + number, "PUT", { revision: project.revision, draft });
       } else return api.adaptation(idPath() + "/plan", "PUT", planBody(form));
     }, event.submitter);
+  });
+  document.addEventListener("input", event => {
+    const node = event.target;
+    if (project && node.matches('[data-adapt-form="source"] textarea')) {
+      sourceDrafts.set(currentSource().id, node.value);
+    }
+    if (node.matches("#adapt-plan-notes")) planNotes = node.value;
   });
   document.addEventListener("change", event => {
     const node = event.target;
@@ -289,6 +356,7 @@
     const button = event.target.closest("[data-adapt]");
     if (!button || !project) return;
     const kind = button.dataset.adapt;
+    if (kind === "show-preview") { event.preventDefault(); showPreview(); return; }
     const episode = Number(button.dataset.number || 1);
     if (kind === "add-line") {
       const list = main().querySelector(".adapt-locks");
@@ -303,25 +371,46 @@
       if (form && JSON.stringify(planBody(form)) !== JSON.stringify({
         revision: project.revision, plan: project.plan, locks: project.locks
       })) {
-        error("请先保存大纲和关键台词的修改。"); return;
+        feedbackText(button, "请先保存大纲和关键台词的修改。", true, true); return;
       }
     }
-    if (kind === "preview") {
-      const sourceField = main().querySelector('[data-adapt-form="source"] textarea');
-      if (sourceField && sourceField.value.trim() !== currentSource().text) {
-        error("原稿有未保存的修订，请先保存，再试改。"); return;
-      }
+    const source = currentSource();
+    const sourceField = main().querySelector('[data-adapt-form="source"] textarea');
+    const isJob = kind in kinds;
+    const path = idPath();
+    const active = view;
+    if (kind === "preview" && sourceField && !sourceText(sourceField.value)) {
+      feedbackText(button, "原稿正文为空，请先填写要试改的内容。", true, true);
+      sourceField.focus();
+      return;
     }
     action(async () => {
       if (kind === "delete") { await api.adaptation(idPath(), "DELETE"); if (button.isConnected) go(""); return; }
       if (kind === "lock") return api.adaptation(idPath() + "/episodes/" + episode + "/lock", "PUT", {
         revision: project.revision, locked: !project.outputs[episode].locked
       });
-      const notes = kind === "plan" ? main().querySelector("#adapt-plan-notes")?.value || "" : "";
-      return api.adaptation(idPath() + "/jobs", "POST", {
-        kind, episode, source_id: currentSource().id, notes, revision: project.revision
-      });
-    }, button);
+      let revision = project.revision;
+      if (kind === "preview" && sourceField && sourceText(sourceField.value) !== sourceText(source.text)) {
+        const saved = await api.adaptation(path + "/source", "PATCH", {
+          revision, source_id: source.id, text: sourceField.value
+        });
+        if (active !== view) return;
+        sourceDrafts.delete(source.id);
+        project = saved;
+        revision = saved.revision;
+      }
+      try {
+        return await api.adaptation(path + "/jobs", "POST", {
+          kind, episode, source_id: source.id, notes: kind === "plan" ? planNotes : "", revision
+        });
+      } catch (err) {
+        if (active === view && (!err.status || err.status === 409)) {
+          const updated = await api.adaptation(path).catch(() => null);
+          if (updated && (updated.job || updated.revision !== revision)) return updated;
+        }
+        throw err;
+      }
+    }, button, isJob ? "正在提交…" : "", isJob);
   });
   window.AdaptationStudio = { open, leave, setAvailability(value) { availability = value; } };
 })();

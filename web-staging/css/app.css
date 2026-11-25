@@ -1626,3 +1626,17 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 @media (max-width: 620px) {
   .adapt-columns, .adapt-cast, .adapt-outlines, .adapt-draft-block { grid-template-columns: 1fr; }
 }
+
+.adapt-feedback { margin: 0; }
+.adapt-feedback p {
+  margin: .35rem 0 .65rem;
+  padding: .65rem .8rem;
+  border: 1px solid #b8d9ee;
+  border-radius: 8px;
+  color: #183f58;
+  background: #edf7ff;
+  line-height: 1.45;
+}
+.adapt-feedback .adapt-inline-error { color: #86292b; background: #fff0f0; border-color: #e9bdbe; }
+.adapt-feedback a { color: inherit; text-decoration: underline; font-weight: 650; }
+#adapt-preview h2 { scroll-margin-top: 90px; }
