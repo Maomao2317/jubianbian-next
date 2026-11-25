@@ -551,7 +551,7 @@ def _job_context(state: dict, job: JobInput):
                               item for item in state["analysis"]["directions"]
                               if item["id"] == state["selectedDirectionId"]
                           ), "reviewed_preview": state["preview"],
-                          "direction_notes": job.notes}, ad.Plan, sources
+                          "direction_notes": job.notes}, ad.PlanProposal, sources
 
     if job.kind == "impact":
         if not state.get("planBeforeEdit"):
@@ -669,12 +669,10 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                 state["previewUsed"] = True
                 state.pop("plan", None)
             elif job.kind == "plan":
-                ad.validate_plan(result, sources, state["episodeCount"])
-                if any(not any(character.id == previous["id"] and character.original_name == previous["original_name"]
-                                   and character.name == previous["name"] for character in result.cast)
-                       for previous in state["preview"]["cast"]):
-                    raise ad.AdaptationError("大纲没有沿用试改的人物编号和姓名，请重试。")
-                state["plan"] = result.model_dump()
+                preview_cast = [ad.Character.model_validate(item) for item in state["preview"]["cast"]]
+                plan = ad.plan_from_preview(result, preview_cast)
+                ad.validate_plan(plan, sources, state["episodeCount"])
+                state["plan"] = plan.model_dump()
                 state["planUsed"] = True
             elif job.kind == "episode":
                 if any(issue.episode != job.episode for issue in review.issues):

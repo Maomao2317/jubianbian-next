@@ -76,6 +76,11 @@ class AdaptationTests(unittest.TestCase):
         job = routes.JobInput(kind=kind, revision=project["revision"], **kwargs)
         background = BackgroundTasks()
         outputs = {kind: raw}
+        if kind == "plan":
+            outputs["plan"] = {key: value for key, value in raw.items() if key != "cast"}
+            outputs["plan"]["additional_cast"] = [
+                {key: value for key, value in character.items() if key != "id"} for character in raw["cast"]
+            ]
         if kind == "episode":
             outputs["review"] = REVIEW
             outputs["episode_repair"] = raw if repaired is None else repaired
@@ -339,6 +344,19 @@ class AdaptationTests(unittest.TestCase):
         review = ad._ark_schema(ad.ReviewReport.model_json_schema())
         severity = review["properties"]["issues"]["items"]["properties"]["severity"]
         self.assertEqual(severity["enum"], ["error", "note"])
+
+    def test_plan_keeps_preview_cast_and_assigns_ids_to_new_characters(self):
+        preview_cast = [ad.Character.model_validate({**CAST[0], "id": "C2"})]
+        proposal = ad.PlanProposal(
+            title=PLAN["title"], premise=PLAN["premise"], episodes=PLAN["episodes"],
+            additional_cast=[
+                {"original_name": "沈青", "name": "沈清", "role": "与试改冲突"},
+                {"original_name": "迟巧", "name": "迟巧", "role": "商号伙计"},
+            ],
+        )
+        plan = ad.plan_from_preview(proposal, preview_cast)
+        self.assertEqual(plan.cast[0], preview_cast[0])
+        self.assertEqual([(item.id, item.name) for item in plan.cast], [("C2", "沈青"), ("C1", "迟巧")])
 
     def test_uploaded_docx_preserves_paragraphs_and_runs(self):
         data = io.BytesIO()

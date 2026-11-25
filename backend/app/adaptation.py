@@ -15,7 +15,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v5"
+PROMPT_VERSION = "adaptation-v6"
 usage_recorder = ContextVar("adaptation_usage_recorder", default=None)
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
@@ -35,11 +35,14 @@ class SourceScene(Contract):
     start_sec: float | None = None
 
 
-class Character(Contract):
-    id: str = Field(pattern=r"^C[1-9][0-9]*$")
+class CharacterDetails(Contract):
     original_name: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=40)
     role: str = Field(min_length=1, max_length=160)
+
+
+class Character(CharacterDetails):
+    id: str = Field(pattern=r"^C[1-9][0-9]*$")
 
 
 class Block(Contract):
@@ -79,11 +82,18 @@ class OutlineEpisode(Contract):
     source_ids: list[str] = Field(min_length=1, max_length=12)
 
 
-class Plan(Contract):
+class PlanOutline(Contract):
     title: str = Field(min_length=1, max_length=100)
     premise: str = Field(min_length=1, max_length=1100)
-    cast: list[Character] = Field(min_length=1, max_length=25)
     episodes: list[OutlineEpisode] = Field(min_length=1, max_length=MAX_EPISODES)
+
+
+class Plan(PlanOutline):
+    cast: list[Character] = Field(min_length=1, max_length=25)
+
+
+class PlanProposal(PlanOutline):
+    additional_cast: list[CharacterDetails] = Field(max_length=24)
 
 
 class LockLine(Contract):
@@ -210,6 +220,24 @@ def validate_plan(plan: Plan, sources: list[SourceScene], count: int) -> None:
         raise AdaptationError("大纲引用了找不到的原稿场次，请核对来源。")
 
 
+def plan_from_preview(proposal: PlanProposal, preview_cast: list[Character]) -> Plan:
+    used_ids = validate_cast(preview_cast)
+    available_ids = iter(f"C{number}" for number in range(1, 26) if f"C{number}" not in used_ids)
+    cast = list(preview_cast)
+    names = {character.name.casefold() for character in cast}
+    original_names = {character.original_name.casefold() for character in cast}
+    for character in proposal.additional_cast:
+        name, original_name = character.name.casefold(), character.original_name.casefold()
+        if name in names or original_name in original_names:
+            continue
+        if len(cast) == 25:
+            raise AdaptationError("大纲人物超过 25 位，请缩小改编范围后重试。")
+        cast.append(Character(id=next(available_ids), **character.model_dump()))
+        names.add(name)
+        original_names.add(original_name)
+    return Plan(title=proposal.title, premise=proposal.premise, episodes=proposal.episodes, cast=cast)
+
+
 def validate_locks(locks: list[LockLine], plan: Plan, sources: list[SourceScene]) -> None:
     cast_ids = validate_cast(plan.cast)
     source_map = {item.id: item.text for item in sources}
@@ -256,6 +284,7 @@ INSTRUCTIONS = {
                "挑一个有对白和冲突的完整场次作为preview_source_id。身份、因果不明确的地方列入questions。",
     "preview": "用给定的一场戏试改。提供可逐句对照的改稿，用固定角色编号 C1、C2……。"
                "每位说话人都必须出现在 cast 中，包括一次性角色、画外音、旁白。"
+               "用户要求保留的姓名在 original_name 和 name 中都必须逐字照录。"
                "speaker_id 只能用 cast 中的 id，动作段才留空。身份不清楚时建立标为待核对的角色并写入 questions。"
                "举出具体改编决定。source_id 必须等于提供的场次。",
     "preview_repair": "只校准 unregistered_speaker_blocks 列出的段落，编号从 1 开始。"
@@ -265,7 +294,9 @@ INSTRUCTIONS = {
                       "只返回人物增补、段落编号和疑点，不生成正文。",
     "plan": "根据全部参考场次以及已审试改，制定完整改编大纲。按目标集数从 1 连续编号，每集写目标、冲突、"
             "转折、集尾和上下集衔接。每集用 source_ids 引用承担相应叙事作用的原稿场次。"
-            "沿用试改人物的编号。剧本改编需要新角色时，也要固定编号并在人物表列出。",
+            "试改人物表全部沿用，大纲正文使用表中既有改编名。additional_cast 仅补充后面才首次登场的角色，"
+            "其中人物编号由系统分配。原稿没有的角色，original_name 与 name 填同一姓名。"
+            "遇到既有人物不要另录、改名或缩写。未增加人物时返回空数组。",
     "episode": "只写指定集的完整正文。遵从人物表、前情和后续彼此依赖的情节。speaker_id 只使用已确认的角色编号，"
                "动作段 speaker_id 为空字符串。每条锁定台词须单独一条按指定角色编号和原文输出，标点保留。"
                "如果提供了当前稿，按修改要求或更新过的分集大纲修订，保留未涉及的情节和已锁定内容。"
