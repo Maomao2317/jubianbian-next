@@ -332,6 +332,14 @@ class AdaptationTests(unittest.TestCase):
         self.assertIn("original_name", schema["properties"]["cast"]["items"]["properties"])
         self.assertNotIn("$defs", schema)
 
+    def test_provider_schema_constrains_analysis_and_review_labels(self):
+        analysis = ad._ark_schema(ad.Analysis.model_json_schema())
+        kinds = analysis["properties"]["keep_options"]["items"]["properties"]["kind"]
+        self.assertEqual(kinds["enum"], ["character", "plot", "ending", "line"])
+        review = ad._ark_schema(ad.ReviewReport.model_json_schema())
+        severity = review["properties"]["issues"]["items"]["properties"]["severity"]
+        self.assertEqual(severity["enum"], ["error", "note"])
+
     def test_uploaded_docx_preserves_paragraphs_and_runs(self):
         data = io.BytesIO()
         with zipfile.ZipFile(data, "w") as doc:

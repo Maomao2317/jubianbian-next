@@ -6,6 +6,7 @@ import json
 import os
 import re
 from contextvars import ContextVar
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -14,7 +15,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v4"
+PROMPT_VERSION = "adaptation-v5"
 usage_recorder = ContextVar("adaptation_usage_recorder", default=None)
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
@@ -109,7 +110,7 @@ class ImpactReport(Contract):
 
 class KeepOption(Contract):
     id: str = Field(min_length=1, max_length=20)
-    kind: str = Field(pattern=r"^(character|plot|ending|line)$")
+    kind: Literal["character", "plot", "ending", "line"]
     label: str = Field(min_length=1, max_length=100)
     instruction: str = Field(min_length=1, max_length=200)
     source_id: str
@@ -136,7 +137,7 @@ class Analysis(Contract):
 
 class ReviewIssue(Contract):
     episode: int = Field(ge=1, le=MAX_EPISODES)
-    severity: str = Field(pattern=r"^(error|note)$")
+    severity: Literal["error", "note"]
     description: str = Field(min_length=1, max_length=400)
     suggestion: str = Field(min_length=1, max_length=400)
 
@@ -250,6 +251,7 @@ INSTRUCTIONS = {
     "analyze": "通读给定原稿，概括真实主线、人物、证据和结局。结合用户提出的改编目标和保留要求，"
                "提出2到3个适合该故事的具体改编方向。"
                "每个方向说明改法及适合原稿的理由。为人物、主线、结局及关键台词提供可勾选保留项，"
+               "kind只能使用固定英文值character、plot、ending、line，分别表示人物、主线、结局、台词。"
                "每项的quote必须是对应source_id原文的连续逐字片段，保留标点。原稿事实与改编建议用措辞明确表达。"
                "挑一个有对白和冲突的完整场次作为preview_source_id。身份、因果不明确的地方列入questions。",
     "preview": "用给定的一场戏试改。提供可逐句对照的改稿，用固定角色编号 C1、C2……。"
