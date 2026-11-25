@@ -29,6 +29,8 @@
     tasks: [],
     current: null,
     profile: null,
+    adaptationEnabled: false,
+    adaptationCheck: null,
     rechargeTier: "personal",
     authMode: "login",
     authBusy: false,
@@ -140,7 +142,8 @@
 
   function parseHash() {
     const parts = (location.hash || "#/workspace").replace(/^#\/?/, "").split("/");
-    state.view = parts[0] === "task" && parts[1]
+    state.view = parts[0] === "adaptation" && state.adaptationEnabled ? "adaptation"
+      : parts[0] === "task" && parts[1]
       ? "detail"
       : parts[0] === "admin"
         ? "admin"
@@ -197,6 +200,7 @@
         <nav class="header-workspace-nav" aria-label="主要导航">
           <a href="#/workspace" class="${state.view === "workspace" ? "active" : ""}">创作工作台</a>
           <a href="#/tasks" class="${state.view === "list" || state.view === "detail" ? "active" : ""}">任务中心</a>
+          ${state.adaptationEnabled ? `<a href="#/adaptation" class="${state.view === "adaptation" ? "active" : ""}">剧本改编</a>` : ""}
         </nav>
         <div class="header-right">
           <button class="credit-pill" type="button" data-action="points" title="查看积分余额和流水">
@@ -712,7 +716,7 @@
     <div class="studio-tool-grid" aria-label="创作工具">
       <article class="studio-tool-card standard"><div class="studio-tool-top"><span class="studio-tool-icon">▣</span><b>常用</b></div><h2>视频转剧本</h2><p>上传视频，自动整理台词、人物、场景和动作，生成标准镜头剧本。</p><button type="button" data-action="create-standard">开始转换 <span>→</span></button></article>
       <article class="studio-tool-card multilingual"><div class="studio-tool-top"><span class="studio-tool-icon">文</span><b>NEW</b></div><h2>多语言视频转剧本</h2><p>识别原始语言，输出中文、英文或中英双语剧本，人物与台词保持一致。</p><button type="button" data-action="create-multilingual">创建多语言任务 <span>→</span></button></article>
-      <article class="studio-tool-card adaptation"><div class="studio-tool-top"><span class="studio-tool-icon">✣</span><b>创作引擎筹备中</b></div><h2>剧本优化改编</h2><p>节奏重塑、台词润色与多版本改编能力，正在精心打磨。</p><button type="button" data-action="show-coming-soon">了解功能 <span>→</span></button></article>
+      <article class="studio-tool-card adaptation"><div class="studio-tool-top"><span class="studio-tool-icon">✣</span><b>${state.adaptationEnabled ? "测试版" : "创作引擎筹备中"}</b></div><h2>剧本优化改编</h2><p>${state.adaptationEnabled ? "从平台剧本或上传稿开始，试改一场，确认大纲后逐集写。" : "节奏重塑、台词润色与多版本改编能力，正在精心打磨。"}</p><button type="button" data-action="show-coming-soon">${state.adaptationEnabled ? "开始改编" : "了解功能"} <span>→</span></button></article>
     </div>
     <section class="studio-recent-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
       <div class="studio-recent-head"><div><h2>最近任务</h2><p>不同创作功能的任务统一管理</p></div><div class="studio-recent-filter" role="group" aria-label="最近任务状态"><button class="${state.homeStatus === "all" ? "active" : ""}" data-action="home-filter" data-status="all" aria-pressed="${state.homeStatus === "all"}">全部</button><button class="${state.homeStatus === "running" ? "active" : ""}" data-action="home-filter" data-status="running" aria-pressed="${state.homeStatus === "running"}">进行中</button><button class="${state.homeStatus === "done" ? "active" : ""}" data-action="home-filter" data-status="done" aria-pressed="${state.homeStatus === "done"}">已完成</button><a href="#/tasks" aria-label="查看全部任务">⌕</a></div></div>
@@ -972,6 +976,7 @@
     }
     const downloadActions = isCompletedTask(task) ? `
       <div class="download-actions">
+        ${state.adaptationEnabled && task.result ? `<a class="secondary-btn" href="#/adaptation/new/${encodeURIComponent(task.id)}">改编此剧本</a>` : ""}
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
@@ -1324,14 +1329,25 @@
   }
 
   async function render() {
+    if (state.profile && window.AdaptationStudio && api.adaptation) {
+      state.adaptationCheck ||= api.adaptation("/availability").catch(() => null);
+      const availability = await state.adaptationCheck;
+      if (!availability) state.adaptationCheck = null;
+      state.adaptationEnabled = availability?.enabled === true;
+      window.AdaptationStudio.setAvailability(availability);
+    }
     parseHash();
+    window.AdaptationStudio?.leave();
     if (!state.profile) {
       renderAuth();
       return;
     }
     state.menuTaskId = "";
     renderHeader();
-    if (state.view === "admin") await renderAdmin();
+    if (state.view === "adaptation") {
+      schedulePoll(false);
+      await window.AdaptationStudio.open(location.hash.slice("#/adaptation".length));
+    } else if (state.view === "admin") await renderAdmin();
     else if (state.view === "detail") await refreshDetail();
     else await refreshList();
   }
@@ -1764,7 +1780,11 @@
       openCreateModal(action === "create-multilingual" ? "multilingual" : "standard");
       return;
     }
-    if (action === "show-coming-soon") { openComingSoonModal(); return; }
+    if (action === "show-coming-soon") {
+      if (state.adaptationEnabled) go("adaptation");
+      else openComingSoonModal();
+      return;
+    }
     if (action === "select-language") {
       const field = actionElement.dataset.languageField;
       if (!['sourceLanguage', 'outputLanguage'].includes(field) || actionElement.disabled) return;

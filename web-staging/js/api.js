@@ -408,7 +408,8 @@
         });
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
-          const error = new Error(payload.message || payload.detail || `请求失败（${response.status}）`);
+          const detail = Array.isArray(payload.detail) ? payload.detail[0]?.msg : payload.detail;
+          const error = new Error(payload.message || detail || `请求失败（${response.status}）`);
           error.status = response.status;
           error.retryAfter = Number(response.headers.get("Retry-After") || payload.retryAfter || 0) || 0;
           throw error;
@@ -425,6 +426,11 @@
     getProfile() {
       return this.request(this.url(cfg().api.endpoints.me));
     },
+    adaptation(path = "", method = "GET", value) {
+      const body = value instanceof FormData ? value : value === undefined ? undefined : JSON.stringify(value);
+      return this.request(this.url("/adaptations" + path), { method, body });
+    },
+    adaptationDownloadUrl(id) { return this.url("/adaptations/:id/download", { id }); },
     getCreditLedger() { return this.request(this.url("/me/ledger")); },
     getAdminOverview() { return this.request(this.url("/admin/overview")); },
     getAdminUsers(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/users") + (search ? "?" + search : "")); },

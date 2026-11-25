@@ -1,0 +1,87 @@
+"""Run a small real-model staging smoke using only original synthetic text."""
+
+import json
+from unittest.mock import patch
+
+from fastapi import BackgroundTasks
+
+from app import adaptation as ad
+from app import adaptation_routes as routes
+from app import config
+from app.auth_store import init_db
+
+SOURCE = """第1集
+1-1 夜 内 账房
+△ 沈青在关门前翻开账册，发现货款少了十两。
+沈青：账册不能离开柜台。
+迟巧：掌柜刚才来过。他拿走的是另一本。
+△ 门外的铜铃响了。沈青看见掌柜的影子停在门外。
+
+第2集
+2-1 昼 外 商号后街
+△ 沈青和迟巧约在后门，迟巧拿来一枚系红线的印章。
+沈青：这是谁的印？
+迟巧：印是掌柜的，红线是我昨夜系的。
+△ 沈青把印章上的缺口和账册朱印上的白点对在一起。
+
+第3集
+3-1 昼 内 商号大堂
+△ 沈青请掌柜在新纸上盖章。
+沈青：这缺一角的印，盖过那份假账。
+掌柜：我早就把这枚印丢了。
+迟巧：那你为什么刚才还在找红线？
+△ 掌柜合上印匣。商号东家取出真正的进货单。"""
+LINE = "账册不能离开柜台。"
+
+
+def main():
+    if config.JBB_ENVIRONMENT != "staging" or str(config.DATA_DIR) != "/tmp/jbb-adaptation-smoke":
+        raise SystemExit("Smoke requires the disposable staging test database.")
+    init_db()
+    routes.init_adaptations()
+    usage = []
+
+    def run(project, kind, **fields):
+        background = BackgroundTasks()
+        routes.start_job(project["id"], None, routes.JobInput(
+            kind=kind, revision=project["revision"], **fields
+        ), background)
+        task = background.tasks[0]
+        task.func(*task.args, **task.kwargs)
+        project = routes.get_project(project["id"], None)
+        if project.get("error"):
+            raise SystemExit(f"{kind}: {project['error']}")
+        usage.append(project["usage"][str(fields["episode"]) if kind == "episode" else kind])
+        return project
+
+    provider, model = ad.model_choice()
+    with patch.object(routes, "current_user", return_value={"id": "isolated-smoke"}):
+        project = routes.create_project(None, routes.ProjectInput(
+            title="账房对印", goal="改成古装漫剧，把关键冲突设计成画得出来的动作。",
+            keep="保留沈青、迟巧的姓名和身份，账册、缺角印章、红线及翻案的因果。第一集原样保留沈青的台词“账册不能离开柜台。”。",
+            episode_count=3, source_text=SOURCE,
+        ))
+        source = next(item for item in project["sources"] if LINE in item["text"])
+        project = run(project, "preview", source_id=source["id"])
+        project = run(project, "plan", notes="第一集保留沈青及其锁定台词。")
+        plan = project["plan"]
+        character = next((item for item in plan["cast"] if item["name"] == "沈青"), None)
+        if not character:
+            raise SystemExit("preflight: the model did not preserve the requested lead character name")
+        project = routes.save_plan(project["id"], None, routes.PlanInput(
+            revision=project["revision"], plan=plan,
+            locks=[ad.LockLine(episode=1, speaker_id=character["id"], source_id=source["id"], text=LINE)]))
+        for number in range(1, 4):
+            project = run(project, "episode", episode=number)
+        exported = routes.download(project["id"], None).body.decode()
+        if not all(f"## 第 {number} 集" in exported for number in range(1, 4)) or "沈青：" + LINE not in exported:
+            raise SystemExit("preflight: generated export did not pass the episode and exact dialogue checks")
+    print(json.dumps({"verified": True, "provider": provider, "model": model,
+                      "episodes": 3, "promptVersion": ad.PROMPT_VERSION,
+                      "calls": len(usage),
+                      "inputTokens": sum(item["inputTokens"] or 0 for item in usage),
+                      "outputTokens": sum(item["outputTokens"] or 0 for item in usage)}))
+
+
+if __name__ == "__main__":
+    main()

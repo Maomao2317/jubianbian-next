@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .adaptation_routes import ENABLED as ADAPTATION_ENABLED, init_adaptations, router as adaptation_router
 from .auth_store import init_db
 from .config import CORS_ORIGINS, FRONTEND_DIR
 from .middleware import RateLimitMiddleware, RequestLogMiddleware
@@ -139,6 +140,9 @@ app.add_api_route("/api/export/batch/{batch_id}", download_batch, methods=["GET"
 
 # Create tables before the first request, matching the original startup order.
 init_db()
+if ADAPTATION_ENABLED:
+    init_adaptations()
+    app.include_router(adaptation_router)
 
 @app.on_event("startup")
 async def start_durable_worker() -> None:
