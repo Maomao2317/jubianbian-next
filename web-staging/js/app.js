@@ -297,7 +297,7 @@
   };
   const adaptationBillingKinds = {
     project: "项目费", included: "已包含", included_episode: "已含第 1 集",
-    episode: "分集生成", rewrite: "整集重写", preview_retry: "试改重做",
+    episode: "分集生成", included_revision: "已含首次修改", rewrite: "整集重写", preview_retry: "试改重做",
     plan_retry: "大纲重生成", review: "整剧复审", impact: "大纲影响复核"
   };
 
@@ -310,7 +310,8 @@
   function adminAdaptationCalls(calls) {
     if (!Array.isArray(calls) || !calls.length) return "<small>暂无模型调用明细</small>";
     return `<div class="adapt-admin-calls">${calls.map(call => {
-      const label = adaptationKinds[call.kind] || call.kind || "模型调用";
+      const stages = { review: "分集审稿", episode_repair: "正文自动校正", preview_repair: "试改角色校正" };
+      const label = adaptationKinds[call.kind] || stages[call.kind] || call.kind || "模型调用";
       const tokens = Number(call.inputTokens || 0) + Number(call.outputTokens || 0);
       const cost = call.apiCostRmb == null ? "成本未计价" : `${String(call.costSource || "").includes("estimate") ? "估算 " : ""}¥${Number(call.apiCostRmb).toFixed(4)}`;
       return `<span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(call.model || "模型未知")} · ${tokens.toLocaleString()} Tokens · ${cost}</small></span>`;

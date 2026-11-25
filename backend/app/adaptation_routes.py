@@ -107,6 +107,11 @@ def init_adaptations():
             CREATE INDEX IF NOT EXISTS adaptation_jobs_time ON adaptation_jobs(started_at DESC);
             CREATE INDEX IF NOT EXISTS adaptation_jobs_owner ON adaptation_jobs(user_id, started_at DESC);
             CREATE INDEX IF NOT EXISTS adaptation_jobs_project ON adaptation_jobs(project_id, started_at DESC);
+            CREATE TABLE IF NOT EXISTS adaptation_episode_versions (
+                project_id TEXT NOT NULL, episode INTEGER NOT NULL, version INTEGER NOT NULL,
+                screenplay TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (project_id, episode, version)
+            );
         """)
         _recover_expired_jobs(conn, time.time())
 
@@ -263,8 +268,9 @@ def _reserved_points(state: dict, job: JobInput) -> tuple[int, str]:
     if job.kind == "plan" and state.get("planUsed"):
         return REWRITE_POINTS, "plan_retry"
     if job.kind == "episode":
-        if str(job.episode) in state["outputs"]:
-            return REWRITE_POINTS, "rewrite"
+        output = state["outputs"].get(str(job.episode))
+        if output is not None:
+            return (REWRITE_POINTS, "rewrite") if output.get("version", 1) > 1 else (0, "included_revision")
         if job.episode == 1:
             return 0, "included_episode"
         return EPISODE_POINTS, "episode"
@@ -480,6 +486,7 @@ def delete_project(project_id: str, request: Request):
         conn.execute("BEGIN IMMEDIATE")
         row = _get(conn, project_id, owner)
         _idle(row)
+        conn.execute("DELETE FROM adaptation_episode_versions WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM adaptations WHERE id=? AND user_id=?", (project_id, owner))
     return Response(status_code=204)
 
@@ -581,10 +588,12 @@ def _job_context(state: dict, job: JobInput):
     refs = set(plan.episodes[job.episode - 1].source_ids)
     history = [{"number": number, "continuity": state["outputs"][str(number)]["draft"]["continuity"]}
                for number in range(1, job.episode)]
-    return context | {"plan": state["plan"], "episode": job.episode, "previous": history,
-                      "source_scenes": [item for item in source_data if item["id"] in refs],
-                      "locked_lines": [item for item in state["locks"] if item["episode"] == job.episode]
-                      }, ad.Draft, sources
+    context.update(plan=state["plan"], episode=job.episode, previous=history,
+                   source_scenes=[item for item in source_data if item["id"] in refs],
+                   locked_lines=[item for item in state["locks"] if item["episode"] == job.episode])
+    if current:
+        context.update(current_draft=current["draft"], revision_notes=job.notes.strip())
+    return context, ad.Draft, sources
 
 
 def _usage_summary(usage: dict, calls: list[dict]) -> dict:
@@ -625,12 +634,19 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                 state_for_review = _state(_get(conn, project_id, owner))
             plan_for_review = ad.Plan.model_validate(state_for_review["plan"])
             locks_for_review = [ad.LockLine.model_validate(item) for item in state_for_review["locks"]]
-            ad.validate_draft(result, plan_for_review, locks_for_review, job.episode)
+            try:
+                ad.validate_draft(result, plan_for_review, locks_for_review, job.episode)
+            except ad.AdaptationError as problem:
+                result, _ = ad.generate("episode_repair", context | {
+                    "draft_to_repair": result.model_dump(), "validation_problem": str(problem),
+                }, ad.Draft, model)
+                ad.validate_draft(result, plan_for_review, locks_for_review, job.episode)
             review_context = {
                 "analysis": state_for_review.get("analysis"), "plan": state_for_review["plan"],
                 "episode": job.episode, "draft": result.model_dump(),
                 "source_scenes": context["source_scenes"],
                 "locked_lines": context["locked_lines"],
+                "keep": context["keep"], "revision_notes": context.get("revision_notes", ""),
             }
             review, _ = ad.generate("review", review_context, ad.ReviewReport, model)
 
@@ -640,7 +656,6 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
             if row["job_id"] != job_id:
                 return
             state = _state(row)
-            job_row = conn.execute("SELECT * FROM adaptation_jobs WHERE id=?", (job_id,)).fetchone()
             if job.kind == "analyze":
                 state["analysis"] = result.model_dump()
                 state["setupPaid"] = True
@@ -667,7 +682,25 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                 plan = ad.Plan.model_validate(state["plan"])
                 locks = [ad.LockLine.model_validate(item) for item in state["locks"]]
                 ad.validate_draft(result, plan, locks, job.episode)
-                state["outputs"][str(job.episode)] = {"draft": result.model_dump(), "locked": False, "stale": False}
+                episode_key = str(job.episode)
+                previous = state["outputs"].get(episode_key)
+                version = 1
+                if previous:
+                    previous_version = previous.get("version", 1)
+                    previous_draft = ad.Draft.model_validate(previous["draft"])
+                    conn.execute(
+                        """INSERT INTO adaptation_episode_versions(project_id, episode, version, screenplay, notes)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (project_id, job.episode, previous_version,
+                         ad.render_scenes(previous_draft.scenes, plan.cast, job.episode),
+                         previous.get("revisionNotes", "")),
+                    )
+                    version = previous_version + 1
+                state["outputs"][episode_key] = {
+                    "draft": result.model_dump(), "locked": False, "stale": False,
+                    "version": version, "revisionNotes": context.get("revision_notes", ""),
+                }
+                state.pop("reviewAll", None)
                 state.setdefault("reviews", {})[str(job.episode)] = review.model_dump()
                 for key, output in state["outputs"].items():
                     if int(key) > job.episode:
@@ -905,6 +938,21 @@ def save_episode(project_id: str, episode: int, request: Request, body: DraftInp
         state.pop("error", None)
         _save(conn, row, state)
         return _project(_get(conn, project_id, owner))
+
+
+@router.get("/{project_id}/episodes/{episode}/versions/{version}")
+def get_episode_version(project_id: str, episode: int, version: int, request: Request):
+    owner = current_user(request)["id"]
+    with closing(db()) as conn:
+        _get(conn, project_id, owner)
+        row = conn.execute(
+            """SELECT screenplay, notes FROM adaptation_episode_versions
+               WHERE project_id=? AND episode=? AND version=?""",
+            (project_id, episode, version),
+        ).fetchone()
+        if not row:
+            _fail("找不到这个正文版本", 404)
+        return dict(row)
 
 
 @router.put("/{project_id}/episodes/{episode}/lock")

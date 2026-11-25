@@ -92,3 +92,60 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
   assert.match(main.innerHTML, /悬疑翻案/);
   assert.equal(focused, true);
 });
+
+test("episode revision sends user notes and only confirms charges after the included revision", async () => {
+  const listeners = {};
+  const requests = [];
+  const confirmations = [];
+  const button = { dataset: { adapt: "episode", number: "1" }, closest: () => null };
+  const draft = { scenes: [{ setting: "商号", blocks: [{ text: "沈青按住账册。" }] }], continuity: "回头查账" };
+  const project = {
+    id: "p1", title: "样稿", goal: "突出商号查账", warnings: [], usage: {}, revision: 1,
+    episodeCount: 1, confirmed: true, locks: [],
+    sources: [{ id: "S1", label: "第一场", text: "沈青按住账册。" }],
+    outputs: { 1: { draft, version: 1, locked: false, stale: false } },
+    plan: { title: "样稿", premise: "查账", cast: [], episodes: [
+      { number: 1, beats: "账册被动过", hook: "掌柜来了", source_ids: ["S1"] }
+    ] }
+  };
+  const main = { innerHTML: "", querySelector: () => null };
+  const window = {
+    confirm: message => { confirmations.push(message); return true; },
+    AppAPI: {
+      adaptationDownloadUrl: () => "/download",
+      async adaptation(route, method, body) {
+        if (method === "POST") { requests.push(body); return null; }
+        return project;
+      }
+    }
+  };
+  vm.runInNewContext(script, {
+    window,
+    document: { getElementById: () => main, addEventListener: (name, handler) => { listeners[name] = handler; } },
+    setTimeout, clearTimeout
+  });
+  const click = { target: { closest: () => button } };
+  const input = value => listeners.input({ target: {
+    value, dataset: { adaptRevisionNotes: "1" },
+    matches: selector => selector === "[data-adapt-revision-notes]"
+  } });
+
+  await window.AdaptationStudio.open("/p1");
+  assert.match(main.innerHTML, /用 AI 修改本集 · 已包含/);
+  input("缩短开场");
+  listeners.click(click);
+  await new Promise(setImmediate);
+  assert.equal(requests[0].notes, "缩短开场");
+  assert.equal(confirmations.length, 0);
+
+  project.outputs[1].version = 2;
+  await window.AdaptationStudio.open("/p1");
+  assert.match(main.innerHTML, /用 AI 修改本集 · 8 积分/);
+  assert.match(main.innerHTML, /查看历史稿 · 当前第 2 版/);
+  input("加强当面对质");
+  listeners.click(click);
+  await new Promise(setImmediate);
+  assert.equal(requests[1].notes, "加强当面对质");
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0], /8 积分/);
+});

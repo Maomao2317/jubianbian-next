@@ -13,6 +13,7 @@
   let availability, view = 0, timer, project, selected = "", busy = false, planNotes = "";
   let selectedDirection = "", directionNotes = "", keepNotes = "";
   const sourceDrafts = new Map();
+  const episodeNotes = new Map();
   const sourceText = value => value.replace(/\r\n?/g, "\n").trim();
 
   const idPath = () => "/" + encodeURIComponent(project.id);
@@ -194,16 +195,34 @@
         <button class="primary-btn" type="submit">${output.stale ? "确认这集已核对" : "保存本集修改"}</button>
       </form></details>`;
   }
+  function episodeRevision(number, output) {
+    const points = (output.version || 1) > 1 ? "8 积分" : "已包含";
+    return `<div class="adapt-revision">
+      <label class="adapt-label">AI 修改要求（选填）
+        <textarea data-adapt-revision-notes="${number}" rows="2" maxlength="1000" placeholder="例如：缩短开场对白，保留账册被调换的线索">${esc(episodeNotes.get(Number(number)))}</textarea>
+      </label>
+      <button class="secondary-btn" type="button" data-adapt="episode" data-number="${number}">${output.stale ? "按最新大纲更新" : "用 AI 修改本集"} · ${points}</button>
+    </div>`;
+  }
+  function episodeHistory(number, output) {
+    if (!(output.version > 1)) return "";
+    const versions = Array.from({ length: output.version - 1 }, (_, index) => output.version - 1 - index);
+    return `<details class="adapt-editor adapt-history"><summary>查看历史稿 · 当前第 ${output.version} 版</summary>
+      <div class="adapt-toolbar"><select aria-label="历史版本">${versions.map(version =>
+        `<option value="${version}">第 ${version} 版</option>`).join("")}</select>
+        <button class="secondary-btn" type="button" data-adapt="view-version" data-number="${number}">查看</button></div>
+      <pre data-adapt-history-text aria-live="polite" hidden></pre></details>`;
+  }
   function renderOutputs(p) {
     if (!p.confirmed) return "";
     const outputs = Object.entries(p.outputs).sort(([a], [b]) => Number(a) - Number(b));
     const ready = outputs.find(([_, value]) => value.stale);
-    const next = ready ? Number(ready[0]) : outputs.length + 1;
+    const next = outputs.length + 1;
     const complete = outputs.length === p.episodeCount && !ready;
     const review = p.reviewAll;
     return `<section class="adapt-panel adapt-output-panel"><div class="adapt-section-heading"><span class="adapt-step">05</span><div><h2>分集正文与审稿</h2><p>逐集生成会同时检查大纲、保留要求和人物连续性。</p></div></div>
       <div class="adapt-toolbar">
-        ${next <= p.episodeCount && !ready?.[1].locked ? `<button class="primary-btn" type="button" data-adapt="episode" data-number="${next}">${ready ? "更新" : "写"}第 ${next} 集${next === 1 && !p.outputs["1"] ? " · 已含在项目费中" : ready ? " · 重写 8 积分" : " · 16 积分"}</button>` : ""}
+        ${next <= p.episodeCount && !ready ? `<button class="primary-btn" type="button" data-adapt="episode" data-number="${next}">写第 ${next} 集${next === 1 ? " · 已含在项目费中" : " · 16 积分"}</button>` : ""}
         ${outputs.length && !ready ? `<a class="secondary-btn" href="${esc(api.adaptationDownloadUrl(p.id))}">导出已写正文 · Markdown</a>` : ""}
       </div>
       ${feedback(p, "episode")}
@@ -212,11 +231,12 @@
         <summary>第 ${number} 集 ${output.locked ? "· 已锁定" : ""} ${output.stale ? "· 待更新" : ""}</summary>
         <pre>${esc(screenplay(output.draft.scenes, p.plan.cast, Number(number)))}</pre>
         <p class="adapt-note">下集衔接 · ${esc(output.draft.continuity)}</p>
+        ${output.revisionNotes ? `<p class="adapt-note">本版修改要求 · ${esc(output.revisionNotes)}</p>` : ""}
         ${p.reviews?.[number] ? `<div class="adapt-review"><strong>AI 审稿 · ${esc(p.reviews[number].summary)}</strong>${p.reviews[number].issues.length ? `<ul>${p.reviews[number].issues.map(issue => `<li class="${issue.severity === "error" ? "is-error" : ""}"><b>${issue.severity === "error" ? "需处理" : "建议核对"}</b> · ${esc(issue.description)}<br>建议 · ${esc(issue.suggestion)}</li>`).join("")}</ul>` : "<p>未发现有明确依据的剧情或保留项遗漏。</p>"}</div>` : ""}
         ${draftEditor(p, number, output)}
-        <div class="adapt-toolbar"><button class="secondary-btn" type="button" data-adapt="lock" data-number="${number}" ${output.stale && !output.locked ? "disabled" : ""}>${output.locked ? "解锁此集" : "锁定此集"}</button>
-          ${!output.locked && !output.stale ? `<button class="secondary-btn" type="button" data-adapt="episode" data-number="${number}">重写此集</button>` : ""}
-        </div>
+        ${episodeHistory(number, output)}
+        ${!output.locked && (!ready || Number(number) <= Number(ready[0])) ? episodeRevision(number, output) : ""}
+        <div class="adapt-toolbar"><button class="secondary-btn" type="button" data-adapt="lock" data-number="${number}" ${output.stale && !output.locked ? "disabled" : ""}>${output.locked ? "解锁此集" : "锁定此集"}</button></div>
       </details>`).join("")}
       ${complete ? `<div class="adapt-full-review"><div><h3>整剧衔接检查</h3><p>检查人物状态、时间线、关键证据和伏笔回收。</p></div><button class="secondary-btn" type="button" data-adapt="review_all">${review ? "重新检查整剧 · 8 积分" : "检查整剧衔接"}</button>${feedback(p, "review_all")}
         ${review ? `<div class="adapt-review"><strong>${esc(review.summary)}</strong>${review.issues.length ? `<ul>${review.issues.map(issue => `<li class="${issue.severity === "error" ? "is-error" : ""}"><b>第 ${issue.episode} 集 · ${issue.severity === "error" ? "需处理" : "建议核对"}</b><br>${esc(issue.description)}<br>建议 · ${esc(issue.suggestion)}</li>`).join("")}</ul>` : "<p>未发现明确的跨集矛盾。</p>"}</div>` : ""}</div>` : ""}
@@ -235,7 +255,7 @@
     const steps = ["原稿", "方向", "试改", "大纲", "分集", "审稿"];
     main().innerHTML = layout(p.plan?.title || p.title, p.goal || p.analysis?.summary || "先读懂原稿，再一起确定改编方向。", `
       <div class="adapt-flow" aria-label="改编进度">${steps.map((label, index) => `<span class="${index < completedStep ? "is-complete" : ""}"><i>${String(index + 1).padStart(2, "0")}</i>${label}</span>`).join("")}</div>
-      <div class="adapt-pricing"><strong>${p.billing?.setupPaid ? "项目分析费已支付，包含第 1 集" : "原稿分析 16 积分，含第 1 集"}</strong><span>第 2 集起 16 积分/集 · 重写 8 积分/集 · 手动编辑、保存和导出免费</span></div>
+      <div class="adapt-pricing"><strong>${p.billing?.setupPaid ? "项目分析费已支付，包含第 1 集" : "原稿分析 16 积分，含第 1 集"}</strong><span>第 2 集起 16 积分/集 · 每集含 1 次 AI 修改，之后 8 积分/次 · 手动编辑、保存和导出免费</span></div>
       <p class="adapt-note">${ran ? `最近模型调用 · ${esc(ran.model || ran.calls?.[0]?.model || "模型记录")} · ${ran.apiCostRmb != null && Number.isFinite(Number(ran.apiCostRmb)) ? `成本估算 ¥${Number(ran.apiCostRmb).toFixed(4)}` : "成本待服务商账单确认"}` :
         availability?.model ? `可用模型 · ${esc(availability.model)}` : "模型暂未配置，请稍后再试。"}</p>
       ${p.job ? `<div class="adapt-progress" role="status">${esc(kinds[p.job] || "正在生成")}，离开后可从项目列表继续查看。</div>` : ""}
@@ -299,6 +319,7 @@
     directionNotes = "";
     keepNotes = "";
     sourceDrafts.clear();
+    episodeNotes.clear();
     main().innerHTML = layout("剧本改编", "", "<p role='status'>正在加载…</p>");
     try {
       const [page, taskId] = path.split("/").filter(Boolean);
@@ -394,6 +415,7 @@
     if (node.matches("#adapt-plan-notes")) planNotes = node.value;
     if (node.matches("#adapt-direction-notes")) directionNotes = node.value;
     if (node.matches("#adapt-keep-notes")) keepNotes = node.value;
+    if (node.matches("[data-adapt-revision-notes]")) episodeNotes.set(Number(node.dataset.adaptRevisionNotes), node.value);
   });
   document.addEventListener("change", event => {
     const node = event.target;
@@ -432,6 +454,20 @@
     }
     if (kind === "remove-line") { button.closest(".adapt-lock-row").remove(); return; }
     if (busy) return;
+    if (kind === "view-version") {
+      const history = button.closest(".adapt-history");
+      const version = Number(history.querySelector("select").value);
+      const preview = history.querySelector("[data-adapt-history-text]");
+      action(async () => {
+        preview.hidden = false;
+        preview.textContent = "正在读取历史稿…";
+        try {
+          const saved = await api.adaptation(idPath() + "/episodes/" + episode + "/versions/" + version);
+          preview.textContent = saved.notes ? saved.notes + "\n\n" + saved.screenplay : saved.screenplay;
+        } catch (err) { preview.textContent = err.message || "无法读取历史稿。"; }
+      }, button);
+      return;
+    }
     if (kind === "delete" && !window.confirm("删除这个改编项目及其改稿？")) return;
     if (kind === "episode" || kind === "impact") {
       const form = main().querySelector('[data-adapt-form="plan"]');
@@ -446,6 +482,8 @@
     const isJob = kind in kinds;
     const path = idPath();
     const active = view;
+    const existingEpisode = kind === "episode" ? project.outputs[String(episode)] : null;
+    const revisionNotes = existingEpisode ? episodeNotes.get(episode) || "" : "";
     if (kind === "analyze" && sourceField && !sourceText(sourceField.value)) {
       feedbackText(button, "原稿正文为空，请先填写要试改的内容。", true, true);
       sourceField.focus();
@@ -454,11 +492,11 @@
     const amount = kind === "analyze" && !project.billing?.setupPaid ? 16
       : kind === "preview" && project.previewUsed ? 8
         : kind === "plan" && project.planUsed ? 8
-          : kind === "episode" && project.outputs[String(episode)] ? 8
+          : existingEpisode ? ((existingEpisode.version || 1) > 1 ? 8 : 0)
         : kind === "episode" && episode > 1 ? 16
           : kind === "review_all" && project.reviewAllUsed ? 8
             : kind === "impact" && project.impactChecked ? 8 : 0;
-    if (amount && !window.confirm(`本次将扣除 ${amount} 积分。${kind === "analyze" ? "项目费包含首次试改、大纲、第 1 集正文和审稿。" : "失败或中断的任务会退回预扣积分。"}`)) return;
+    if (amount && !window.confirm(`本次将扣除 ${amount} 积分。${kind === "analyze" ? "项目费包含首次试改、大纲和第 1 集。每集包含正文、审稿及一次 AI 修改。" : "失败或中断的任务会退回预扣积分。"}`)) return;
     action(async () => {
       if (kind === "delete") { await api.adaptation(idPath(), "DELETE"); if (button.isConnected) go(""); return; }
       if (kind === "lock") return api.adaptation(idPath() + "/episodes/" + episode + "/lock", "PUT", {
@@ -479,7 +517,7 @@
           kind, episode, source_id: source.id,
           direction_id: kind === "preview" ? (main().querySelector("[data-adapt-direction]:checked")?.value || selectedDirection) : "",
           keep_option_ids: kind === "preview" ? [...main().querySelectorAll("[data-adapt-keep]:checked")].map(item => item.value) : [],
-          notes: kind === "plan" ? planNotes : kind === "preview" ? directionNotes : "",
+          notes: kind === "plan" ? planNotes : kind === "preview" ? directionNotes : revisionNotes,
           keep_notes: kind === "preview" ? keepNotes : "", revision
         });
       } catch (err) {

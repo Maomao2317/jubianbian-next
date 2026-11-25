@@ -61,7 +61,7 @@ def main():
         return project
 
     provider, model = ad.model_choice()
-    with patch.object(routes, "current_user", return_value={"id": "isolated-smoke"}):
+    with patch.object(routes, "current_user", return_value={"id": "isolated-smoke", "role": "admin"}):
         project = routes.create_project(None, routes.ProjectInput(
             title="账房对印", goal="改成古装漫剧，把关键冲突设计成画得出来的动作。",
             keep="保留沈青、迟巧的姓名和身份，账册、缺角印章、红线及翻案的因果。第一集原样保留沈青的台词“账册不能离开柜台。”。",
@@ -82,14 +82,30 @@ def main():
             locks=[ad.LockLine(episode=1, speaker_id=character["id"], source_id=source["id"], text=LINE)]))
         for number in range(1, 4):
             project = run(project, "episode", episode=number)
+        notes = "缩短最后一场的问答，保留当众辨认印章的动作。"
+        project = run(project, "episode", episode=3, notes=notes)
+        archive = routes.get_episode_version(project["id"], 3, 1, None)
+        if project["outputs"]["3"]["revisionNotes"] != notes or not archive["screenplay"]:
+            raise SystemExit("preflight: the requested revision or its previous version was not saved")
+        project = run(project, "review_all")
+        if not project.get("reviewAll"):
+            raise SystemExit("preflight: the whole-script review is missing")
         if any(str(number) not in project["reviews"] for number in range(1, 4)):
             raise SystemExit("preflight: at least one generated episode is missing its review")
         exported = routes.download(project["id"], None).body.decode()
         if not all(f"## 第 {number} 集" in exported for number in range(1, 4)) or "沈青：" + LINE not in exported:
             raise SystemExit("preflight: generated export did not pass the episode and exact dialogue checks")
+        admin = routes.admin_adaptations(None, kind="all", limit=20, offset=0)
+        charged = sum(item["credits_charged"] for item in admin["items"])
+        if charged != 48 or not any(item["billing_kind"] == "included_revision" and item["status"] == "success"
+                                    for item in admin["items"]):
+            raise SystemExit("preflight: adaptation charges or the included revision were incorrect")
+    calls = [call for item in usage for call in item["calls"]]
+    costs = [call["apiCostRmb"] for call in calls if call["apiCostRmb"] is not None]
     print(json.dumps({"verified": True, "provider": provider, "model": model,
                       "episodes": 3, "promptVersion": ad.PROMPT_VERSION,
-                      "calls": len(usage),
+                      "jobs": len(usage), "calls": len(calls), "creditsCharged": charged,
+                      "pricedCalls": len(costs), "apiCostRmb": round(sum(costs), 6) if costs else None,
                       "inputTokens": sum(item["inputTokens"] or 0 for item in usage),
                       "outputTokens": sum(item["outputTokens"] or 0 for item in usage)}))
 

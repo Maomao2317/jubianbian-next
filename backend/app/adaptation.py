@@ -14,7 +14,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v3"
+PROMPT_VERSION = "adaptation-v4"
 usage_recorder = ContextVar("adaptation_usage_recorder", default=None)
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
@@ -266,7 +266,10 @@ INSTRUCTIONS = {
             "沿用试改人物的编号。剧本改编需要新角色时，也要固定编号并在人物表列出。",
     "episode": "只写指定集的完整正文。遵从人物表、前情和后续彼此依赖的情节。speaker_id 只使用已确认的角色编号，"
                "动作段 speaker_id 为空字符串。每条锁定台词须单独一条按指定角色编号和原文输出，标点保留。"
+               "如果提供了当前稿，按修改要求或更新过的分集大纲修订，保留未涉及的情节和已锁定内容。"
                "continuity 写本集留下的悬念、道具归属和人物状态，供下一集使用。",
+    "episode_repair": "修复待校正草稿的程序校验问题。只使用已确认的人物编号，动作编号留空，"
+                      "逐字保留锁定台词与标点，独立成段并指定正确说话人。返回修复后的完整本集，保留其余正文。",
     "review": "逐项比对本集正文与已确认的大纲、人物表、保留要求、锁定台词和引用原稿。"
               "检查明确要求保留的信息有无遗漏、人物身份是否错配、剧情因果是否成立。"
               "只把有明确依据的违约列为error，写出具体依据和改法。创作偏好用note。"
@@ -351,7 +354,7 @@ def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str,
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     schema = _ark_schema(contract.model_json_schema())
     maximum = {"analyze": 6000, "preview": 3400, "preview_repair": 2200, "plan": 10000,
-               "episode": 6500, "impact": 2200, "review": 2200, "review_all": 3400}[kind]
+               "episode": 6500, "episode_repair": 6500, "impact": 2200, "review": 2200, "review_all": 3400}[kind]
     instruction = f"{SYSTEM}\n{INSTRUCTIONS[kind]}"
     try:
         if provider == "ark":

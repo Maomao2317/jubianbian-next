@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import time
 
 import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
@@ -42,7 +43,7 @@ APP_FILES = [
 ]
 SMOKE = "backend/adaptation_smoke.py"
 ALLOWED = set(APP_FILES) | {"backend/test_adaptation.py", "web-staging/test-adaptation-feedback.cjs",
-                            "ops/release_script_adaptation.py", SMOKE}
+                            "ops/release_script_adaptation.py", "ops/release_gpu_transport.py", SMOKE}
 
 
 def image_id(image):
@@ -185,6 +186,15 @@ def restore(paths, existed, backup, root):
             path.unlink()
 
 
+def verify_adaptation_idle(connection):
+    active = connection.execute(
+        "SELECT count(*) FROM adaptations WHERE job_id IS NOT NULL AND job_started>=?",
+        (time.time() - 45 * 60,),
+    ).fetchone()[0]
+    if active:
+        raise RuntimeError("Release deferred: active script adaptation jobs " + str(active))
+
+
 def deploy(commit, build, base):
     fetch_revision(commit)
     record = json.loads((base / "staging-prepared.json").read_text())
@@ -232,7 +242,7 @@ def deploy(commit, build, base):
         config = json.loads(common.output(new_compose + ["config", "--format", "json"]))
         verify_config(old_config, config, record["image"], build)
         hold.write_text("Pinned " + build + "; commit " + commit + "\n")
-        deployment["tasksAtSwitch"] = stop_when_compute_idle(PROJECT)
+        deployment["tasksAtSwitch"] = stop_when_compute_idle(PROJECT, verify_idle=verify_adaptation_idle)
         stopped = True
         for path in APP_FILES:
             assert common.digest((base / path).read_bytes()) == record["files"][path]
@@ -266,7 +276,7 @@ def deploy(commit, build, base):
     except BaseException:
         if stopped and common.inspect(PROJECT)["State"]["Running"]:
             try:
-                stop_when_compute_idle(PROJECT)
+                stop_when_compute_idle(PROJECT, verify_idle=verify_adaptation_idle)
             except RuntimeError:
                 deployment["rollbackDeferredActiveTasks"] = True
                 deployment["failure"] = "Rollback deferred to avoid interrupting newly active tasks"

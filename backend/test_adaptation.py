@@ -69,7 +69,7 @@ class AdaptationTests(unittest.TestCase):
         return routes.create_project(None, routes.ProjectInput(
             goal="改成适合分镜绘制的古装漫剧", keep="保留核心因果线索", episode_count=2, **source))
 
-    def generate(self, project, kind, raw, **kwargs):
+    def generate(self, project, kind, raw, *, repaired=None, **kwargs):
         if kind == "preview":
             kwargs.setdefault("direction_id", "D1")
             kwargs.setdefault("keep_option_ids", ["K1"])
@@ -78,11 +78,15 @@ class AdaptationTests(unittest.TestCase):
         outputs = {kind: raw}
         if kind == "episode":
             outputs["review"] = REVIEW
+            outputs["episode_repair"] = raw if repaired is None else repaired
 
         def fake_generate(call_kind, data, contract, choice):
             if call_kind == "analyze":
                 self.assertEqual(data["goal"], "改成适合分镜绘制的古装漫剧")
                 self.assertEqual(data["keep"], "保留核心因果线索")
+            if call_kind == "episode" and str(job.episode) in project["outputs"]:
+                self.assertEqual(data["current_draft"], project["outputs"][str(job.episode)]["draft"])
+                self.assertEqual(data["revision_notes"], job.notes.strip())
             if ad.usage_recorder.get():
                 ad.usage_recorder.get()(call_kind, {
                     "provider": choice[0], "model": choice[1], "promptVersion": ad.PROMPT_VERSION,
@@ -129,8 +133,10 @@ class AdaptationTests(unittest.TestCase):
         project = self.generate(project, "episode", wrong)
         self.assertIn("锁定台词缺失", project["error"])
         self.assertEqual(project["outputs"], {})
-        project = self.generate(project, "episode", DRAFT)
+        project = self.generate(project, "episode", wrong, repaired=DRAFT)
         self.assertIn(f"沈青：{LINE}", routes.download(project_id, None).body.decode())
+        self.assertEqual([call["kind"] for call in project["usage"]["1"]["calls"]],
+                         ["episode", "episode_repair", "review"])
         project = self.generate(project, "episode", DRAFT, episode=2)
         project = routes.lock_episode(project_id, 2, None, routes.OutputLock(revision=project["revision"], locked=True))
         with self.assertRaises(HTTPException):
@@ -161,14 +167,34 @@ class AdaptationTests(unittest.TestCase):
         with closing(auth_store.db()) as conn:
             self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
         project = self.generate(project, "episode", DRAFT, episode=2)
-        project = self.generate(project, "episode", DRAFT, episode=2)
+        failed = self.generate(project, "episode", {}, episode=2, notes="改一下开场")
+        self.assertEqual(failed["outputs"]["2"]["version"], 1)
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
+        project = self.generate(failed, "episode", DRAFT, episode=2, notes="缩短开场")
+        self.assertEqual(project["outputs"]["2"]["version"], 2)
+        self.assertEqual(project["outputs"]["2"]["revisionNotes"], "缩短开场")
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
+        project = self.generate(project, "episode", DRAFT, episode=2, notes="增加对峙")
+        self.assertEqual(project["outputs"]["2"]["version"], 3)
+        archive = routes.get_episode_version(project["id"], 2, 2, None)
+        self.assertEqual(archive["notes"], "缩短开场")
+        self.assertIn(LINE, archive["screenplay"])
+        self.current_user.return_value = {"id": "other", "role": "user"}
+        with self.assertRaises(HTTPException) as exc:
+            routes.get_episode_version(project["id"], 2, 2, None)
+        self.assertEqual(exc.exception.status_code, 404)
         with closing(auth_store.db()) as conn:
             self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 60)
         self.current_user.return_value = {"id": "owner", "role": "admin"}
         page = routes.admin_adaptations(None, kind="episode", limit=20, offset=0)
-        self.assertEqual(page["total"], 3)
+        self.assertEqual(page["total"], 5)
         self.assertTrue(any(call["kind"] == "review" for call in page["items"][0]["calls"]))
         self.assertEqual(sum(item["credits_charged"] for item in page["categories"]), 24)
+        included = next(item for item in page["items"] if item["billing_kind"] == "included_revision"
+                        and item["status"] == "success")
+        self.assertEqual(included["credits_charged"], 0)
 
     def test_failed_analysis_refunds_the_reserved_project_fee(self):
         project = self.create(source_text=SOURCE)

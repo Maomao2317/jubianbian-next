@@ -1616,6 +1616,9 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .adapt-draft-block { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 4fr); align-items: start; gap: .55rem; }
 .adapt-episode, .adapt-editor { margin-top: 1rem; padding-top: .75rem; border-top: 1px solid var(--line, #d7dae0); }
 .adapt-editor form { margin-top: .8rem; }
+.adapt-revision { display: grid; gap: .65rem; justify-items: start; margin-top: 1rem; }
+.adapt-revision label { width: 100%; }
+.adapt-history .adapt-toolbar { margin-top: .65rem; }
 .adapt-warnings, .adapt-progress { border: 1px solid #e2c37b; background: #fffaeb; color: #503700; padding: .8rem; margin: .65rem 0; border-radius: 9px; overflow-wrap: anywhere; }
 .adapt-progress { background: #edf7ff; border-color: #b8d9ee; color: #183f58; }
 .adapt-error[hidden] { display: none; }
