@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextvars import ContextVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -13,7 +14,8 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v2"
+PROMPT_VERSION = "adaptation-v3"
+usage_recorder = ContextVar("adaptation_usage_recorder", default=None)
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
 EPISODE_HEADING = re.compile(r"(?m)^\s{0,4}(?:#{1,6}\s+)?(?:第\s*[零〇一二两三四五六七八九十百\d]+\s*[集话]|(?:EP(?:ISODE)?\s*)\d+)(?:\s|[：:、.\-]|$)[^\n]*", re.I)
@@ -105,6 +107,58 @@ class ImpactReport(Contract):
     affected: list[Impact] = Field(max_length=MAX_EPISODES)
 
 
+class KeepOption(Contract):
+    id: str = Field(min_length=1, max_length=20)
+    kind: str = Field(pattern=r"^(character|plot|ending|line)$")
+    label: str = Field(min_length=1, max_length=100)
+    instruction: str = Field(min_length=1, max_length=200)
+    source_id: str
+    quote: str = Field(min_length=1, max_length=300)
+
+
+class Direction(Contract):
+    id: str = Field(min_length=1, max_length=20)
+    title: str = Field(min_length=1, max_length=40)
+    description: str = Field(min_length=1, max_length=250)
+    reason: str = Field(min_length=1, max_length=250)
+    goal: str = Field(min_length=3, max_length=800)
+
+
+class Analysis(Contract):
+    title: str = Field(min_length=1, max_length=100)
+    summary: str = Field(min_length=1, max_length=1000)
+    characters: list[str] = Field(min_length=1, max_length=25)
+    directions: list[Direction] = Field(min_length=2, max_length=3)
+    keep_options: list[KeepOption] = Field(min_length=1, max_length=12)
+    questions: list[str] = Field(max_length=6)
+    preview_source_id: str
+
+
+class ReviewIssue(Contract):
+    episode: int = Field(ge=1, le=MAX_EPISODES)
+    severity: str = Field(pattern=r"^(error|note)$")
+    description: str = Field(min_length=1, max_length=400)
+    suggestion: str = Field(min_length=1, max_length=400)
+
+
+class ReviewReport(Contract):
+    summary: str = Field(min_length=1, max_length=500)
+    issues: list[ReviewIssue] = Field(max_length=12)
+
+
+def validate_analysis(analysis: Analysis, sources: list[SourceScene]) -> None:
+    source_map = {item.id: item.text for item in sources}
+    if analysis.preview_source_id not in source_map:
+        raise AdaptationError("推荐试改场次未能对应原稿，请重新分析。")
+    if len({item.id for item in analysis.directions}) != len(analysis.directions):
+        raise AdaptationError("改编方向编号重复，请重新分析。")
+    if len({item.id for item in analysis.keep_options}) != len(analysis.keep_options):
+        raise AdaptationError("保留选项编号重复，请重新分析。")
+    for item in analysis.keep_options:
+        if item.quote not in source_map.get(item.source_id, ""):
+            raise AdaptationError("建议中的原文依据未能对齐剧本，请重新分析。")
+
+
 class AdaptationError(ValueError):
     """An issue safe to show to the project owner."""
 
@@ -193,6 +247,11 @@ SYSTEM = (
 )
 
 INSTRUCTIONS = {
+    "analyze": "通读给定原稿，概括真实主线、人物、证据和结局。结合用户提出的改编目标和保留要求，"
+               "提出2到3个适合该故事的具体改编方向。"
+               "每个方向说明改法及适合原稿的理由。为人物、主线、结局及关键台词提供可勾选保留项，"
+               "每项的quote必须是对应source_id原文的连续逐字片段，保留标点。原稿事实与改编建议用措辞明确表达。"
+               "挑一个有对白和冲突的完整场次作为preview_source_id。身份、因果不明确的地方列入questions。",
     "preview": "用给定的一场戏试改。提供可逐句对照的改稿，用固定角色编号 C1、C2……。"
                "每位说话人都必须出现在 cast 中，包括一次性角色、画外音、旁白。"
                "speaker_id 只能用 cast 中的 id，动作段才留空。身份不清楚时建立标为待核对的角色并写入 questions。"
@@ -208,6 +267,13 @@ INSTRUCTIONS = {
     "episode": "只写指定集的完整正文。遵从人物表、前情和后续彼此依赖的情节。speaker_id 只使用已确认的角色编号，"
                "动作段 speaker_id 为空字符串。每条锁定台词须单独一条按指定角色编号和原文输出，标点保留。"
                "continuity 写本集留下的悬念、道具归属和人物状态，供下一集使用。",
+    "review": "逐项比对本集正文与已确认的大纲、人物表、保留要求、锁定台词和引用原稿。"
+              "检查明确要求保留的信息有无遗漏、人物身份是否错配、剧情因果是否成立。"
+              "只把有明确依据的违约列为error，写出具体依据和改法。创作偏好用note。"
+              "改编允许调整表达和情节安排，不能要求逐句照抄所有原稿。issues中的episode使用本集编号。",
+    "review_all": "结合全剧大纲、原稿分析和各集衔接记录，审查跨集人物状态、时间线、关键证据及伏笔回收。"
+                  "指出能定位到具体集的矛盾并给出依据与改法。明确冲突标error，建议核对标note。"
+                  "依据不足的推测列入核对建议，完整剧本的遗漏检查已由逐集审稿执行。",
     "impact": "核对改动前后大纲。只报告后续确实可能受到影响的集，逐条解释依据及建议改法。用原大纲的集号。"
               "没有可定位的影响时返回空列表。",
 }
@@ -284,7 +350,8 @@ def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str,
     provider, model = choice
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     schema = _ark_schema(contract.model_json_schema())
-    maximum = {"preview": 3400, "preview_repair": 2200, "plan": 10000, "episode": 6500, "impact": 2200}[kind]
+    maximum = {"analyze": 6000, "preview": 3400, "preview_repair": 2200, "plan": 10000,
+               "episode": 6500, "impact": 2200, "review": 2200, "review_all": 3400}[kind]
     instruction = f"{SYSTEM}\n{INSTRUCTIONS[kind]}"
     try:
         if provider == "ark":
@@ -313,10 +380,18 @@ def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str,
                     ],
                 })
             text, usage = response["output_text"], glm_provider.glm_usage(response, model)
-        return contract.model_validate_json(text), {
+        record = {
             "provider": provider, "model": model, "promptVersion": PROMPT_VERSION,
             "inputTokens": usage.get("input_tokens"), "outputTokens": usage.get("output_tokens"),
+            "apiCostRmb": usage.get("api_cost_rmb"),
+            "costSource": usage.get("cost_source") or (
+                "estimated" if usage.get("cost_is_estimate") else
+                "provider" if usage.get("api_cost_rmb") is not None else "unpriced"
+            ),
         }
+        if usage_recorder.get():
+            usage_recorder.get()(kind, record)
+        return contract.model_validate_json(text), record
     except ValidationError as exc:
         logger.warning("adaptation_contract_error kind=%s provider=%s model=%s errors=%s",
                        kind, provider, model,

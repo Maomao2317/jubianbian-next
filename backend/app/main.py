@@ -12,7 +12,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .adaptation_routes import ENABLED as ADAPTATION_ENABLED, init_adaptations, router as adaptation_router
+from .adaptation_routes import (
+    ENABLED as ADAPTATION_ENABLED,
+    admin_adaptations,
+    init_adaptations,
+    router as adaptation_router,
+)
 from .auth_store import init_db
 from .config import CORS_ORIGINS, FRONTEND_DIR
 from .middleware import RateLimitMiddleware, RequestLogMiddleware
@@ -143,6 +148,7 @@ init_db()
 if ADAPTATION_ENABLED:
     init_adaptations()
     app.include_router(adaptation_router)
+    app.add_api_route("/api/admin/adaptations", admin_adaptations, methods=["GET"])
 
 @app.on_event("startup")
 async def start_durable_worker() -> None:

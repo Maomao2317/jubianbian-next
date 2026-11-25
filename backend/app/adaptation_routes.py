@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import Field
 
@@ -30,11 +30,14 @@ router = APIRouter(prefix="/api/adaptations")
 ENABLED = JBB_ENVIRONMENT in {"staging", "development", "dev", "local"}
 LEASE_SECONDS = 45 * 60
 MAX_FILE_BYTES = 2 * 1024 * 1024
+PROJECT_POINTS = 16
+EPISODE_POINTS = 16
+REWRITE_POINTS = 8
 
 
 class ProjectInput(ad.Contract):
     title: str = Field(default="", max_length=100)
-    goal: str = Field(min_length=3, max_length=1000)
+    goal: str = Field(default="", max_length=1000)
     keep: str = Field(default="", max_length=1200)
     episode_count: int = Field(ge=1, le=ad.MAX_EPISODES)
     task_id: str = Field(default="", max_length=100)
@@ -42,10 +45,13 @@ class ProjectInput(ad.Contract):
 
 
 class JobInput(ad.Contract):
-    kind: Literal["preview", "plan", "episode", "impact"]
+    kind: Literal["analyze", "preview", "plan", "episode", "impact", "review_all"]
     revision: int
     notes: str = Field(default="", max_length=1000)
+    keep_notes: str = Field(default="", max_length=1200)
     source_id: str = Field(default="", max_length=20)
+    direction_id: str = Field(default="", max_length=20)
+    keep_option_ids: list[str] = Field(default_factory=list, max_length=12)
     episode: int = Field(default=1, ge=1, le=ad.MAX_EPISODES)
 
 
@@ -85,7 +91,101 @@ def init_adaptations():
                 user_id TEXT NOT NULL, started REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS adaptation_attempts_time ON adaptation_attempts(started);
+            CREATE TABLE IF NOT EXISTS adaptation_jobs (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, project_title TEXT NOT NULL,
+                user_id TEXT NOT NULL, kind TEXT NOT NULL, billing_kind TEXT NOT NULL,
+                episode INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+                credits_reserved INTEGER NOT NULL DEFAULT 0,
+                credits_charged INTEGER NOT NULL DEFAULT 0,
+                credits_refunded INTEGER NOT NULL DEFAULT 0,
+                provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+                prompt_version TEXT NOT NULL DEFAULT '', input_tokens INTEGER,
+                output_tokens INTEGER, api_cost_rmb REAL, cost_source TEXT NOT NULL DEFAULT 'unpriced',
+                calls_json TEXT NOT NULL DEFAULT '[]', error TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL, finished_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS adaptation_jobs_time ON adaptation_jobs(started_at DESC);
+            CREATE INDEX IF NOT EXISTS adaptation_jobs_owner ON adaptation_jobs(user_id, started_at DESC);
+            CREATE INDEX IF NOT EXISTS adaptation_jobs_project ON adaptation_jobs(project_id, started_at DESC);
         """)
+        _recover_expired_jobs(conn, time.time())
+
+
+def admin_adaptations(
+    request: Request,
+    keyword: str = "",
+    status: str = "all",
+    kind: str = "all",
+    user_id: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    user = current_user(request)
+    if user["role"] != "admin":
+        _fail("无管理员权限", 403)
+    if status not in {"all", "running", "success", "failed"}:
+        _fail("不支持的改编任务状态", 400)
+    if kind != "all" and kind not in {"analyze", "preview", "plan", "episode", "impact", "review_all"}:
+        _fail("不支持的改编任务分类", 400)
+
+    clauses: list[str] = []
+    params: list[object] = []
+    if status != "all":
+        clauses.append("j.status=?")
+        params.append(status)
+    if kind != "all":
+        clauses.append("j.kind=?")
+        params.append(kind)
+    if user_id:
+        clauses.append("j.user_id=?")
+        params.append(user_id)
+    if keyword.strip():
+        value = f"%{keyword.strip()}%"
+        clauses.append("(j.project_title LIKE ? OR u.name LIKE ? OR u.email LIKE ?)")
+        params.extend((value, value, value))
+    if date_from:
+        clauses.append("j.started_at>=?")
+        params.append(f"{date_from}T00:00:00")
+    if date_to:
+        clauses.append("substr(j.started_at,1,10)<=?")
+        params.append(date_to)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    with closing(db()) as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM adaptation_jobs j LEFT JOIN users u ON u.id=j.user_id" + where,
+            params,
+        ).fetchone()[0]
+        rows = conn.execute(
+            """SELECT j.*, u.name AS user_name, u.email AS user_email
+               FROM adaptation_jobs j LEFT JOIN users u ON u.id=j.user_id""" + where
+            + " ORDER BY j.started_at DESC, j.id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        groups = conn.execute(
+            """SELECT j.kind, j.status, COUNT(*) AS jobs,
+                      COALESCE(SUM(j.input_tokens),0) AS input_tokens,
+                      COALESCE(SUM(j.output_tokens),0) AS output_tokens,
+                      COALESCE(SUM(j.credits_charged),0) AS credits_charged,
+                      COALESCE(SUM(j.credits_refunded),0) AS credits_refunded,
+                      SUM(j.api_cost_rmb) AS api_cost_rmb,
+                      SUM(CASE WHEN j.api_cost_rmb IS NULL THEN 1 ELSE 0 END) AS unpriced_jobs
+               FROM adaptation_jobs j LEFT JOIN users u ON u.id=j.user_id""" + where
+            + " GROUP BY j.kind, j.status ORDER BY j.kind, j.status",
+            params,
+        ).fetchall()
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["calls"] = json.loads(item.pop("calls_json") or "[]")
+        except (TypeError, ValueError):
+            item["calls"] = []
+        items.append(item)
+    return {"total": total, "items": items, "categories": [dict(row) for row in groups]}
 
 
 def _fail(message: str, status: int = 422):
@@ -94,6 +194,85 @@ def _fail(message: str, status: int = 422):
 
 def _dump(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _job_label(kind: str) -> str:
+    return {
+        "analyze": "原稿分析与改编建议",
+        "preview": "代表场次试改",
+        "plan": "分集大纲",
+        "episode": "分集正文与审稿",
+        "impact": "大纲影响分析",
+        "review_all": "整剧一致性审稿",
+    }.get(kind, "剧本改编")
+
+
+def _adjust_credits(conn, user_id: str, amount: int, entry_type: str, reason: str) -> int:
+    user = conn.execute("SELECT credits FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        _fail("用户账户不存在，无法结算积分", 409)
+    balance = int(user["credits"] or 0) + amount
+    if amount < 0:
+        changed = conn.execute(
+            "UPDATE users SET credits=credits+? WHERE id=? AND credits>=?",
+            (amount, user_id, -amount),
+        ).rowcount
+        if changed != 1:
+            _fail("积分不足，请先充值后再生成", 402)
+    else:
+        conn.execute("UPDATE users SET credits=credits+? WHERE id=?", (amount, user_id))
+    conn.execute(
+        """INSERT INTO credit_ledger(user_id, amount, balance_after, entry_type, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (user_id, amount, balance, entry_type, reason[:200], now_iso()),
+    )
+    return balance
+
+
+def _recover_expired_jobs(conn: sqlite3.Connection, now: float) -> None:
+    expired = conn.execute(
+        "SELECT * FROM adaptations WHERE job_id IS NOT NULL AND job_started<?",
+        (now - LEASE_SECONDS,),
+    ).fetchall()
+    for project in expired:
+        job = conn.execute("SELECT * FROM adaptation_jobs WHERE id=?", (project["job_id"],)).fetchone()
+        if job and job["status"] == "running":
+            refund = max(0, int(job["credits_reserved"] or 0) - int(job["credits_refunded"] or 0))
+            if refund:
+                _adjust_credits(conn, job["user_id"], refund, "refund",
+                                f"剧本改编失败退回 · {job['project_title']} · {_job_label(job['kind'])}")
+            conn.execute(
+                """UPDATE adaptation_jobs SET status='failed', credits_refunded=?, error=?, finished_at=?
+                   WHERE id=? AND status='running'""",
+                (int(job["credits_refunded"] or 0) + refund, "任务超时中断，已退回预扣积分。", now_iso(), job["id"]),
+            )
+        state = json.loads(project["state_json"])
+        state.update(error="上次生成中断，预扣积分已退回。", errorKind=project["job_kind"])
+        conn.execute(
+            """UPDATE adaptations SET job_id=NULL, job_kind=NULL, job_started=NULL, state_json=?
+               WHERE id=? AND job_id=?""",
+            (_dump(state), project["id"], project["job_id"]),
+        )
+
+
+def _reserved_points(state: dict, job: JobInput) -> tuple[int, str]:
+    if job.kind == "analyze":
+        return (PROJECT_POINTS, "project") if not state.get("setupPaid") else (0, "included")
+    if job.kind == "preview" and state.get("previewUsed"):
+        return REWRITE_POINTS, "preview_retry"
+    if job.kind == "plan" and state.get("planUsed"):
+        return REWRITE_POINTS, "plan_retry"
+    if job.kind == "episode":
+        if str(job.episode) in state["outputs"]:
+            return REWRITE_POINTS, "rewrite"
+        if job.episode == 1:
+            return 0, "included_episode"
+        return EPISODE_POINTS, "episode"
+    if job.kind == "review_all" and state.get("reviewAllUsed"):
+        return REWRITE_POINTS, "review"
+    if job.kind == "impact" and state.get("impactChecked"):
+        return REWRITE_POINTS, "impact"
+    return 0, "included"
 
 
 def _get(conn: sqlite3.Connection, project_id: str, owner: str) -> sqlite3.Row:
@@ -114,8 +293,14 @@ def _project(row: sqlite3.Row) -> dict:
         job = None
     else:
         job = row["job_kind"]
+    billing = {
+        "projectPoints": PROJECT_POINTS,
+        "episodePoints": EPISODE_POINTS,
+        "rewritePoints": REWRITE_POINTS,
+        "setupPaid": bool(state.get("setupPaid")),
+    }
     return {**state, "id": row["id"], "title": row["title"], "revision": row["revision"],
-            "updatedAt": row["updated_at"], "job": job}
+            "updatedAt": row["updated_at"], "job": job, "billing": billing}
 
 
 def _idle(row: sqlite3.Row, revision: int | None = None):
@@ -256,9 +441,13 @@ def create_project(request: Request, body: ProjectInput):
     except ad.AdaptationError as exc:
         _fail(str(exc))
     project_id = uuid.uuid4().hex
-    state = {"goal": body.goal, "keep": body.keep, "episodeCount": body.episode_count,
+    state = {"goal": body.goal, "keep": body.keep, "projectGoal": body.goal, "projectKeep": body.keep,
+             "episodeCount": body.episode_count,
+             "projectTitle": body.title or title,
              "sources": [scene.model_dump() for scene in scenes], "warnings": warnings,
-             "outputs": {}, "locks": [], "usage": {}, "confirmed": False}
+             "outputs": {}, "locks": [], "usage": {}, "reviews": {}, "confirmed": False,
+             "setupPaid": False, "previewUsed": False, "planUsed": False,
+             "selectedKeepOptionIds": None, "titleFromSource": not bool(body.title.strip())}
     with closing(db()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT COUNT(*) FROM adaptations WHERE user_id=?", (owner,)).fetchone()[0] >= 50:
@@ -303,6 +492,8 @@ def update_source(project_id: str, request: Request, body: SourceInput):
         row = _get(conn, project_id, owner)
         _idle(row, body.revision)
         state = _state(row)
+        if state.get("analysis"):
+            _fail("原稿分析后不能再改原文，请新建项目导入修订稿。", 409)
         if state.get("plan") or state["outputs"]:
             _fail("大纲已生成。请在大纲中吸收改动，或新建项目修正原稿。", 409)
         source = next((item for item in state["sources"] if item["id"] == body.source_id), None)
@@ -324,22 +515,56 @@ def _job_context(state: dict, job: JobInput):
                for source in state["sources"]]
     source_data = [{"id": item.id, "label": item.label, "text": item.text} for item in sources]
     context = {"goal": state["goal"], "keep": state["keep"]}
+    if job.kind == "analyze":
+        if state.get("analysis"):
+            raise ad.AdaptationError("原稿已经分析完成，可继续选择方向。")
+        return {"title": state.get("projectTitle", ""), "target_episodes": state["episodeCount"],
+                "goal": state.get("projectGoal", state.get("goal", "")),
+                "keep": state.get("projectKeep", state.get("keep", "")),
+                "sources": source_data}, ad.Analysis, sources
+
     if job.kind == "preview":
+        if not state.get("analysis") or not state.get("selectedDirectionId"):
+            raise ad.AdaptationError("请先分析原稿并选择一个改编方向。")
         source = next((item for item in source_data if item["id"] == job.source_id), None)
         if not source:
             raise ad.AdaptationError("请先选一场原稿。")
-        return context | {"source": source}, ad.Preview, sources
+        direction = next((item for item in state["analysis"]["directions"]
+                          if item["id"] == state["selectedDirectionId"]), None)
+        if not direction:
+            raise ad.AdaptationError("所选改编方向已失效，请重新选择。")
+        return context | {"analysis": state["analysis"], "direction": direction,
+                          "source": source}, ad.Preview, sources
 
     if job.kind == "plan":
-        if not state.get("preview") or state.get("confirmed"):
+        if not state.get("analysis") or not state.get("preview") or state.get("confirmed"):
             raise ad.AdaptationError("请先生成并审阅一场试改。")
         return context | {"target_episodes": state["episodeCount"], "sources": source_data,
-                          "reviewed_preview": state["preview"], "direction_notes": job.notes}, ad.Plan, sources
+                          "analysis": state["analysis"], "direction": next(
+                              item for item in state["analysis"]["directions"]
+                              if item["id"] == state["selectedDirectionId"]
+                          ), "reviewed_preview": state["preview"],
+                          "direction_notes": job.notes}, ad.Plan, sources
 
     if job.kind == "impact":
         if not state.get("planBeforeEdit"):
             raise ad.AdaptationError("请先保存一处大纲改动。")
         return {"before": state["planBeforeEdit"], "after": state["plan"]}, ad.ImpactReport, sources
+
+    if job.kind == "review_all":
+        if not state.get("confirmed"):
+            raise ad.AdaptationError("请先确认分集大纲。")
+        expected = {str(number) for number in range(1, state["episodeCount"] + 1)}
+        if set(state["outputs"]) != expected or any(
+            state["outputs"][number].get("stale", True) for number in expected
+        ):
+            raise ad.AdaptationError("请先生成并复核全部分集，再进行整剧一致性检查。")
+        episodes = [{"number": int(number), "draft": state["outputs"][number]["draft"],
+                     "continuity": state["outputs"][number]["draft"]["continuity"],
+                     "review": state.get("reviews", {}).get(number, {})}
+                    for number in sorted(expected, key=int)]
+        return {"analysis": state.get("analysis"), "plan": state["plan"],
+                "episodes": episodes, "locks": state["locks"]}, ad.ReviewReport, sources
 
     if not state.get("confirmed"):
         raise ad.AdaptationError("请先确认分集大纲。")
@@ -362,22 +587,72 @@ def _job_context(state: dict, job: JobInput):
                       }, ad.Draft, sources
 
 
+def _usage_summary(usage: dict, calls: list[dict]) -> dict:
+    input_tokens = [item.get("inputTokens") for item in calls
+                    if isinstance(item.get("inputTokens"), (int, float))]
+    output_tokens = [item.get("outputTokens") for item in calls
+                     if isinstance(item.get("outputTokens"), (int, float))]
+    costs = [item.get("apiCostRmb") for item in calls
+             if isinstance(item.get("apiCostRmb"), (int, float))]
+    sources = {item.get("costSource") for item in calls if item.get("apiCostRmb") is not None}
+    cost_source = "unpriced" if not costs else "estimated" if any(
+        "estimate" in str(value) for value in sources
+    ) else "provider" if len(sources) == 1 else "mixed"
+    summary = dict(usage)
+    summary.update(
+        inputTokens=sum(input_tokens) if input_tokens else usage.get("inputTokens"),
+        outputTokens=sum(output_tokens) if output_tokens else usage.get("outputTokens"),
+        apiCostRmb=round(sum(costs), 6) if costs else None,
+        costSource=cost_source,
+        calls=calls,
+    )
+    return summary
+
+
 def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
+    calls: list[dict] = []
+    recorder = ad.usage_recorder.set(lambda kind, usage: calls.append({"kind": kind, **usage}))
     try:
         if job.kind == "preview":
             result, usage = ad.generate_preview(context, model)
         else:
             result, usage = ad.generate(job.kind, context, contract, model)
+        review = None
+        if job.kind == "analyze":
+            ad.validate_analysis(result, sources)
+        elif job.kind == "episode":
+            with closing(db()) as conn:
+                state_for_review = _state(_get(conn, project_id, owner))
+            plan_for_review = ad.Plan.model_validate(state_for_review["plan"])
+            locks_for_review = [ad.LockLine.model_validate(item) for item in state_for_review["locks"]]
+            ad.validate_draft(result, plan_for_review, locks_for_review, job.episode)
+            review_context = {
+                "analysis": state_for_review.get("analysis"), "plan": state_for_review["plan"],
+                "episode": job.episode, "draft": result.model_dump(),
+                "source_scenes": context["source_scenes"],
+                "locked_lines": context["locked_lines"],
+            }
+            review, _ = ad.generate("review", review_context, ad.ReviewReport, model)
+
         with closing(db()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _get(conn, project_id, owner)
             if row["job_id"] != job_id:
                 return
             state = _state(row)
-            if job.kind == "preview":
+            job_row = conn.execute("SELECT * FROM adaptation_jobs WHERE id=?", (job_id,)).fetchone()
+            if job.kind == "analyze":
+                state["analysis"] = result.model_dump()
+                state["setupPaid"] = True
+                if state.get("titleFromSource"):
+                    title = result.title.strip()
+                    conn.execute("UPDATE adaptations SET title=? WHERE id=?", (title, project_id))
+                    state["projectTitle"] = title
+                    state["titleFromSource"] = False
+            elif job.kind == "preview":
                 state["preview"] = result.model_dump()
-                if not state.get("confirmed"):
-                    state.pop("plan", None)
+                state["previewUsed"] = True
+                state.pop("plan", None)
             elif job.kind == "plan":
                 ad.validate_plan(result, sources, state["episodeCount"])
                 if any(not any(character.id == previous["id"] and character.original_name == previous["original_name"]
@@ -385,22 +660,47 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                        for previous in state["preview"]["cast"]):
                     raise ad.AdaptationError("大纲没有沿用试改的人物编号和姓名，请重试。")
                 state["plan"] = result.model_dump()
+                state["planUsed"] = True
             elif job.kind == "episode":
+                if any(issue.episode != job.episode for issue in review.issues):
+                    raise ad.AdaptationError("本集审稿返回了其他集数的提示，请重试。")
                 plan = ad.Plan.model_validate(state["plan"])
                 locks = [ad.LockLine.model_validate(item) for item in state["locks"]]
                 ad.validate_draft(result, plan, locks, job.episode)
                 state["outputs"][str(job.episode)] = {"draft": result.model_dump(), "locked": False, "stale": False}
+                state.setdefault("reviews", {})[str(job.episode)] = review.model_dump()
                 for key, output in state["outputs"].items():
                     if int(key) > job.episode:
                         output["stale"] = True
-            else:
+                        state["reviews"].pop(key, None)
+            elif job.kind == "impact":
                 numbers = [item.number for item in result.affected]
                 if len(set(numbers)) != len(numbers) or any(n < 1 or n > state["episodeCount"] for n in numbers):
                     raise ad.AdaptationError("影响清单返回了无效集数，请重试。")
                 state["impact"] = result.model_dump()["affected"]
-            state["usage"][str(job.episode) if job.kind == "episode" else job.kind] = usage
+                state["impactChecked"] = True
+            elif job.kind == "review_all":
+                if any(issue.episode > state["episodeCount"] for issue in result.issues):
+                    raise ad.AdaptationError("整剧审稿返回了不存在的集数，请重试。")
+                state["reviewAll"] = result.model_dump()
+                state["reviewAllUsed"] = True
+
+            usage = _usage_summary(usage, calls)
+            usage_key = str(job.episode) if job.kind == "episode" else job.kind
+            state["usage"][usage_key] = usage
             state.pop("error", None)
+            state.pop("errorKind", None)
             _save(conn, row, state)
+            conn.execute(
+                """UPDATE adaptation_jobs SET status='success', credits_charged=credits_reserved,
+                   provider=?, model=?, prompt_version=?, input_tokens=?, output_tokens=?,
+                   api_cost_rmb=?, cost_source=?, calls_json=?, finished_at=? WHERE id=?""",
+                (calls[0].get("provider", "") if calls else "",
+                 calls[0].get("model", "") if calls else "",
+                 ad.PROMPT_VERSION, usage.get("inputTokens"), usage.get("outputTokens"),
+                 usage.get("apiCostRmb"), usage.get("costSource", "unpriced"),
+                 _dump(calls), now_iso(), job_id),
+            )
     except Exception as exc:
         # Provider messages can echo source text. Persist only vetted product errors.
         error = str(exc) if isinstance(exc, ad.AdaptationError) else "本次改编生成失败，请重试。"
@@ -410,10 +710,31 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM adaptations WHERE id=? AND user_id=? AND job_id=?",
                                (project_id, owner, job_id)).fetchone()
-            if row:
+            job_row = conn.execute("SELECT * FROM adaptation_jobs WHERE id=?", (job_id,)).fetchone()
+            if row and job_row and job_row["status"] == "running":
                 state = _state(row)
+                refund = max(0, int(job_row["credits_reserved"] or 0) - int(job_row["credits_refunded"] or 0))
+                if refund:
+                    _adjust_credits(conn, owner, refund, "refund",
+                                    f"劇本改編失敗退回 · {job_row['project_title']} · {_job_label(job.kind)}")
                 state.update(error=error, errorKind=job.kind)
+                if job.kind == "analyze":
+                    state["setupPaid"] = False
                 _save(conn, row, state)
+                usage = _usage_summary({}, calls)
+                conn.execute(
+                    """UPDATE adaptation_jobs SET status='failed', credits_refunded=?, provider=?, model=?,
+                       prompt_version=?, input_tokens=?, output_tokens=?, api_cost_rmb=?, cost_source=?,
+                       calls_json=?, error=?, finished_at=? WHERE id=?""",
+                    (int(job_row["credits_refunded"] or 0) + refund,
+                     calls[0].get("provider", "") if calls else "",
+                     calls[0].get("model", "") if calls else "",
+                     ad.PROMPT_VERSION, usage.get("inputTokens"), usage.get("outputTokens"),
+                     usage.get("apiCostRmb"), usage.get("costSource", "unpriced"),
+                     _dump(calls), error[:400], now_iso(), job_id),
+                )
+    finally:
+        ad.usage_recorder.reset(recorder)
 
 
 @router.post("/{project_id}/jobs", status_code=202)
@@ -421,12 +742,39 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
     owner = current_user(request)["id"]
     with closing(db()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        _recover_expired_jobs(conn, time.time())
         row = _get(conn, project_id, owner)
         _idle(row, body.revision)
         try:
             state = _state(row)
-            if body.kind == "preview" and state.get("confirmed"):
-                raise ad.AdaptationError("大纲已确认。请在新项目中重新试改。")
+            if body.kind == "preview":
+                if state.get("confirmed"):
+                    raise ad.AdaptationError("大纲已确认。请在新项目中重新试改。")
+                if not state.get("analysis"):
+                    raise ad.AdaptationError("请先分析原稿并选择一个改编方向。")
+                analysis = ad.Analysis.model_validate(state.get("analysis"))
+                direction = next((item for item in analysis.directions if item.id == body.direction_id), None)
+                if not direction:
+                    raise ad.AdaptationError("请选择一个改编方向。")
+                if len(set(body.keep_option_ids)) != len(body.keep_option_ids):
+                    raise ad.AdaptationError("保留项重复，请重新选择。")
+                options = {item.id: item for item in analysis.keep_options}
+                if any(option_id not in options for option_id in body.keep_option_ids):
+                    raise ad.AdaptationError("保留项已更新，请刷新后重新选择。")
+                state["selectedDirectionId"] = direction.id
+                state["selectedKeepOptionIds"] = body.keep_option_ids
+                project_goal = state.setdefault("projectGoal", state.get("goal", "")).strip()
+                project_keep = state.setdefault("projectKeep", state.get("keep", "")).strip()
+                goal = "\n".join(part for part in [direction.goal, project_goal, body.notes.strip()] if part)
+                keep = "\n".join(
+                    [options[option_id].instruction for option_id in body.keep_option_ids]
+                    + [project_keep, body.keep_notes.strip()]
+                )
+                if len(goal) > 1000 or len(keep) > 1200:
+                    raise ad.AdaptationError("补充要求太长，请精简后再试。")
+                state["goal"], state["keep"] = goal, keep
+                if not body.source_id:
+                    body = body.model_copy(update={"source_id": analysis.preview_source_id})
             context, contract, sources = _job_context(state, body)
             model = ad.model_choice()
         except ad.AdaptationError as exc:
@@ -443,9 +791,30 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
         if conn.execute("SELECT COUNT(*) FROM adaptation_attempts WHERE user_id=?", (owner,)).fetchone()[0] >= 40:
             _fail("已达测试环境每日生成上限，请明天再试。", 429)
         job_id = uuid.uuid4().hex
+        points, billing_kind = _reserved_points(state, body)
+        if points:
+            charge_label = {
+                "project": "原稿分析（含第1集）",
+                "preview_retry": "试改重做",
+                "plan_retry": "分集大纲重生成",
+                "episode": f"第{body.episode}集生成",
+                "rewrite": f"第{body.episode}集重写",
+                "review": "整剧一致性复核",
+                "impact": "大纲影响分析",
+            }.get(billing_kind, _job_label(body.kind))
+            _adjust_credits(conn, owner, -points, "consume",
+                            f"剧本改编 · {row['title']} · {charge_label}")
         state.pop("error", None)
         state.pop("errorKind", None)
         conn.execute("INSERT INTO adaptation_attempts VALUES(?,?)", (owner, now))
+        conn.execute(
+            """INSERT INTO adaptation_jobs
+               (id, project_id, project_title, user_id, kind, billing_kind, episode,
+                status, credits_reserved, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+            (job_id, project_id, row["title"], owner, body.kind, billing_kind,
+             body.episode if body.kind == "episode" else 0, points, now_iso()),
+        )
         conn.execute("UPDATE adaptations SET job_id=?,job_kind=?,job_started=?,state_json=?,updated_at=? WHERE id=?",
                      (job_id, body.kind, now, _dump(state), now_iso(), project_id))
         background.add_task(_run_job, project_id, owner, job_id, body, context, contract, sources, model)
@@ -494,6 +863,8 @@ def save_plan(project_id: str, request: Request, body: PlanInput):
             for number, output in state["outputs"].items():
                 if int(number) >= affected:
                     output["stale"] = True
+                    state.get("reviews", {}).pop(number, None)
+            state.pop("reviewAll", None)
         if plan != state["plan"]:
             state["planBeforeEdit"] = state["plan"]
             state.pop("impact", None)
@@ -526,6 +897,8 @@ def save_episode(project_id: str, episode: int, request: Request, body: DraftInp
         draft = body.draft.model_dump()
         if draft != output["draft"] or output["stale"]:
             output.update(draft=draft, stale=False)
+            state.get("reviews", {}).pop(str(episode), None)
+            state.pop("reviewAll", None)
             for number, other in state["outputs"].items():
                 if int(number) > episode:
                     other["stale"] = True

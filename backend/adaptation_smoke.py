@@ -1,6 +1,7 @@
 """Run a small real-model staging smoke using only original synthetic text."""
 
 import json
+from contextlib import closing
 from unittest.mock import patch
 
 from fastapi import BackgroundTasks
@@ -8,7 +9,7 @@ from fastapi import BackgroundTasks
 from app import adaptation as ad
 from app import adaptation_routes as routes
 from app import config
-from app.auth_store import init_db
+from app.auth_store import db, init_db
 
 SOURCE = """第1集
 1-1 夜 内 账房
@@ -39,6 +40,11 @@ def main():
         raise SystemExit("Smoke requires the disposable staging test database.")
     init_db()
     routes.init_adaptations()
+    with closing(db()) as connection, connection:
+        connection.execute(
+            """INSERT INTO users(id,email,password_hash,name,credits,created_at)
+               VALUES ('isolated-smoke','adaptation-smoke@example.test','test','改编冒烟测试',9999,'now')"""
+        )
     usage = []
 
     def run(project, kind, **fields):
@@ -61,8 +67,11 @@ def main():
             keep="保留沈青、迟巧的姓名和身份，账册、缺角印章、红线及翻案的因果。第一集原样保留沈青的台词“账册不能离开柜台。”。",
             episode_count=3, source_text=SOURCE,
         ))
+        project = run(project, "analyze")
         source = next(item for item in project["sources"] if LINE in item["text"])
-        project = run(project, "preview", source_id=source["id"])
+        direction = project["analysis"]["directions"][0]
+        project = run(project, "preview", source_id=source["id"], direction_id=direction["id"],
+                      keep_option_ids=[item["id"] for item in project["analysis"]["keep_options"]])
         project = run(project, "plan", notes="第一集保留沈青及其锁定台词。")
         plan = project["plan"]
         character = next((item for item in plan["cast"] if item["name"] == "沈青"), None)
@@ -73,6 +82,8 @@ def main():
             locks=[ad.LockLine(episode=1, speaker_id=character["id"], source_id=source["id"], text=LINE)]))
         for number in range(1, 4):
             project = run(project, "episode", episode=number)
+        if any(str(number) not in project["reviews"] for number in range(1, 4)):
+            raise SystemExit("preflight: at least one generated episode is missing its review")
         exported = routes.download(project["id"], None).body.decode()
         if not all(f"## 第 {number} 集" in exported for number in range(1, 4)) or "沈青：" + LINE not in exported:
             raise SystemExit("preflight: generated export did not pass the episode and exact dialogue checks")

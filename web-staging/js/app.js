@@ -56,6 +56,12 @@
     adminRechargeFrom: "",
     adminRechargeTo: "",
     adminRechargeType: "all",
+    adminAdaptPage: 0,
+    adminAdaptKeyword: "",
+    adminAdaptKind: "all",
+    adminAdaptStatus: "all",
+    adminAdaptFrom: "",
+    adminAdaptTo: "",
     taskPage: 0,
     taskDateRange: "all",
     taskFrom: "",
@@ -285,6 +291,46 @@
     return `<span class="admin-status ${tone}">${label}</span>${detail ? `<small class="admin-task-counts">${detail}</small>` : ""}`;
   }
 
+  const adaptationKinds = {
+    analyze: "原稿分析与改编建议", preview: "代表场次试改", plan: "分集大纲",
+    episode: "分集正文与审稿", impact: "大纲影响分析", review_all: "整剧一致性审稿"
+  };
+  const adaptationBillingKinds = {
+    project: "项目费", included: "已包含", included_episode: "已含第 1 集",
+    episode: "分集生成", rewrite: "整集重写", preview_retry: "试改重做",
+    plan_retry: "大纲重生成", review: "整剧复审", impact: "大纲影响复核"
+  };
+
+  function adminAdaptationStatus(status) {
+    const label = { running: "进行中", success: "成功", failed: "失败" }[status] || "未知";
+    const tone = status === "success" ? "on" : status === "failed" ? "off" : "wait";
+    return `<span class="admin-status ${tone}">${label}</span>`;
+  }
+
+  function adminAdaptationCalls(calls) {
+    if (!Array.isArray(calls) || !calls.length) return "<small>暂无模型调用明细</small>";
+    return `<div class="adapt-admin-calls">${calls.map(call => {
+      const label = adaptationKinds[call.kind] || call.kind || "模型调用";
+      const tokens = Number(call.inputTokens || 0) + Number(call.outputTokens || 0);
+      const cost = call.apiCostRmb == null ? "成本未计价" : `${String(call.costSource || "").includes("estimate") ? "估算 " : ""}¥${Number(call.apiCostRmb).toFixed(4)}`;
+      return `<span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(call.model || "模型未知")} · ${tokens.toLocaleString()} Tokens · ${cost}</small></span>`;
+    }).join("")}</div>`;
+  }
+
+  function adminAdaptationRow(item) {
+    const kind = adaptationKinds[item.kind] || item.kind;
+    const points = Number(item.credits_charged || 0);
+    const refund = Number(item.credits_refunded || 0);
+    const cost = item.api_cost_rmb == null ? "未计价" : `${String(item.cost_source || "").includes("estimate") ? "估算 " : ""}¥${Number(item.api_cost_rmb).toFixed(4)}`;
+    const episode = Number(item.episode) ? `第 ${Number(item.episode)} 集` : "—";
+    return `<tr><td><strong>${escapeHtml(item.project_title || "已删除项目")}</strong><small>${escapeHtml(item.user_name || "未命名用户")} · ${escapeHtml(item.user_email || "")}</small></td>
+      <td><strong>${escapeHtml(kind)}</strong><small>${escapeHtml(episode)} · ${escapeHtml(adaptationBillingKinds[item.billing_kind] || "已包含")}</small></td>
+      <td>${adminAdaptationStatus(item.status)}${item.error ? `<small>${escapeHtml(item.error)}</small>` : ""}</td>
+      <td><strong>${Number(item.input_tokens || 0).toLocaleString()} / ${Number(item.output_tokens || 0).toLocaleString()}</strong><small>输入 / 输出 Tokens · ${escapeHtml(item.model || "模型未知")}</small></td>
+      <td><strong>${cost}</strong><small>实扣 ${points} 积分${refund ? ` · 退回 ${refund}` : ""}</small></td>
+      <td>${adminAdaptationCalls(item.calls)}<small>${formatDate(item.started_at)}${item.finished_at ? ` · 完成 ${formatDate(item.finished_at)}` : ""}</small></td></tr>`;
+  }
+
   function adminTaskActions(item, reviewId, allowControls) {
     if (item.status === "deleting") return "";
     const id = escapeHtml(item.id);
@@ -348,7 +394,7 @@
     const requestId = ++state.adminRequestId;
     document.querySelector(".admin-page")?.setAttribute("aria-busy", "true");
     try {
-      const tabs = [{id:"overview",label:"概览"},{id:"users",label:"用户管理"},{id:"credits",label:"充值与流水"},{id:"tasks",label:"任务管理"},{id:"usage",label:"用量记录"}];
+      const tabs = [{id:"overview",label:"概览"},{id:"users",label:"用户管理"},{id:"credits",label:"充值与流水"},{id:"tasks",label:"任务管理"},{id:"usage",label:"用量记录"},{id:"adaptations",label:"剧本改编"}];
       const tab = state.adminTab;
       const overviewPromise = state.adminOverviewCache && Date.now() - state.adminOverviewCachedAt < 15000
         ? Promise.resolve(state.adminOverviewCache)
@@ -357,7 +403,7 @@
           state.adminOverviewCachedAt = Date.now();
           return overview;
         });
-      let users = null, rechargePage = null, taskUsers = null, tasks = null;
+      let users = null, rechargePage = null, taskUsers = null, tasks = null, adaptations = null;
       const panelPromises = [];
       if (tab === "users") {
         panelPromises.push(api.getAdminUsers({ limit: 20, offset: state.adminUserPage * 20, keyword: state.adminUserKeyword, status: state.adminUserStatus }).then((value) => { users = value; }));
@@ -373,11 +419,17 @@
           });
         panelPromises.push(taskUsersPromise.then((value) => { taskUsers = value; }));
         panelPromises.push(api.getAdminTasks({ limit: 20, offset: state.adminTaskPage * 20, keyword: state.adminTaskKeyword, status: state.adminTaskStatus, user_id: state.adminTaskUser, date_from: state.adminTaskFrom, date_to: state.adminTaskTo }).then((value) => { tasks = value; }));
+      } else if (tab === "adaptations") {
+        panelPromises.push(api.getAdminAdaptations({
+          limit: 20, offset: state.adminAdaptPage * 20, keyword: state.adminAdaptKeyword,
+          kind: state.adminAdaptKind, status: state.adminAdaptStatus,
+          date_from: state.adminAdaptFrom, date_to: state.adminAdaptTo
+        }).then(value => { adaptations = value; }));
       }
       const overview = await overviewPromise;
       await Promise.all(panelPromises);
       if (requestId !== state.adminRequestId || state.view !== "admin") return;
-      for (const [page, key, size] of [[users, "adminUserPage", 20], [rechargePage, "adminRechargePage", 10], [tasks, "adminTaskPage", 20]]) {
+      for (const [page, key, size] of [[users, "adminUserPage", 20], [rechargePage, "adminRechargePage", 10], [tasks, "adminTaskPage", 20], [adaptations, "adminAdaptPage", 20]]) {
         if (!page) continue;
         const last = Math.max(0, Math.ceil(page.total / size) - 1);
         if (state[key] > last) { state[key] = last; await renderAdmin(); return; }
@@ -395,6 +447,25 @@
           const actions = adminTaskActions(item, reviewId, tab === "tasks");
           return `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(reviewId)}">${escapeHtml(item.title || item.id)}</button><small>${escapeHtml(item.file_name || "")}</small><span class="admin-task-user">${adminUserIdentity(item)}</span></td><td>${adminTaskStatus(item)}</td><td>${adminTaskBilling(item)}${adminModelUsage(item)}</td><td>${adminEconomics(item)}</td><td><span class="admin-task-time"><small>创建 ${formatDate(item.created_at)}</small><small>完成 ${item.completed_at ? formatDate(item.completed_at) : "—"}</small></span><span class="admin-task-actions">${actions}</span></td></tr>`;
         }).join("") || `<tr><td colspan="5">暂无匹配任务，可重置筛选后查看</td></tr>`}</tbody></table></div>${adminPagination("admin-page", state.adminTaskPage, tasks.total, 20)}</div>`;
+      } else if (tab === "adaptations") {
+        const categories = adaptations.categories || [];
+        const totalCredits = categories.reduce((sum, item) => sum + Number(item.credits_charged || 0), 0);
+        const totalInput = categories.reduce((sum, item) => sum + Number(item.input_tokens || 0), 0);
+        const totalOutput = categories.reduce((sum, item) => sum + Number(item.output_tokens || 0), 0);
+        const knownCost = categories.reduce((sum, item) => sum + Number(item.api_cost_rmb || 0), 0);
+        const unpriced = categories.reduce((sum, item) => sum + Number(item.unpriced_jobs || 0), 0);
+        const grouped = Object.keys(adaptationKinds).map(kind => {
+          const rows = categories.filter(item => item.kind === kind);
+          const jobs = rows.reduce((sum, item) => sum + Number(item.jobs || 0), 0);
+          const charged = rows.reduce((sum, item) => sum + Number(item.credits_charged || 0), 0);
+          const cost = rows.reduce((sum, item) => sum + Number(item.api_cost_rmb || 0), 0);
+          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong>${jobs}</strong><small>${charged} 积分 · ${cost ? `¥${cost.toFixed(4)}` : "暂无计价成本"}</small></article>`;
+        }).join("");
+        body += `<div class="admin-panel adapt-admin-panel"><div class="admin-panel-head"><div><h2>剧本改编任务</h2><p>按分析、试改、大纲、分集正文和审稿分类，展示积分结算与模型调用成本。</p></div><span>${adaptations.total} 条记录</span></div>
+          <div class="admin-stats adapt-admin-stats"><article><span>已结算积分</span><strong>${totalCredits}</strong><small>不含失败后退回的预扣</small></article><article><span>模型 Tokens</span><strong>${(totalInput + totalOutput).toLocaleString()}</strong><small>输入 ${totalInput.toLocaleString()} · 输出 ${totalOutput.toLocaleString()}</small></article><article><span>模型调用成本</span><strong>¥${knownCost.toFixed(4)}</strong><small>${unpriced ? `${unpriced} 项未计价` : "按可用调用用量汇总"}</small></article></div>
+          <div class="adapt-admin-categories">${grouped}</div>
+          <div class="admin-toolbar adapt-admin-toolbar"><input id="adminAdaptKeyword" aria-label="搜索项目或用户" value="${escapeHtml(state.adminAdaptKeyword)}" placeholder="搜索项目名、用户名称或账号" /><select id="adminAdaptKind" aria-label="改编操作分类"><option value="all">全部分类</option>${Object.entries(adaptationKinds).map(([key, value]) => `<option value="${key}" ${state.adminAdaptKind === key ? "selected" : ""}>${value}</option>`).join("")}</select><select id="adminAdaptStatus" aria-label="改编任务状态"><option value="all">全部状态</option><option value="running" ${state.adminAdaptStatus === "running" ? "selected" : ""}>进行中</option><option value="success" ${state.adminAdaptStatus === "success" ? "selected" : ""}>成功</option><option value="failed" ${state.adminAdaptStatus === "failed" ? "selected" : ""}>失败</option></select><label class="admin-date-label">开始日期<input id="adminAdaptFrom" type="date" value="${state.adminAdaptFrom}" /></label><label class="admin-date-label">结束日期<input id="adminAdaptTo" type="date" value="${state.adminAdaptTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-adapt-search">筛选</button><button class="admin-action" data-action="admin-adapt-reset">重置</button></div>
+          <div class="admin-table-wrap"><table class="adapt-admin-table"><thead><tr><th>项目 / 用户</th><th>操作分类</th><th>状态</th><th>模型用量</th><th>API 成本 / 积分</th><th>调用明细 / 时间</th></tr></thead><tbody>${adaptations.items.map(adminAdaptationRow).join("") || `<tr><td colspan="6">暂无改编任务记录</td></tr>`}</tbody></table></div>${adminPagination("admin-adapt-page", state.adminAdaptPage, adaptations.total, 20)}</div>`;
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近视频任务</h2><p>最近创建的 10 条视频任务</p></div><span>点击任务查看详情</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户名称 / 账号</th><th>状态</th><th>计费时长</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)}</button></td><td>${adminUserIdentity(item)}</td><td>${adminTaskStatus(item)}</td><td>${Number(item.credits_used || 0).toFixed(1)} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无视频任务</td></tr>`}</tbody></table></div></div>`;
       }
@@ -1613,6 +1684,21 @@
     }
     if (action === "admin-recharge-reset") { state.adminRechargeType = "all"; state.adminRechargeKeyword = ""; state.adminRechargeFrom = ""; state.adminRechargeTo = ""; state.adminRechargePage = 0; await renderAdmin(); return; }
     if (action === "admin-recharge-page") { state.adminRechargePage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
+    if (action === "admin-adapt-search") {
+      const from = $("#adminAdaptFrom")?.value || "", to = $("#adminAdaptTo")?.value || "";
+      if (!adminDateRangeValid(from, to)) return;
+      state.adminAdaptKeyword = $("#adminAdaptKeyword")?.value.trim() || "";
+      state.adminAdaptKind = $("#adminAdaptKind")?.value || "all";
+      state.adminAdaptStatus = $("#adminAdaptStatus")?.value || "all";
+      state.adminAdaptFrom = from; state.adminAdaptTo = to; state.adminAdaptPage = 0;
+      await renderAdmin(); return;
+    }
+    if (action === "admin-adapt-reset") {
+      state.adminAdaptKeyword = ""; state.adminAdaptKind = "all"; state.adminAdaptStatus = "all";
+      state.adminAdaptFrom = ""; state.adminAdaptTo = ""; state.adminAdaptPage = 0;
+      await renderAdmin(); return;
+    }
+    if (action === "admin-adapt-page") { state.adminAdaptPage = Number(actionElement.dataset.page) || 0; await renderAdmin(); return; }
     if (action === "admin-credit") {
       const rmbText = window.prompt("输入充值人民币金额（按 1 元 = 12.8 积分自动换算）", "100");
       if (rmbText === null) return;

@@ -32,6 +32,20 @@ PLAN = {"title": "商号旧案", "premise": "查账翻案", "cast": CAST, "episo
     {"number": 2, "beats": "查到伙计", "hook": "查出假账", "source_ids": ["S4"]}]}
 DRAFT = {"scenes": [SCENE], "continuity": "下一集寻找伙计"}
 LOCK = {"episode": 1, "speaker_id": "C1", "source_id": "S2", "text": LINE}
+ANALYSIS = {
+    "title": "商号旧案", "summary": "掌柜与账房围绕失踪账册相互试探。",
+    "characters": ["沈青：商号管账，掌握封条"],
+    "directions": [
+        {"id": "D1", "title": "悬疑翻案", "description": "围绕账册线索推进查证。",
+         "reason": "原稿已出现账册与封条。", "goal": "改成古装漫剧，突出查证翻案。"},
+        {"id": "D2", "title": "人物博弈", "description": "加强沈青与掌柜之间的试探。",
+         "reason": "原稿人物已发生冲突。", "goal": "强化沈青与掌柜的对峙。"},
+    ],
+    "keep_options": [{"id": "K1", "kind": "plot", "label": "账册翻案主线",
+                      "instruction": "保留账册查证翻案。", "source_id": "S2", "quote": LINE}],
+    "questions": [], "preview_source_id": "S2",
+}
+REVIEW = {"summary": "与大纲相符。", "issues": []}
 
 
 class AdaptationTests(unittest.TestCase):
@@ -42,23 +56,45 @@ class AdaptationTests(unittest.TestCase):
         db_patch = patch.object(auth_store, "DB_PATH", Path(self.tmp.name) / "project.sqlite3")
         db_patch.start()
         self.addCleanup(db_patch.stop)
-        auth = patch.object(routes, "current_user", return_value={"id": "owner"})
+        auth = patch.object(routes, "current_user", return_value={"id": "owner", "role": "user"})
         self.current_user = auth.start()
         self.addCleanup(auth.stop)
         auth_store.init_db()
+        with closing(auth_store.db()) as conn, conn:
+            conn.execute("""INSERT INTO users(id,email,password_hash,name,credits,created_at)
+                          VALUES ('owner','owner@example.test','test','测试用户',100,'now')""")
         routes.init_adaptations()
 
     def create(self, **source):
         return routes.create_project(None, routes.ProjectInput(
-            goal="改成适合分镜绘制的古装漫剧", episode_count=2, **source))
+            goal="改成适合分镜绘制的古装漫剧", keep="保留核心因果线索", episode_count=2, **source))
 
     def generate(self, project, kind, raw, **kwargs):
+        if kind == "preview":
+            kwargs.setdefault("direction_id", "D1")
+            kwargs.setdefault("keep_option_ids", ["K1"])
         job = routes.JobInput(kind=kind, revision=project["revision"], **kwargs)
         background = BackgroundTasks()
+        outputs = {kind: raw}
+        if kind == "episode":
+            outputs["review"] = REVIEW
+
+        def fake_generate(call_kind, data, contract, choice):
+            if call_kind == "analyze":
+                self.assertEqual(data["goal"], "改成适合分镜绘制的古装漫剧")
+                self.assertEqual(data["keep"], "保留核心因果线索")
+            if ad.usage_recorder.get():
+                ad.usage_recorder.get()(call_kind, {
+                    "provider": choice[0], "model": choice[1], "promptVersion": ad.PROMPT_VERSION,
+                    "inputTokens": 100, "outputTokens": 20, "apiCostRmb": 0.01,
+                    "costSource": "public_price_estimate",
+                })
+            return contract.model_validate(outputs[call_kind]), {
+                "model": choice[1], "promptVersion": ad.PROMPT_VERSION,
+            }
+
         with patch.object(ad, "model_choice", return_value=("ark", "test-model")), patch.object(
-            ad, "generate", side_effect=lambda _, data, contract, choice: (
-                contract.model_validate(raw), {"model": choice[1], "promptVersion": ad.PROMPT_VERSION}
-            )
+            ad, "generate", side_effect=fake_generate
         ):
             pending = routes.start_job(project["id"], None, job, background)
             self.assertEqual(pending["job"], kind)
@@ -71,11 +107,17 @@ class AdaptationTests(unittest.TestCase):
 
     def ready(self):
         project = self.create(source_text=SOURCE)
+        project = self.generate(project, "analyze", ANALYSIS)
         project = self.generate(project, "preview", {
             "source_id": "S2", "cast": CAST, "scene": SCENE,
             "decisions": ["保留账册作为线索"], "questions": [],
         }, source_id="S2")
         return self.generate(project, "plan", PLAN)
+
+    def confirm_plan(self, project):
+        return routes.save_plan(project["id"], None, routes.PlanInput(
+            revision=project["revision"], plan=ad.Plan.model_validate(project["plan"]),
+            locks=[ad.LockLine.model_validate(item) for item in project["locks"]]))
 
     def test_full_flow_quality_lock_and_revision(self):
         project = self.ready()
@@ -108,6 +150,76 @@ class AdaptationTests(unittest.TestCase):
         project = self.generate(project, "impact", {"affected": [
             {"number": 2, "reason": "集尾证据变化", "suggestion": "补第二本账册来源"}]})
         self.assertEqual(project["impact"][0]["number"], 2)
+
+    def test_project_charge_covers_first_episode_and_admin_sees_model_stages(self):
+        project = self.confirm_plan(self.ready())
+        self.assertIn("改成适合分镜绘制的古装漫剧", project["goal"])
+        self.assertIn("保留核心因果线索", project["keep"])
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
+        project = self.generate(project, "episode", DRAFT)
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
+        project = self.generate(project, "episode", DRAFT, episode=2)
+        project = self.generate(project, "episode", DRAFT, episode=2)
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 60)
+        self.current_user.return_value = {"id": "owner", "role": "admin"}
+        page = routes.admin_adaptations(None, kind="episode", limit=20, offset=0)
+        self.assertEqual(page["total"], 3)
+        self.assertTrue(any(call["kind"] == "review" for call in page["items"][0]["calls"]))
+        self.assertEqual(sum(item["credits_charged"] for item in page["categories"]), 24)
+
+    def test_failed_analysis_refunds_the_reserved_project_fee(self):
+        project = self.create(source_text=SOURCE)
+        invalid = {**ANALYSIS, "keep_options": [{**ANALYSIS["keep_options"][0], "quote": "不存在的原文"}]}
+        project = self.generate(project, "analyze", invalid)
+        self.assertIn("原文依据", project["error"])
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 100)
+            job = conn.execute("SELECT status, credits_reserved, credits_refunded FROM adaptation_jobs").fetchone()
+        self.assertEqual(tuple(job), ("failed", 16, 16))
+
+    def test_repeated_trial_and_outline_charge_eight_and_failed_retry_refunds(self):
+        project = self.ready()
+        failed = self.generate(project, "preview", {"source_id": "invalid"}, source_id="S2")
+        self.assertIn("失败", failed["error"])
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
+            refunded = conn.execute(
+                "SELECT billing_kind, status, credits_reserved, credits_refunded "
+                "FROM adaptation_jobs WHERE billing_kind='preview_retry'"
+            ).fetchone()
+        self.assertEqual(tuple(refunded), ("preview_retry", "failed", 8, 8))
+
+        project = self.generate(failed, "preview", {
+            "source_id": "S2", "cast": CAST, "scene": SCENE,
+            "decisions": ["保留账册作为线索"], "questions": [],
+        }, source_id="S2")
+        project = self.generate(project, "plan", PLAN)
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
+            charges = conn.execute(
+                "SELECT billing_kind, credits_charged FROM adaptation_jobs "
+                "WHERE billing_kind IN ('preview_retry','plan_retry') AND status='success' "
+                "ORDER BY started_at"
+            ).fetchall()
+        self.assertEqual([tuple(row) for row in charges], [
+            ("preview_retry", 8), ("plan_retry", 8),
+        ])
+
+    def test_full_script_review_requires_every_current_episode_and_is_classified(self):
+        project = self.confirm_plan(self.ready())
+        project = self.generate(project, "episode", DRAFT)
+        with self.assertRaises(HTTPException):
+            routes.start_job(project["id"], None, routes.JobInput(
+                kind="review_all", revision=project["revision"]), BackgroundTasks())
+        project = self.generate(project, "episode", DRAFT, episode=2)
+        project = self.generate(project, "review_all", REVIEW)
+        self.assertEqual(project["reviewAll"]["summary"], REVIEW["summary"])
+        with closing(auth_store.db()) as conn:
+            row = conn.execute("SELECT kind, billing_kind, status, credits_reserved FROM adaptation_jobs WHERE kind='review_all'").fetchone()
+        self.assertEqual(tuple(row), ("review_all", "included", "success", 0))
 
     def test_platform_source_owned_and_quality_visible(self):
         script = {"title": "商号旧案", "scenes": [{"heading": "1-1 夜 内 商号", "startSec": 7.0,
@@ -178,11 +290,11 @@ class AdaptationTests(unittest.TestCase):
 
     def test_progress_discloses_job_only_to_owner(self):
         project = self.create(source_text=SOURCE)
-        job = routes.JobInput(kind="preview", revision=project["revision"], source_id="S2")
+        job = routes.JobInput(kind="analyze", revision=project["revision"])
         with patch.object(ad, "model_choice", return_value=("ark", "test-model")):
             routes.start_job(project["id"], None, job, BackgroundTasks())
-        self.assertEqual(routes.get_progress(project["id"], None), {"job": "preview"})
-        self.current_user.return_value = {"id": "other"}
+        self.assertEqual(routes.get_progress(project["id"], None), {"job": "analyze"})
+        self.current_user.return_value = {"id": "other", "role": "user"}
         with self.assertRaises(HTTPException) as error:
             routes.get_progress(project["id"], None)
         self.assertEqual(error.exception.status_code, 404)

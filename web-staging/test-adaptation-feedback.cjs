@@ -6,7 +6,7 @@ const vm = require("node:vm");
 
 const script = fs.readFileSync(path.join(__dirname, "js/adaptation.js"), "utf8");
 
-test("preview acknowledges clicks, saves edits, and recovers polling without resubmitting", async () => {
+test("analysis acknowledges clicks, saves edits, and recovers polling without resubmitting", async () => {
   const listeners = {};
   const requests = [];
   const timers = [];
@@ -18,7 +18,7 @@ test("preview acknowledges clicks, saves edits, and recovers polling without res
   };
   const panel = { querySelector: () => feedback };
   const button = {
-    dataset: { adapt: "preview" }, isConnected: true,
+    dataset: { adapt: "analyze" }, isConnected: true,
     closest: () => panel,
     getBoundingClientRect: () => ({ top: 0, bottom: 100 })
   };
@@ -29,11 +29,12 @@ test("preview acknowledges clicks, saves edits, and recovers polling without res
     revision: 0, sources: [{ id: "S1", label: "第一场", text: original }]
   };
   const saved = { ...done, revision: 1, sources: [{ ...done.sources[0], text: source.value }] };
-  const result = { ...saved, revision: 2, preview: {
-    source_id: "S1", cast: [{ id: "C1", name: "掌柜" }],
-    scene: { setting: "账房", blocks: [{ speaker_id: "C1", text: "账册留在这里。" }] },
-    decisions: [], questions: []
-  } };
+  const analysis = {
+    title: "账房旧案", summary: "账册失踪后，账房開始查找线索。", characters: ["掌柜"],
+    directions: [{ id: "D1", title: "悬疑翻案", description: "围绕账册查案。", reason: "原稿出现了账册。", goal: "改成悬疑短剧。" }],
+    keep_options: [], questions: [], preview_source_id: "S1"
+  };
+  const result = { ...saved, revision: 2, analysis };
   let progressRequests = 0;
   let focused = false;
   const heading = { focus: () => { focused = true; }, scrollIntoView() {} };
@@ -41,13 +42,14 @@ test("preview acknowledges clicks, saves edits, and recovers polling without res
     innerHTML: "",
     querySelector(selector) {
       if (selector.includes("textarea")) return source;
-      if (selector === "#adapt-preview h2") return heading;
+      if (selector === ".adapt-analysis-panel h2") return heading;
       if (selector.includes("data-adapt")) return button;
       return null;
     }
   };
   const window = {
     innerHeight: 720,
+    confirm: () => true,
     AppAPI: {
       async adaptation(route, method, body) {
         requests.push({ route, method, body });
@@ -56,7 +58,7 @@ test("preview acknowledges clicks, saves edits, and recovers polling without res
           return { job: null };
         }
         if (method === "PATCH") return saved;
-        if (method === "POST") return { ...saved, job: "preview" };
+        if (method === "POST") return { ...saved, job: "analyze" };
         return requests.length === 1 ? done : result;
       }
     }
@@ -79,13 +81,14 @@ test("preview acknowledges clicks, saves edits, and recovers polling without res
   assert.equal(requests[1].method, "PATCH");
   assert.equal(requests[1].body.text, source.value);
   assert.equal(requests[2].body.revision, 1);
-  assert.match(main.innerHTML, /正在试改/);
+  assert.equal(requests[2].body.kind, "analyze");
+  assert.match(main.innerHTML, /正在分析原稿/);
 
   await timers.shift()();
   assert.match(status.textContent, /正在重查/);
   await timers.shift()();
 
   assert.equal(requests.filter(request => request.method === "POST").length, 1);
-  assert.match(main.innerHTML, /账册留在这里。/);
+  assert.match(main.innerHTML, /悬疑翻案/);
   assert.equal(focused, true);
 });
