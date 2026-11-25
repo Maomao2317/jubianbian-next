@@ -705,7 +705,8 @@ a { color: inherit; text-decoration: none; }
 
 .detail-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .detail-heading h1 { font-size: 27px; }
-.download-actions { display: flex; gap: 8px; }
+.download-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.detail-adapt-link { display: inline-flex; align-items: center; justify-content: center; gap: .6em; text-decoration: none; white-space: nowrap; }
 
 .progress-panel, .error-panel {
   padding: 28px;
@@ -1018,6 +1019,9 @@ a { color: inherit; text-decoration: none; }
 .task-inline-actions .row-link { white-space: nowrap; }
 .task-inline-actions .row-link { font-size: 12px; }
 .task-inline-actions .row-download { color: #79611d; }
+.row-adapt-link { display: inline-flex; align-items: center; min-height: 28px; padding: 3px 8px; border: 1px solid #e9d080; border-radius: 7px; color: #664b0b; background: #fff8e2; font-size: 12px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+.row-adapt-link:hover { background: #ffedb9; }
+.row-adapt-link:focus-visible, .detail-adapt-link:focus-visible { outline: 2px solid #9b6900; outline-offset: 3px; }
 .task-state { display: none; }
 .task-row:has(.task-inline-actions) .task-actions { display: none; }
 .empty-result { display: grid; place-items: center; gap: 8px; min-height: 240px; padding: 32px; color: var(--muted); text-align: center; }
@@ -1605,7 +1609,8 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .adapt-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin-block: .55rem; }
 .adapt-projects { list-style: none; margin: 0; padding: 0; }
 .adapt-projects li { display: flex; justify-content: space-between; gap: 1rem; padding: .75rem 0; border-bottom: 1px solid var(--line, #d7dae0); overflow-wrap: anywhere; }
-.adapt-projects time { flex-shrink: 0; color: var(--muted, #626974); }
+.adapt-projects time { flex-shrink: 0; color: var(--muted, #626974); font-size: .9em; font-variant-numeric: tabular-nums; }
+.adapt-back { display: inline-flex; align-items: center; gap: .35em; }
 .adapt-columns, .adapt-cast, .adapt-outlines { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 .adapt-columns h3, .adapt-outline h3 { margin: 0 0 .5rem; font-size: 1rem; }
 .adapt-page pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; padding: .8rem; background: var(--bg, #f6f7fa); border: 1px solid var(--line, #d7dae0); border-radius: 8px; max-height: 30rem; overflow: auto; }

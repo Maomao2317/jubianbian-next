@@ -15,6 +15,10 @@
   const sourceDrafts = new Map();
   const episodeNotes = new Map();
   const sourceText = value => value.replace(/\r\n?/g, "\n").trim();
+  const projectPoints = p => p?.billing?.projectPoints ?? availability?.projectPoints ?? 20;
+  const episodePoints = p => p.billing?.episodePoints ?? 20;
+  const rewritePoints = p => p.billing?.rewritePoints ?? 8;
+  const extraCost = p => ` · ${rewritePoints(p)} 积分`;
 
   const idPath = () => "/" + encodeURIComponent(project.id);
   function leave() { view += 1; clearTimeout(timer); busy = false; }
@@ -23,18 +27,20 @@
     const node = main().querySelector(".adapt-error");
     if (node) { node.textContent = message || "操作失败，请重试。"; node.hidden = false; }
   }
-  function layout(title, subtitle, body) {
-    return `<section class="page adapt-page"><a class="back-btn" href="#/adaptation">← 改编项目</a>
+  function layout(title, subtitle, body, isProjectList = false) {
+    const backHref = isProjectList ? "#/workspace" : "#/adaptation";
+    const backLabel = isProjectList ? "返回工作台" : "返回改编项目";
+    return `<section class="page adapt-page"><a class="back-btn adapt-back" href="${backHref}"><span aria-hidden="true">←</span> ${backLabel}</a>
       <header class="adapt-title"><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></header>
       <p class="error-panel adapt-error" role="alert" hidden></p>${body}</section>`;
   }
   const sourceOptions = (sources, id) => sources.map(item =>
     `<option value="${esc(item.id)}" ${item.id === id ? "selected" : ""}>${esc(item.label)}</option>`).join("");
-  function renderList(items) {
+  function renderList(items, formatUpdatedAt) {
     main().innerHTML = layout("剧本改编", "从已有剧本开始，先试改一场，再确认大纲和分集正文。", `
       <div class="adapt-toolbar"><a class="primary-btn" href="#/adaptation/new">上传剧本</a><a class="secondary-btn" href="#/tasks">从平台任务选择</a></div>
       <div class="adapt-panel"><h2>我的改编项目</h2>${items.length ? `<ul class="adapt-projects">${items.map(item => `
-        <li><a href="#/adaptation/${encodeURIComponent(item.id)}">${esc(item.title)}</a><time>${esc(item.updatedAt?.slice(0, 10))}</time></li>`).join("")}</ul>` : "<p>还没有改编项目。</p>"}</div>`);
+        <li><a href="#/adaptation/${encodeURIComponent(item.id)}">${esc(item.title)}</a><time datetime="${esc(item.updatedAt)}">${esc(formatUpdatedAt(item.updatedAt))}</time></li>`).join("")}</ul>` : "<p>还没有改编项目。</p>"}</div>`, true);
   }
   function renderNew(task) {
     const fromTask = Boolean(task);
@@ -44,7 +50,7 @@
         <label>原稿正文 <textarea name="source_text" rows="8" minlength="20" maxlength="60000" required placeholder="上传后可在这里检查全文，或直接粘贴剧本"></textarea></label>`}
         <label>项目名（选填）<input name="title" maxlength="100" value="${esc(task?.batchTitle || task?.title || "")}" placeholder="AI 会根据原稿推荐名称"></label>
         <label>目标集数 <input name="episode_count" type="number" min="1" max="30" value="${Math.min(30, task?.batchTotal || 3)}" required></label>
-        <p class="adapt-note">导入后由 AI 阅读原稿并提供改编方向。原稿分析 16 积分，含第 1 集正文和审稿。</p>
+        <p class="adapt-note">导入后由 AI 阅读原稿并提供改编方向。原稿分析 ${projectPoints()} 积分，含第 1 集正文和审稿。</p>
         <button class="primary-btn" type="submit">开始改编项目</button>
       </form>`);
   }
@@ -93,8 +99,8 @@
         <textarea name="text" rows="7" maxlength="12000" required aria-label="原稿修订副本">${esc(sourceDrafts.get(source.id) ?? source.text)}</textarea>
         ${source.originalText ? `<details><summary>查看导入时的原文</summary><pre>${esc(source.originalText)}</pre></details>` : ""}
         <div class="adapt-toolbar"><button class="secondary-btn" type="submit">保存原稿修订</button>
-          <button class="primary-btn" type="button" data-adapt="analyze">${p.job === "analyze" ? "正在分析…" : "分析原稿 · 16 积分"}</button></div>
-        <p class="adapt-note">分析、试改和大纲共 16 积分，已包含第 1 集。未完成的模型任务会自动退回预扣积分。</p>
+          <button class="primary-btn" type="button" data-adapt="analyze">${p.job === "analyze" ? "正在分析…" : `分析原稿 · ${projectPoints(p)} 积分`}</button></div>
+        <p class="adapt-note">原稿分析含第 1 集首稿和审稿。单独试改、生成大纲等 AI 操作每次 ${rewritePoints(p)} 积分。失败会退回预扣积分。</p>
         ${feedback(p, "analyze")}
       </form>`}</section>`;
   }
@@ -125,7 +131,7 @@
       <label class="adapt-label">补充改编要求（选填）<textarea id="adapt-direction-notes" rows="2" maxlength="1000" placeholder="AI 已起草改编方向，需要时再补充">${esc(directionNotes)}</textarea></label>
       <label class="adapt-label">补充保留要求（选填）<textarea id="adapt-keep-notes" rows="2" maxlength="1200" placeholder="例如：保留原剧的时代背景">${esc(keepNotes)}</textarea></label>
       <p class="adapt-note adapt-selected-scene">试改场次 · ${esc(source?.label || "请选择一场")} · 可在原稿场次菜单中更换</p>
-      <button class="primary-btn" type="button" data-adapt="preview">${p.previewUsed ? "重新试改这一场 · 8 积分" : "对照试改这一场"}</button>${feedback(p, "preview", source?.id || "")}</section>`;
+      <button class="primary-btn" type="button" data-adapt="preview">${p.previewUsed ? "重新试改这一场" : "对照试改这一场"}${extraCost(p)}</button>${feedback(p, "preview", source?.id || "")}</section>`;
   }
   function renderPreview(p) {
     const preview = p.preview;
@@ -137,7 +143,7 @@
       </div><ul>${preview.decisions.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
       ${preview.questions.length ? `<div class="adapt-warnings"><strong>建议确认</strong><ul>${preview.questions.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
       ${p.confirmed ? "" : `<label class="adapt-label">补充改编要求（选填）<textarea id="adapt-plan-notes" rows="2" maxlength="1000" placeholder="说明试改里哪些改法要保留或调整">${esc(planNotes)}</textarea></label>
-      <button class="primary-btn" data-adapt="plan" type="button">${p.planUsed ? "重新生成大纲 · 8 积分" : "按这个方向生成分集大纲"}</button>${feedback(p, "plan")}`}</section>`;
+      <button class="primary-btn" data-adapt="plan" type="button">${p.planUsed ? "重新生成大纲" : "按这个方向生成分集大纲"}${extraCost(p)}</button>${feedback(p, "plan")}`}</section>`;
   }
   function lockRow(p, item = {}) {
     return `<div class="adapt-lock-row">
@@ -172,7 +178,7 @@
           <button class="secondary-btn" type="button" data-adapt="add-line">添加关键台词</button>
         </details>
         <div class="adapt-toolbar"><button class="primary-btn" type="submit">${p.confirmed ? "保存大纲修改" : "确认大纲"}</button>
-        ${p.planBeforeEdit ? '<button class="secondary-btn" type="button" data-adapt="impact">查找受影响的集数</button>' : ""}</div>
+        ${p.planBeforeEdit ? `<button class="secondary-btn" type="button" data-adapt="impact">查找受影响的集数${extraCost(p)}</button>` : ""}</div>
       </form>
       ${feedback(p, "impact")}
       ${p.impact ? `<div class="adapt-warnings"><strong>大纲改动影响</strong>${p.impact.length ? `<ul>${p.impact.map(item =>
@@ -195,13 +201,12 @@
         <button class="primary-btn" type="submit">${output.stale ? "确认这集已核对" : "保存本集修改"}</button>
       </form></details>`;
   }
-  function episodeRevision(number, output) {
-    const points = (output.version || 1) > 1 ? "8 积分" : "已包含";
+  function episodeRevision(p, number, output) {
     return `<div class="adapt-revision">
       <label class="adapt-label">AI 修改要求（选填）
         <textarea data-adapt-revision-notes="${number}" rows="2" maxlength="1000" placeholder="例如：缩短开场对白，保留账册被调换的线索">${esc(episodeNotes.get(Number(number)))}</textarea>
       </label>
-      <button class="secondary-btn" type="button" data-adapt="episode" data-number="${number}">${output.stale ? "按最新大纲更新" : "用 AI 修改本集"} · ${points}</button>
+      <button class="secondary-btn" type="button" data-adapt="episode" data-number="${number}">${output.stale ? "按最新大纲更新" : "用 AI 修改本集"}${extraCost(p)}</button>
     </div>`;
   }
   function episodeHistory(number, output) {
@@ -222,8 +227,9 @@
     const review = p.reviewAll;
     return `<section class="adapt-panel adapt-output-panel"><div class="adapt-section-heading"><span class="adapt-step">05</span><div><h2>分集正文与审稿</h2><p>逐集生成会同时检查大纲、保留要求和人物连续性。</p></div></div>
       <div class="adapt-toolbar">
-        ${next <= p.episodeCount && !ready ? `<button class="primary-btn" type="button" data-adapt="episode" data-number="${next}">写第 ${next} 集${next === 1 ? " · 已含在项目费中" : " · 16 积分"}</button>` : ""}
-        ${outputs.length && !ready ? `<a class="secondary-btn" href="${esc(api.adaptationDownloadUrl(p.id))}">导出已写正文 · Markdown</a>` : ""}
+        ${next <= p.episodeCount && !ready ? `<button class="primary-btn" type="button" data-adapt="episode" data-number="${next}">写第 ${next} 集${next === 1 ? " · 已含在项目费中" : ` · ${episodePoints(p)} 积分`}</button>` : ""}
+        ${outputs.length && !ready ? `<a class="secondary-btn" href="${esc(api.adaptationDownloadUrl(p.id))}">导出已写正文 · Markdown</a>
+          <a class="secondary-btn" href="${esc(api.adaptationDownloadUrl(p.id, "txt"))}">导出已写正文 · TXT</a>` : ""}
       </div>
       ${feedback(p, "episode")}
       ${ready ? '<p class="adapt-warnings">有正文需要按最新大纲核对，请从最早受影响的一集更新。已锁定集可手动解锁。</p>' : ""}
@@ -235,10 +241,10 @@
         ${p.reviews?.[number] ? `<div class="adapt-review"><strong>AI 审稿 · ${esc(p.reviews[number].summary)}</strong>${p.reviews[number].issues.length ? `<ul>${p.reviews[number].issues.map(issue => `<li class="${issue.severity === "error" ? "is-error" : ""}"><b>${issue.severity === "error" ? "需处理" : "建议核对"}</b> · ${esc(issue.description)}<br>建议 · ${esc(issue.suggestion)}</li>`).join("")}</ul>` : "<p>未发现有明确依据的剧情或保留项遗漏。</p>"}</div>` : ""}
         ${draftEditor(p, number, output)}
         ${episodeHistory(number, output)}
-        ${!output.locked && (!ready || Number(number) <= Number(ready[0])) ? episodeRevision(number, output) : ""}
+        ${!output.locked && (!ready || Number(number) <= Number(ready[0])) ? episodeRevision(p, number, output) : ""}
         <div class="adapt-toolbar"><button class="secondary-btn" type="button" data-adapt="lock" data-number="${number}" ${output.stale && !output.locked ? "disabled" : ""}>${output.locked ? "解锁此集" : "锁定此集"}</button></div>
       </details>`).join("")}
-      ${complete ? `<div class="adapt-full-review"><div><h3>整剧衔接检查</h3><p>检查人物状态、时间线、关键证据和伏笔回收。</p></div><button class="secondary-btn" type="button" data-adapt="review_all">${review ? "重新检查整剧 · 8 积分" : "检查整剧衔接"}</button>${feedback(p, "review_all")}
+      ${complete ? `<div class="adapt-full-review"><div><h3>整剧衔接检查</h3><p>检查人物状态、时间线、关键证据和伏笔回收。</p></div><button class="secondary-btn" type="button" data-adapt="review_all">${p.reviewAllUsed ? "重新检查整剧" : "检查整剧衔接"}${extraCost(p)}</button>${feedback(p, "review_all")}
         ${review ? `<div class="adapt-review"><strong>${esc(review.summary)}</strong>${review.issues.length ? `<ul>${review.issues.map(issue => `<li class="${issue.severity === "error" ? "is-error" : ""}"><b>第 ${issue.episode} 集 · ${issue.severity === "error" ? "需处理" : "建议核对"}</b><br>${esc(issue.description)}<br>建议 · ${esc(issue.suggestion)}</li>`).join("")}</ul>` : "<p>未发现明确的跨集矛盾。</p>"}</div>` : ""}</div>` : ""}
     </section>`;
   }
@@ -254,7 +260,7 @@
     const steps = ["原稿", "方向", "试改", "大纲", "分集", "审稿"];
     main().innerHTML = layout(p.plan?.title || p.title, p.goal || p.analysis?.summary || "先读懂原稿，再一起确定改编方向。", `
       <div class="adapt-flow" aria-label="改编进度">${steps.map((label, index) => `<span class="${index < completedStep ? "is-complete" : ""}"><i>${String(index + 1).padStart(2, "0")}</i>${label}</span>`).join("")}</div>
-      <div class="adapt-pricing"><strong>${p.billing?.setupPaid ? "项目分析费已支付，包含第 1 集" : "原稿分析 16 积分，含第 1 集"}</strong><span>第 2 集起 16 积分/集 · 每集含 1 次 AI 修改，之后 8 积分/次 · 手动编辑、保存和导出免费</span></div>
+      <div class="adapt-pricing"><strong>${p.billing?.setupPaid ? "项目分析费已支付，包含第 1 集" : `原稿分析 ${projectPoints(p)} 积分，含第 1 集`}</strong><span>第 2 集起 ${episodePoints(p)} 积分/集 · 单独发起的 AI 操作 ${rewritePoints(p)} 积分/次 · 手动编辑、保存和导出免费</span></div>
       ${availability?.ready === false ? '<p class="adapt-note">改编服务暂不可用，原稿仍可保存。</p>' : ""}
       ${p.job ? `<div class="adapt-progress" role="status">${esc(kinds[p.job] || "正在生成")}，离开后可从项目列表继续查看。</div>` : ""}
       <fieldset class="adapt-workbench" ${p.job ? "disabled" : ""}>
@@ -308,7 +314,7 @@
       }
     }, Math.min(15000, 2200 * (failures + 1)));
   }
-  async function open(path) {
+  async function open(path, formatUpdatedAt) {
     const active = view;
     project = null;
     selected = "";
@@ -329,7 +335,7 @@
         if (active === view) renderProject(p);
       } else {
         const items = await api.adaptation();
-        if (active === view) renderList(items);
+        if (active === view) renderList(items, formatUpdatedAt);
       }
     } catch (err) { if (active === view) error(err.message); }
   }
@@ -487,14 +493,10 @@
       sourceField.focus();
       return;
     }
-    const amount = kind === "analyze" && !project.billing?.setupPaid ? 16
-      : kind === "preview" && project.previewUsed ? 8
-        : kind === "plan" && project.planUsed ? 8
-          : existingEpisode ? ((existingEpisode.version || 1) > 1 ? 8 : 0)
-        : kind === "episode" && episode > 1 ? 16
-          : kind === "review_all" && project.reviewAllUsed ? 8
-            : kind === "impact" && project.impactChecked ? 8 : 0;
-    if (amount && !window.confirm(`本次将扣除 ${amount} 积分。${kind === "analyze" ? "项目费包含首次试改、大纲和第 1 集。每集包含正文、审稿及一次 AI 修改。" : "失败或中断的任务会退回预扣积分。"}`)) return;
+    const amount = !isJob ? 0 : kind === "analyze" ? projectPoints(project)
+      : kind === "episode" && !existingEpisode ? (episode === 1 ? 0 : episodePoints(project))
+      : rewritePoints(project);
+    if (amount && !window.confirm(`本次将扣除 ${amount} 积分。${kind === "analyze" ? "项目费包含第 1 集正文和审稿。" : ""}失败或中断的任务会退回预扣积分。`)) return;
     action(async () => {
       if (kind === "delete") { await api.adaptation(idPath(), "DELETE"); if (button.isConnected) go(""); return; }
       if (kind === "lock") return api.adaptation(idPath() + "/episodes/" + episode + "/lock", "PUT", {
@@ -516,7 +518,7 @@
           direction_id: kind === "preview" ? (main().querySelector("[data-adapt-direction]:checked")?.value || selectedDirection) : "",
           keep_option_ids: kind === "preview" ? [...main().querySelectorAll("[data-adapt-keep]:checked")].map(item => item.value) : [],
           notes: kind === "plan" ? planNotes : kind === "preview" ? directionNotes : revisionNotes,
-          keep_notes: kind === "preview" ? keepNotes : "", revision
+          keep_notes: kind === "preview" ? keepNotes : "", revision, expected_points: amount
         });
       } catch (err) {
         if (active === view && (!err.status || err.status === 409)) {

@@ -115,7 +115,7 @@
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }
 
-  function formatDate(iso) {
+  function formatDate(iso, showSeconds = false) {
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return "时间未知";
     const parts = new Intl.DateTimeFormat("zh-CN", {
@@ -125,9 +125,11 @@
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      second: showSeconds ? "2-digit" : undefined,
       hour12: false,
     }).formatToParts(date).reduce((result, item) => ({ ...result, [item.type]: item.value }), {});
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+    const seconds = showSeconds ? `:${parts.second}` : "";
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}${seconds}`;
   }
 
   function timeAgo(iso) {
@@ -297,8 +299,9 @@
   };
   const adaptationBillingKinds = {
     project: "项目费", included: "已包含", included_episode: "已含第 1 集",
-    episode: "分集生成", included_revision: "已含首次修改", rewrite: "整集重写", preview_retry: "试改重做",
-    plan_retry: "大纲重生成", review: "整剧复审", impact: "大纲影响复核"
+    episode: "分集生成", included_revision: "已含首次修改", rewrite: "分集修改",
+    preview: "场次试改", preview_retry: "试改重做", plan: "分集大纲生成",
+    plan_retry: "大纲重生成", review: "整剧审稿", impact: "大纲影响复核"
   };
 
   function adminAdaptationStatus(status) {
@@ -580,7 +583,7 @@
       ? `<div class="row-progress ${compressing ? "compression-progress" : ""}" role="progressbar" aria-label="${progressLabel}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`
       : "";
     const quickAction = isCompletedTask(task)
-      ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>`
+      ? `<button class="row-link" type="button" data-action="open-task" data-id="${task.id}">查看剧本</button>${adaptationTaskLink(task, true)}<button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button><button class="row-link row-download" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>`
       : task.status === "failed"
         ? `<button class="row-link" type="button" data-action="retry" data-id="${task.id}">重试</button>` : "";
     return `<article class="task-row" data-open="${task.id}" data-scroll-key="task:${escapeHtml(task.id)}">
@@ -1040,6 +1043,13 @@
     </section>`;
   }
 
+  function adaptationTaskLink(task, compact = false) {
+    if (!state.adaptationEnabled || (!compact && !task.result)) return "";
+    const href = `#/adaptation/new/${encodeURIComponent(task.id)}`;
+    if (compact) return `<a class="row-adapt-link" href="${href}">改编剧本</a>`;
+    return `<a class="primary-btn detail-adapt-link" href="${href}">改编此剧本 <span aria-hidden="true">→</span></a>`;
+  }
+
   function renderDetail() {
     const task = state.current;
     if (!task) {
@@ -1048,7 +1058,7 @@
     }
     const downloadActions = isCompletedTask(task) ? `
       <div class="download-actions">
-        ${state.adaptationEnabled && task.result ? `<a class="secondary-btn" href="#/adaptation/new/${encodeURIComponent(task.id)}">改编此剧本</a>` : ""}
+        ${adaptationTaskLink(task)}
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="md">下载 MD</button>
         <button class="secondary-btn" type="button" data-action="download" data-id="${task.id}" data-format="txt">下载 TXT</button>
         <button class="secondary-btn disabled" type="button" disabled title="正式版开放">Word <small>稍后</small></button>
@@ -1418,7 +1428,7 @@
     renderHeader();
     if (state.view === "adaptation") {
       schedulePoll(false);
-      await window.AdaptationStudio.open(location.hash.slice("#/adaptation".length));
+      await window.AdaptationStudio.open(location.hash.slice("#/adaptation".length), iso => formatDate(iso, true));
     } else if (state.view === "admin") await renderAdmin();
     else if (state.view === "detail") await refreshDetail();
     else await refreshList();
@@ -1647,7 +1657,7 @@
       await refreshList({ source: "filter" });
       return;
     }
-    if (row && !actionElement) {
+    if (row && !actionElement && !event.target.closest("a[href]")) {
       go("task/" + row.dataset.open);
       return;
     }

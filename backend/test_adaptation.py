@@ -73,6 +73,14 @@ class AdaptationTests(unittest.TestCase):
         if kind == "preview":
             kwargs.setdefault("direction_id", "D1")
             kwargs.setdefault("keep_option_ids", ["K1"])
+        if kind == "analyze":
+            kwargs.setdefault("expected_points", project["billing"]["projectPoints"])
+        if kind == "episode" and kwargs.get("episode", 1) > 1 and str(kwargs["episode"]) not in project["outputs"]:
+            kwargs.setdefault("expected_points", project["billing"]["episodePoints"])
+        if kind in {"preview", "plan", "impact", "review_all"} or (
+            kind == "episode" and str(kwargs.get("episode", 1)) in project["outputs"]
+        ):
+            kwargs.setdefault("expected_points", 8)
         job = routes.JobInput(kind=kind, revision=project["revision"], **kwargs)
         background = BackgroundTasks()
         outputs = {kind: raw}
@@ -139,7 +147,16 @@ class AdaptationTests(unittest.TestCase):
         self.assertIn("锁定台词缺失", project["error"])
         self.assertEqual(project["outputs"], {})
         project = self.generate(project, "episode", wrong, repaired=DRAFT)
-        self.assertIn(f"沈青：{LINE}", routes.download(project_id, None).body.decode())
+        markdown = routes.download(project_id, None)
+        plain = routes.download(project_id, None, fmt="txt")
+        self.assertTrue(markdown.headers["content-type"].startswith("text/markdown"))
+        self.assertTrue(markdown.headers["content-disposition"].endswith(".md"))
+        self.assertTrue(plain.headers["content-type"].startswith("text/plain; charset=utf-8"))
+        self.assertTrue(plain.headers["content-disposition"].endswith(".txt"))
+        self.assertTrue(plain.body.decode().startswith(f"{PLAN['title']}\n\n第 1 集\n"))
+        self.assertIn(f"沈青：{LINE}", plain.body.decode())
+        self.assertEqual(markdown.body.decode().replace("# " + PLAN["title"], PLAN["title"], 1)
+                         .replace("## 第 1 集", "第 1 集", 1), plain.body.decode())
         self.assertNotIn("usage", project)
         with patch.object(routes, "current_user", return_value={"id": "owner", "role": "admin"}):
             jobs = routes.admin_adaptations(None, status="success", kind="episode", limit=20, offset=0)
@@ -161,29 +178,31 @@ class AdaptationTests(unittest.TestCase):
         self.assertTrue(project["outputs"]["2"]["locked"])
         with self.assertRaises(HTTPException):
             routes.download(project_id, None)
+        with self.assertRaises(HTTPException):
+            routes.download(project_id, None, fmt="txt")
         project = self.generate(project, "impact", {"affected": [
             {"number": 2, "reason": "集尾证据变化", "suggestion": "补第二本账册来源"}]})
         self.assertEqual(project["impact"][0]["number"], 2)
 
-    def test_project_charge_covers_first_episode_and_admin_sees_model_stages(self):
+    def test_project_charge_covers_first_draft_and_admin_sees_paid_ai_actions(self):
         project = self.confirm_plan(self.ready())
         self.assertIn("改成适合分镜绘制的古装漫剧", project["goal"])
         self.assertIn("保留核心因果线索", project["keep"])
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 64)
         project = self.generate(project, "episode", DRAFT)
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 64)
         project = self.generate(project, "episode", DRAFT, episode=2)
         failed = self.generate(project, "episode", {}, episode=2, notes="改一下开场")
         self.assertEqual(failed["outputs"]["2"]["version"], 1)
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 44)
         project = self.generate(failed, "episode", DRAFT, episode=2, notes="缩短开场")
         self.assertEqual(project["outputs"]["2"]["version"], 2)
         self.assertEqual(project["outputs"]["2"]["revisionNotes"], "缩短开场")
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 36)
         project = self.generate(project, "episode", DRAFT, episode=2, notes="增加对峙")
         self.assertEqual(project["outputs"]["2"]["version"], 3)
         archive = routes.get_episode_version(project["id"], 2, 2, None)
@@ -194,15 +213,15 @@ class AdaptationTests(unittest.TestCase):
             routes.get_episode_version(project["id"], 2, 2, None)
         self.assertEqual(exc.exception.status_code, 404)
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 60)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 28)
         self.current_user.return_value = {"id": "owner", "role": "admin"}
         page = routes.admin_adaptations(None, kind="episode", limit=20, offset=0)
         self.assertEqual(page["total"], 5)
         self.assertTrue(any(call["kind"] == "review" for call in page["items"][0]["calls"]))
-        self.assertEqual(sum(item["credits_charged"] for item in page["categories"]), 24)
-        included = next(item for item in page["items"] if item["billing_kind"] == "included_revision"
-                        and item["status"] == "success")
-        self.assertEqual(included["credits_charged"], 0)
+        self.assertEqual(sum(item["credits_charged"] for item in page["categories"]), 36)
+        rewrites = [item for item in page["items"] if item["billing_kind"] == "rewrite"]
+        self.assertCountEqual([(item["credits_charged"], item["credits_refunded"]) for item in rewrites],
+                              [(8, 0), (8, 0), (0, 8)])
 
     def test_failed_analysis_refunds_the_reserved_project_fee(self):
         project = self.create(source_text=SOURCE)
@@ -212,7 +231,26 @@ class AdaptationTests(unittest.TestCase):
         with closing(auth_store.db()) as conn:
             self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 100)
             job = conn.execute("SELECT status, credits_reserved, credits_refunded FROM adaptation_jobs").fetchone()
-        self.assertEqual(tuple(job), ("failed", 16, 16))
+        self.assertEqual(tuple(job), ("failed", 20, 20))
+
+    def test_old_quoted_price_does_not_charge_and_paid_setup_still_covers_first_episode(self):
+        project = self.create(source_text=SOURCE)
+        with patch.object(ad, "model_choice", return_value=("ark", "test-model")):
+            for quote in (None, 16):
+                with self.subTest(quote=quote), self.assertRaises(HTTPException) as exc:
+                    routes.start_job(project["id"], None, routes.JobInput(
+                        kind="analyze", revision=project["revision"], expected_points=quote,
+                    ), BackgroundTasks())
+                self.assertEqual(exc.exception.status_code, 409)
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 100)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM adaptation_jobs").fetchone()[0], 0)
+        with patch.object(routes, "PROJECT_POINTS", 16):
+            already_paid = self.confirm_plan(self.ready())
+        already_paid = self.generate(already_paid, "episode", DRAFT, expected_points=0)
+        self.assertIn("1", already_paid["outputs"])
+        with closing(auth_store.db()) as conn:
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
 
     def test_analysis_recovers_formatted_and_misplaced_quotes_and_omits_missing_quotes(self):
         project = self.create(source_text=SOURCE)
@@ -227,7 +265,7 @@ class AdaptationTests(unittest.TestCase):
         self.assertEqual(project["analysis"]["keep_options"], [{**keep, "quote": "沈青：" + LINE}])
         self.assertNotIn("usage", project)
         with patch.object(ad, "model_choice", return_value=("ark", "private-model")):
-            self.assertEqual(routes.availability(None), {"enabled": True, "ready": True})
+            self.assertEqual(routes.availability(None), {"enabled": True, "ready": True, "projectPoints": 20})
 
     def test_analysis_with_no_verified_quote_can_still_proceed_to_trial(self):
         project = self.create(source_text=SOURCE)
@@ -253,7 +291,7 @@ class AdaptationTests(unittest.TestCase):
         failed = self.generate(project, "preview", {"source_id": "invalid"}, source_id="S2")
         self.assertIn("失败", failed["error"])
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 84)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 64)
             refunded = conn.execute(
                 "SELECT billing_kind, status, credits_reserved, credits_refunded "
                 "FROM adaptation_jobs WHERE billing_kind='preview_retry'"
@@ -266,7 +304,7 @@ class AdaptationTests(unittest.TestCase):
         }, source_id="S2")
         project = self.generate(project, "plan", PLAN)
         with closing(auth_store.db()) as conn:
-            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 68)
+            self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 48)
             charges = conn.execute(
                 "SELECT billing_kind, credits_charged FROM adaptation_jobs "
                 "WHERE billing_kind IN ('preview_retry','plan_retry') AND status='success' "
@@ -287,7 +325,7 @@ class AdaptationTests(unittest.TestCase):
         self.assertEqual(project["reviewAll"]["summary"], REVIEW["summary"])
         with closing(auth_store.db()) as conn:
             row = conn.execute("SELECT kind, billing_kind, status, credits_reserved FROM adaptation_jobs WHERE kind='review_all'").fetchone()
-        self.assertEqual(tuple(row), ("review_all", "included", "success", 0))
+        self.assertEqual(tuple(row), ("review_all", "review", "success", 8))
 
     def test_platform_source_owned_and_quality_visible(self):
         script = {"title": "商号旧案", "scenes": [{"heading": "1-1 夜 内 商号", "startSec": 7.0,
@@ -358,7 +396,7 @@ class AdaptationTests(unittest.TestCase):
 
     def test_progress_discloses_job_only_to_owner(self):
         project = self.create(source_text=SOURCE)
-        job = routes.JobInput(kind="analyze", revision=project["revision"])
+        job = routes.JobInput(kind="analyze", revision=project["revision"], expected_points=20)
         with patch.object(ad, "model_choice", return_value=("ark", "test-model")):
             routes.start_job(project["id"], None, job, BackgroundTasks())
         self.assertEqual(routes.get_progress(project["id"], None), {"job": "analyze"})

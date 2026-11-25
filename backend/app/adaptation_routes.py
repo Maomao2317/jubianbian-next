@@ -30,8 +30,8 @@ router = APIRouter(prefix="/api/adaptations")
 ENABLED = JBB_ENVIRONMENT in {"staging", "development", "dev", "local"}
 LEASE_SECONDS = 45 * 60
 MAX_FILE_BYTES = 2 * 1024 * 1024
-PROJECT_POINTS = 16
-EPISODE_POINTS = 16
+PROJECT_POINTS = 20
+EPISODE_POINTS = 20
 REWRITE_POINTS = 8
 
 
@@ -53,6 +53,7 @@ class JobInput(ad.Contract):
     direction_id: str = Field(default="", max_length=20)
     keep_option_ids: list[str] = Field(default_factory=list, max_length=12)
     episode: int = Field(default=1, ge=1, le=ad.MAX_EPISODES)
+    expected_points: int | None = Field(default=None, ge=0)
 
 
 class PlanInput(ad.Contract):
@@ -263,22 +264,19 @@ def _recover_expired_jobs(conn: sqlite3.Connection, now: float) -> None:
 def _reserved_points(state: dict, job: JobInput) -> tuple[int, str]:
     if job.kind == "analyze":
         return (PROJECT_POINTS, "project") if not state.get("setupPaid") else (0, "included")
-    if job.kind == "preview" and state.get("previewUsed"):
-        return REWRITE_POINTS, "preview_retry"
-    if job.kind == "plan" and state.get("planUsed"):
-        return REWRITE_POINTS, "plan_retry"
+    if job.kind == "preview":
+        return REWRITE_POINTS, "preview_retry" if state.get("previewUsed") else "preview"
+    if job.kind == "plan":
+        return REWRITE_POINTS, "plan_retry" if state.get("planUsed") else "plan"
     if job.kind == "episode":
-        output = state["outputs"].get(str(job.episode))
-        if output is not None:
-            return (REWRITE_POINTS, "rewrite") if output.get("version", 1) > 1 else (0, "included_revision")
+        if str(job.episode) in state["outputs"]:
+            return REWRITE_POINTS, "rewrite"
         if job.episode == 1:
             return 0, "included_episode"
         return EPISODE_POINTS, "episode"
-    if job.kind == "review_all" and state.get("reviewAllUsed"):
+    if job.kind == "review_all":
         return REWRITE_POINTS, "review"
-    if job.kind == "impact" and state.get("impactChecked"):
-        return REWRITE_POINTS, "impact"
-    return 0, "included"
+    return REWRITE_POINTS, "impact"
 
 
 def _get(conn: sqlite3.Connection, project_id: str, owner: str) -> sqlite3.Row:
@@ -404,9 +402,10 @@ def availability(request: Request):
     current_user(request)
     try:
         ad.model_choice()
+        ready = True
     except ad.AdaptationError:
-        return {"enabled": True, "ready": False}
-    return {"enabled": True, "ready": True}
+        ready = False
+    return {"enabled": True, "ready": ready, "projectPoints": PROJECT_POINTS}
 
 
 @router.post("/parse")
@@ -827,10 +826,14 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
             _fail("已达测试环境每日生成上限，请明天再试。", 429)
         job_id = uuid.uuid4().hex
         points, billing_kind = _reserved_points(state, body)
+        if (body.expected_points is not None or points) and body.expected_points != points:
+            _fail("积分报价已更新，请刷新页面后再确认。", 409)
         if points:
             charge_label = {
                 "project": "原稿分析（含第1集）",
+                "preview": "代表场次试改",
                 "preview_retry": "试改重做",
+                "plan": "分集大纲生成",
                 "plan_retry": "分集大纲重生成",
                 "episode": f"第{body.episode}集生成",
                 "rewrite": f"第{body.episode}集重写",
@@ -976,7 +979,7 @@ def lock_episode(project_id: str, episode: int, request: Request, body: OutputLo
 
 
 @router.get("/{project_id}/download")
-def download(project_id: str, request: Request):
+def download(project_id: str, request: Request, fmt: Literal["md", "txt"] = "md"):
     owner = current_user(request)["id"]
     with closing(db()) as conn, conn:
         row = _get(conn, project_id, owner)
@@ -986,10 +989,14 @@ def download(project_id: str, request: Request):
     if any(item["stale"] for item in state["outputs"].values()):
         _fail("有分集正文需要按最新大纲复核，请更新标出的集数再导出。", 409)
     plan = ad.Plan.model_validate(state["plan"])
-    parts = [f"# {plan.title}"]
+    markdown = fmt == "md"
+    parts = [f"# {plan.title}" if markdown else plan.title]
     for key in sorted(state["outputs"], key=int):
         draft = ad.Draft.model_validate(state["outputs"][key]["draft"])
-        parts.append(f"## 第 {key} 集\n\n" + ad.render_scenes(draft.scenes, plan.cast, int(key)))
-    name = quote(f"{plan.title}-改编稿.md", safe="")
-    return Response("\n\n".join(parts) + "\n", media_type="text/markdown",
+        heading = f"第 {key} 集"
+        if markdown:
+            heading = "## " + heading
+        parts.append(heading + "\n\n" + ad.render_scenes(draft.scenes, plan.cast, int(key)))
+    name = quote(f"{plan.title}-改编稿.{fmt}", safe="")
+    return Response("\n\n".join(parts) + "\n", media_type="text/markdown" if markdown else "text/plain",
                     headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}", "Cache-Control": "no-store"})

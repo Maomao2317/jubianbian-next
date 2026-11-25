@@ -6,6 +6,21 @@ const vm = require("node:vm");
 
 const script = fs.readFileSync(path.join(__dirname, "js/adaptation.js"), "utf8");
 
+test("the project list returns to the workspace and shows the full update timestamp", async () => {
+  const main = { innerHTML: "" };
+  const timestamp = "2026-11-25T08:44:15+00:00";
+  const window = { AppAPI: { adaptation: async () => [{ id: "p1", title: "样稿", updatedAt: timestamp }] } };
+  vm.runInNewContext(script, {
+    window, document: { getElementById: () => main, addEventListener() {} },
+  });
+  await window.AdaptationStudio.open("", iso => {
+    assert.equal(iso, timestamp);
+    return "2026-11-25 16:44:15";
+  });
+  assert.match(main.innerHTML, /href="#\/workspace"[^>]*>.*返回工作台/);
+  assert.match(main.innerHTML, /<time datetime="2026-11-25T08:44:15\+00:00">2026-11-25 16:44:15<\/time>/);
+});
+
 test("analysis acknowledges clicks, saves edits, and recovers polling without resubmitting", async () => {
   const listeners = {};
   const requests = [];
@@ -72,6 +87,7 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
   window.AdaptationStudio.setAvailability({ enabled: true, ready: true, model: "private-model" });
   await window.AdaptationStudio.open("/p1");
   assert.doesNotMatch(main.innerHTML, /private-model|可用模型/);
+  assert.match(main.innerHTML, /分析原稿 · 20 积分/);
 
   const click = { target: { closest: () => button } };
   listeners.click(click);
@@ -84,6 +100,7 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
   assert.equal(requests[1].body.text, source.value);
   assert.equal(requests[2].body.revision, 1);
   assert.equal(requests[2].body.kind, "analyze");
+  assert.equal(requests[2].body.expected_points, 20);
   assert.match(main.innerHTML, /正在分析原稿/);
 
   await timers.shift()();
@@ -97,7 +114,7 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
   assert.equal(focused, true);
 });
 
-test("episode revision sends user notes and only confirms charges after the included revision", async () => {
+test("episode revisions send user notes and confirm eight points from the first revision", async () => {
   const listeners = {};
   const requests = [];
   const confirmations = [];
@@ -105,7 +122,7 @@ test("episode revision sends user notes and only confirms charges after the incl
   const draft = { scenes: [{ setting: "商号", blocks: [{ text: "沈青按住账册。" }] }], continuity: "回头查账" };
   const project = {
     id: "p1", title: "样稿", goal: "突出商号查账", warnings: [], usage: {}, revision: 1,
-    episodeCount: 1, confirmed: true, locks: [],
+    episodeCount: 2, confirmed: true, locks: [],
     sources: [{ id: "S1", label: "第一场", text: "沈青按住账册。" }],
     outputs: { 1: { draft, version: 1, locked: false, stale: false } },
     plan: { title: "样稿", premise: "查账", cast: [], episodes: [
@@ -116,7 +133,7 @@ test("episode revision sends user notes and only confirms charges after the incl
   const window = {
     confirm: message => { confirmations.push(message); return true; },
     AppAPI: {
-      adaptationDownloadUrl: () => "/download",
+      adaptationDownloadUrl: (_, format = "md") => "/download?fmt=" + format,
       async adaptation(route, method, body) {
         if (method === "POST") { requests.push(body); return null; }
         return project;
@@ -135,12 +152,17 @@ test("episode revision sends user notes and only confirms charges after the incl
   } });
 
   await window.AdaptationStudio.open("/p1");
-  assert.match(main.innerHTML, /用 AI 修改本集 · 已包含/);
+  assert.match(main.innerHTML, /用 AI 修改本集 · 8 积分/);
+  assert.match(main.innerHTML, /写第 2 集 · 20 积分/);
+  assert.match(main.innerHTML, /href="\/download\?fmt=md">导出已写正文 · Markdown/);
+  assert.match(main.innerHTML, /href="\/download\?fmt=txt">导出已写正文 · TXT/);
   input("缩短开场");
   listeners.click(click);
   await new Promise(setImmediate);
   assert.equal(requests[0].notes, "缩短开场");
-  assert.equal(confirmations.length, 0);
+  assert.equal(requests[0].expected_points, 8);
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0], /8 积分/);
 
   project.outputs[1].version = 2;
   await window.AdaptationStudio.open("/p1");
@@ -150,6 +172,7 @@ test("episode revision sends user notes and only confirms charges after the incl
   listeners.click(click);
   await new Promise(setImmediate);
   assert.equal(requests[1].notes, "加强当面对质");
-  assert.equal(confirmations.length, 1);
-  assert.match(confirmations[0], /8 积分/);
+  assert.equal(requests[1].expected_points, 8);
+  assert.equal(confirmations.length, 2);
+  assert.match(confirmations[1], /8 积分/);
 });

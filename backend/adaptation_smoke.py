@@ -45,10 +45,11 @@ def main():
             """INSERT INTO users(id,email,password_hash,name,credits,created_at)
                VALUES ('isolated-smoke','adaptation-smoke@example.test','test','改编冒烟测试',9999,'now')"""
         )
-    def run(project, kind, **fields):
+
+    def run(project, kind, expected_points=0, **fields):
         background = BackgroundTasks()
         routes.start_job(project["id"], None, routes.JobInput(
-            kind=kind, revision=project["revision"], **fields
+            kind=kind, revision=project["revision"], expected_points=expected_points, **fields
         ), background)
         task = background.tasks[0]
         task.func(*task.args, **task.kwargs)
@@ -64,17 +65,17 @@ def main():
             keep="保留沈青、迟巧的姓名和身份，账册、缺角印章、红线及翻案的因果。第一集原样保留沈青的台词“账册不能离开柜台。”。",
             episode_count=3, source_text=SOURCE,
         ))
-        project = run(project, "analyze")
+        project = run(project, "analyze", expected_points=20)
         source_texts = {item["id"]: item["text"] for item in project["sources"]}
         if any(item["quote"] not in source_texts[item["source_id"]] for item in project["analysis"]["keep_options"]):
             raise SystemExit("preflight: an original quote could not be verified")
-        if "usage" in project or set(routes.availability(None)) != {"enabled", "ready"}:
+        if "usage" in project or set(routes.availability(None)) != {"enabled", "ready", "projectPoints"}:
             raise SystemExit("preflight: provider or cost details are exposed in the project")
         source = next(item for item in project["sources"] if LINE in item["text"])
         direction = project["analysis"]["directions"][0]
-        project = run(project, "preview", source_id=source["id"], direction_id=direction["id"],
+        project = run(project, "preview", expected_points=8, source_id=source["id"], direction_id=direction["id"],
                       keep_option_ids=[item["id"] for item in project["analysis"]["keep_options"]])
-        project = run(project, "plan", notes="第一集保留沈青及其锁定台词。")
+        project = run(project, "plan", expected_points=8, notes="第一集保留沈青及其锁定台词。")
         plan = project["plan"]
         character = next((item for item in plan["cast"] if item["name"] == "沈青"), None)
         if not character:
@@ -83,13 +84,13 @@ def main():
             revision=project["revision"], plan=plan,
             locks=[ad.LockLine(episode=1, speaker_id=character["id"], source_id=source["id"], text=LINE)]))
         for number in range(1, 4):
-            project = run(project, "episode", episode=number)
+            project = run(project, "episode", episode=number, expected_points=0 if number == 1 else 20)
         notes = "缩短最后一场的问答，保留当众辨认印章的动作。"
-        project = run(project, "episode", episode=3, notes=notes)
+        project = run(project, "episode", expected_points=8, episode=3, notes=notes)
         archive = routes.get_episode_version(project["id"], 3, 1, None)
         if project["outputs"]["3"]["revisionNotes"] != notes or not archive["screenplay"]:
             raise SystemExit("preflight: the requested revision or its previous version was not saved")
-        project = run(project, "review_all")
+        project = run(project, "review_all", expected_points=8)
         if not project.get("reviewAll"):
             raise SystemExit("preflight: the whole-script review is missing")
         if any(str(number) not in project["reviews"] for number in range(1, 4)):
@@ -97,11 +98,17 @@ def main():
         exported = routes.download(project["id"], None).body.decode()
         if not all(f"## 第 {number} 集" in exported for number in range(1, 4)) or "沈青：" + LINE not in exported:
             raise SystemExit("preflight: generated export did not pass the episode and exact dialogue checks")
+        plain = routes.download(project["id"], None, fmt="txt")
+        if (not plain.headers["content-type"].startswith("text/plain")
+                or not plain.headers["content-disposition"].endswith(".txt")
+                or not plain.body.decode().startswith(plan["title"] + "\n\n第 1 集\n")
+                or "沈青：" + LINE not in plain.body.decode()):
+            raise SystemExit("preflight: plain text export did not preserve the title or dialogue")
         admin = routes.admin_adaptations(None, kind="all", limit=20, offset=0)
         charged = sum(item["credits_charged"] for item in admin["items"])
-        if charged != 48 or not any(item["billing_kind"] == "included_revision" and item["status"] == "success"
+        if charged != 92 or not any(item["billing_kind"] == "rewrite" and item["credits_charged"] == 8
                                     for item in admin["items"]):
-            raise SystemExit("preflight: adaptation charges or the included revision were incorrect")
+            raise SystemExit("preflight: adaptation charges or the eight-point revision were incorrect")
     calls = [call for item in admin["items"] for call in item["calls"]]
     costs = [call["apiCostRmb"] for call in calls if call["apiCostRmb"] is not None]
     print(json.dumps({"verified": True, "provider": provider, "model": model,

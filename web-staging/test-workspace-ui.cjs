@@ -41,7 +41,7 @@ context.window.window = context.window;
 context.window.document = context.document;
 vm.runInContext(fs.readFileSync(path.join(__dirname, "js/config.js"), "utf8"), context);
 const source = fs.readFileSync(path.join(__dirname, "js/app.js"), "utf8");
-vm.runInContext(source.replace("  boot();", "  window.testUI = { state, parseHash, renderWorkspaceHome, renderList, createModalMarkup, openCreateModal, openComingSoonModal, filteredUserTasks };"), context);
+vm.runInContext(source.replace("  boot();", "  window.testUI = { state, formatDate, parseHash, renderWorkspaceHome, renderList, renderDetail, createModalMarkup, openCreateModal, openComingSoonModal, filteredUserTasks };"), context);
 const ui = context.window.testUI;
 
 const click = async dataset => {
@@ -89,6 +89,21 @@ const task = (id, createdAt, status = "done", extra = {}) => ({
   assert.match(list, /自定义/);
   assert.match(list, /2026-11-01/);
   assert.doesNotMatch(list, /任务 three/);
+  ui.state.adaptationEnabled = true;
+  ui.state.tasks[0] = { ...ui.state.tasks[0], result: null };
+  ui.renderList();
+  assert.match(node("#main").innerHTML, /href="#\/adaptation\/new\/one">改编剧本/);
+  assert.doesNotMatch(node("#main").innerHTML, /href="#\/adaptation\/new\/two"/);
+  const adaptLink = {};
+  const target = { closest: selector => selector === "[data-open]" ? { dataset: { open: "one" } }
+    : selector === "a[href]" ? adaptLink : null };
+  for (const handler of handlers.click || []) await handler({ target });
+  assert.equal(location.hash, "#/workspace", "the row handler must leave the adaptation link to native navigation");
+  ui.state.current = task("one", "2026-11-01T00:00:00+08:00");
+  ui.renderDetail();
+  assert.match(node("#main").innerHTML, /class="primary-btn detail-adapt-link" href="#\/adaptation\/new\/one"/);
+  assert.equal(ui.formatDate("2026-11-25T08:44:15+00:00", true), "2026-11-25 16:44:15");
+  ui.state.adaptationEnabled = false;
   await click({ action: "task-type-filter", type: "multilingual" });
   assert.deepEqual(Array.from(ui.filteredUserTasks(), item => item.id), ["two"], "type filtering must use the task language metadata");
   assert.doesNotMatch(node("#main").innerHTML, /任务 one/);

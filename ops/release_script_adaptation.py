@@ -23,8 +23,8 @@ import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
 
-BASELINE = "ec11a3a1f4c40b6ddbdcb704d66ae5d27529aedd"
-BASE_BUILD = "script-adaptation-20261125-ec11a3a"
+BASELINE = "1854a73e8a3d5aa269441aaed87f9d698735b8fb"
+BASE_BUILD = "script-adaptation-20261125-1854a73"
 REF = "codex/script-adaptation-staging"
 BUILD_PREFIX = "script-adaptation-20261125-"
 PROJECT = "jubianbian-staging"
@@ -43,6 +43,7 @@ APP_FILES = [
 ]
 SMOKE = "backend/adaptation_smoke.py"
 ALLOWED = set(APP_FILES) | {"backend/test_adaptation.py", "web-staging/test-adaptation-feedback.cjs",
+                            "web-staging/test-workspace-ui.cjs",
                             "ops/release_script_adaptation.py", "ops/release_gpu_transport.py", SMOKE}
 
 

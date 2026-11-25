@@ -430,7 +430,9 @@
       const body = value instanceof FormData ? value : value === undefined ? undefined : JSON.stringify(value);
       return this.request(this.url("/adaptations" + path), { method, body });
     },
-    adaptationDownloadUrl(id) { return this.url("/adaptations/:id/download", { id }); },
+    adaptationDownloadUrl(id, format = "md") {
+      return this.url("/adaptations/:id/download", { id }) + `?fmt=${encodeURIComponent(format)}`;
+    },
     getCreditLedger() { return this.request(this.url("/me/ledger")); },
     getAdminOverview() { return this.request(this.url("/admin/overview")); },
     getAdminUsers(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/users") + (search ? "?" + search : "")); },
