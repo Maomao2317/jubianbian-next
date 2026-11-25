@@ -140,7 +140,10 @@ class AdaptationTests(unittest.TestCase):
         self.assertEqual(project["outputs"], {})
         project = self.generate(project, "episode", wrong, repaired=DRAFT)
         self.assertIn(f"沈青：{LINE}", routes.download(project_id, None).body.decode())
-        self.assertEqual([call["kind"] for call in project["usage"]["1"]["calls"]],
+        self.assertNotIn("usage", project)
+        with patch.object(routes, "current_user", return_value={"id": "owner", "role": "admin"}):
+            jobs = routes.admin_adaptations(None, status="success", kind="episode", limit=20, offset=0)
+        self.assertEqual([call["kind"] for call in jobs["items"][0]["calls"]],
                          ["episode", "episode_repair", "review"])
         project = self.generate(project, "episode", DRAFT, episode=2)
         project = routes.lock_episode(project_id, 2, None, routes.OutputLock(revision=project["revision"], locked=True))
@@ -203,13 +206,47 @@ class AdaptationTests(unittest.TestCase):
 
     def test_failed_analysis_refunds_the_reserved_project_fee(self):
         project = self.create(source_text=SOURCE)
-        invalid = {**ANALYSIS, "keep_options": [{**ANALYSIS["keep_options"][0], "quote": "不存在的原文"}]}
+        invalid = {**ANALYSIS, "directions": [ANALYSIS["directions"][0]] * 2}
         project = self.generate(project, "analyze", invalid)
-        self.assertIn("原文依据", project["error"])
+        self.assertIn("改编方向编号重复", project["error"])
         with closing(auth_store.db()) as conn:
             self.assertEqual(conn.execute("SELECT credits FROM users WHERE id='owner'").fetchone()[0], 100)
             job = conn.execute("SELECT status, credits_reserved, credits_refunded FROM adaptation_jobs").fetchone()
         self.assertEqual(tuple(job), ("failed", 16, 16))
+
+    def test_analysis_recovers_formatted_and_misplaced_quotes_and_omits_missing_quotes(self):
+        project = self.create(source_text=SOURCE)
+        keep = ANALYSIS["keep_options"][0]
+        partial = {**ANALYSIS, "preview_source_id": "does-not-exist", "keep_options": [
+            {**keep, "source_id": "S4", "quote": "沈青: 账册不能 离开柜台."},
+            {**keep, "id": "K2", "quote": "不存在的原文"},
+        ]}
+        project = self.generate(project, "analyze", partial)
+        self.assertNotIn("error", project)
+        self.assertEqual(project["analysis"]["preview_source_id"], "S2")
+        self.assertEqual(project["analysis"]["keep_options"], [{**keep, "quote": "沈青：" + LINE}])
+        self.assertNotIn("usage", project)
+        with patch.object(ad, "model_choice", return_value=("ark", "private-model")):
+            self.assertEqual(routes.availability(None), {"enabled": True, "ready": True})
+
+    def test_analysis_with_no_verified_quote_can_still_proceed_to_trial(self):
+        project = self.create(source_text=SOURCE)
+        keep = ANALYSIS["keep_options"][0]
+        partial = {**ANALYSIS, "keep_options": [{**keep, "quote": "不存在的原文"}]}
+        project = self.generate(project, "analyze", partial)
+        self.assertEqual(project["analysis"]["keep_options"], [])
+        self.assertTrue(project["billing"]["setupPaid"])
+        project = self.generate(project, "preview", {
+            "source_id": "S2", "cast": CAST, "scene": SCENE,
+            "decisions": ["保留账册作为线索"], "questions": [],
+        }, source_id="S2", keep_option_ids=[])
+        self.assertIn("preview", project)
+
+    def test_analysis_does_not_reassign_ambiguous_quotes(self):
+        option = {**ANALYSIS["keep_options"][0], "source_id": "other"}
+        analysis = ad.Analysis.model_validate({**ANALYSIS, "keep_options": [option]})
+        sources = [ad.SourceScene(id=id, label=id, text=LINE) for id in ("S2", "S3")]
+        self.assertEqual(ad.ground_analysis(analysis, sources).keep_options, [])
 
     def test_repeated_trial_and_outline_charge_eight_and_failed_retry_refunds(self):
         project = self.ready()

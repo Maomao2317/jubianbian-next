@@ -15,7 +15,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v6"
+PROMPT_VERSION = "adaptation-v7"
 usage_recorder = ContextVar("adaptation_usage_recorder", default=None)
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
@@ -140,7 +140,7 @@ class Analysis(Contract):
     summary: str = Field(min_length=1, max_length=1000)
     characters: list[str] = Field(min_length=1, max_length=25)
     directions: list[Direction] = Field(min_length=2, max_length=3)
-    keep_options: list[KeepOption] = Field(min_length=1, max_length=12)
+    keep_options: list[KeepOption] = Field(max_length=12)
     questions: list[str] = Field(max_length=6)
     preview_source_id: str
 
@@ -157,17 +157,51 @@ class ReviewReport(Contract):
     issues: list[ReviewIssue] = Field(max_length=12)
 
 
-def validate_analysis(analysis: Analysis, sources: list[SourceScene]) -> None:
-    source_map = {item.id: item.text for item in sources}
-    if analysis.preview_source_id not in source_map:
-        raise AdaptationError("推荐试改场次未能对应原稿，请重新分析。")
+QUOTE_PUNCTUATION = str.maketrans("“”‘’＂＇：，。！？；（）", "\"\"''\"':,.!?;()")
+
+
+def _quote_index(text: str) -> tuple[str, list[int]]:
+    # Keep offsets so the displayed quote can always be copied from the source verbatim.
+    offsets = [index for index, char in enumerate(text) if not char.isspace()]
+    return "".join(text[index] for index in offsets).translate(QUOTE_PUNCTUATION), offsets
+
+
+def ground_analysis(analysis: Analysis, sources: list[SourceScene]) -> Analysis:
     if len({item.id for item in analysis.directions}) != len(analysis.directions):
         raise AdaptationError("改编方向编号重复，请重新分析。")
-    if len({item.id for item in analysis.keep_options}) != len(analysis.keep_options):
-        raise AdaptationError("保留选项编号重复，请重新分析。")
+    source_map = {item.id: item for item in sources}
+    indexed = {item.id: _quote_index(item.text) for item in sources}
+    options = []
+    seen_ids = set()
     for item in analysis.keep_options:
-        if item.quote not in source_map.get(item.source_id, ""):
-            raise AdaptationError("建议中的原文依据未能对齐剧本，请重新分析。")
+        if item.id in seen_ids:
+            continue
+        if item.source_id in source_map and item.quote in source_map[item.source_id].text:
+            options.append(item)
+            seen_ids.add(item.id)
+            continue
+        quote, _ = _quote_index(item.quote)
+        if not any(char.isalnum() for char in quote):
+            continue
+        matches = {}
+        for source_id, (text, offsets) in indexed.items():
+            start = text.find(quote)
+            if start < 0:
+                continue
+            original = source_map[source_id].text[offsets[start]:offsets[start + len(quote) - 1] + 1]
+            if len(original) <= 300:
+                matches[source_id] = original
+        source_id = item.source_id
+        if source_id not in matches and len(matches) == 1:
+            source_id = next(iter(matches))
+        if source_id in matches:
+            options.append(item.model_copy(update={"source_id": source_id, "quote": matches[source_id]}))
+            seen_ids.add(item.id)
+
+    preview_id = analysis.preview_source_id
+    if preview_id not in source_map:
+        preview_id = options[0].source_id if options else max(sources, key=lambda item: len(item.text)).id
+    return analysis.model_copy(update={"keep_options": options, "preview_source_id": preview_id})
 
 
 class AdaptationError(ValueError):
@@ -280,7 +314,8 @@ INSTRUCTIONS = {
                "提出2到3个适合该故事的具体改编方向。"
                "每个方向说明改法及适合原稿的理由。为人物、主线、结局及关键台词提供可勾选保留项，"
                "kind只能使用固定英文值character、plot、ending、line，分别表示人物、主线、结局、台词。"
-               "每项的quote必须是对应source_id原文的连续逐字片段，保留标点。原稿事实与改编建议用措辞明确表达。"
+               "每项的quote从对应source_id的text逐字复制一小段连续原文，保留标点，不加引号和省略号。"
+               "找不到确切出处的建议不要放进keep_options。原稿事实与改编建议用措辞明确表达。"
                "挑一个有对白和冲突的完整场次作为preview_source_id。身份、因果不明确的地方列入questions。",
     "preview": "用给定的一场戏试改。提供可逐句对照的改稿，用固定角色编号 C1、C2……。"
                "每位说话人都必须出现在 cast 中，包括一次性角色、画外音、旁白。"
@@ -393,7 +428,7 @@ def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str,
         if provider == "ark":
             api_key = providers.ark_model_account_key(model)
             if not api_key:
-                raise AdaptationError("豆包模型当前不可用，请稍后重试。")
+                raise AdaptationError("改编服务暂不可用，请稍后重试。")
             response = providers.ark_stream_response({
                 "model": model, "max_output_tokens": maximum,
                 "_jbb_token_reservation": len(payload) + maximum + 3000,

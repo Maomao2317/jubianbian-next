@@ -23,8 +23,8 @@ import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
 
-BASELINE = "d4b4d1484f06ad1e0da2d123251bd6a8020dedd7"
-BASE_BUILD = "script-adaptation-20261125-d4b4d14"
+BASELINE = "ec11a3a1f4c40b6ddbdcb704d66ae5d27529aedd"
+BASE_BUILD = "script-adaptation-20261125-ec11a3a"
 REF = "codex/script-adaptation-staging"
 BUILD_PREFIX = "script-adaptation-20261125-"
 PROJECT = "jubianbian-staging"

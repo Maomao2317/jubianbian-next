@@ -115,12 +115,12 @@
           <span class="adapt-direction-title">${esc(item.title)}</span><span>${esc(item.description)}</span>
           <small>适合这部剧，因为 ${esc(item.reason)}</small>
         </label>`).join("")}</div></fieldset>
-      <fieldset class="adapt-choice-group"><legend>希望保留的内容</legend><div class="adapt-keep-list">${analysis.keep_options.map(item => {
+      ${analysis.keep_options.length ? `<fieldset class="adapt-choice-group"><legend>希望保留的内容</legend><div class="adapt-keep-list">${analysis.keep_options.map(item => {
         const referenced = p.sources.find(scene => scene.id === item.source_id);
         return `<label class="adapt-keep-option"><input type="checkbox" data-adapt-keep value="${esc(item.id)}" ${selectedKeeps.has(item.id) ? "checked" : ""}>
           <span><strong>${esc(keepKinds[item.kind] || "建议")} · ${esc(item.label)}</strong><small>${esc(item.instruction)}</small>
           <em>${esc(referenced?.label || "原稿依据")}：“${esc(item.quote)}”</em></span></label>`;
-      }).join("")}</div></fieldset>
+      }).join("")}</div></fieldset>` : '<p class="adapt-note">这次没有找到可以直接引用的保留项。你可以先选改编方向，再按需补充保留要求。</p>'}
       ${analysis.questions.length ? `<div class="adapt-warnings"><strong>原稿中有待确认的信息</strong><ul>${analysis.questions.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
       <label class="adapt-label">补充改编要求（选填）<textarea id="adapt-direction-notes" rows="2" maxlength="1000" placeholder="AI 已起草改编方向，需要时再补充">${esc(directionNotes)}</textarea></label>
       <label class="adapt-label">补充保留要求（选填）<textarea id="adapt-keep-notes" rows="2" maxlength="1200" placeholder="例如：保留原剧的时代背景">${esc(keepNotes)}</textarea></label>
@@ -248,7 +248,6 @@
       selectedDirection = p.selectedDirectionId || p.analysis.directions[0].id;
     }
     if (p.analysis && !selected) selected = p.analysis.preview_source_id;
-    const ran = Object.values(p.usage).at(-1);
     const completedStep = p.reviewAll ? 6 : p.outputs && Object.keys(p.outputs).length === p.episodeCount
       && !Object.values(p.outputs).some(output => output.stale) ? 5
         : p.confirmed ? 4 : p.preview ? 3 : p.analysis ? 2 : 1;
@@ -256,8 +255,7 @@
     main().innerHTML = layout(p.plan?.title || p.title, p.goal || p.analysis?.summary || "先读懂原稿，再一起确定改编方向。", `
       <div class="adapt-flow" aria-label="改编进度">${steps.map((label, index) => `<span class="${index < completedStep ? "is-complete" : ""}"><i>${String(index + 1).padStart(2, "0")}</i>${label}</span>`).join("")}</div>
       <div class="adapt-pricing"><strong>${p.billing?.setupPaid ? "项目分析费已支付，包含第 1 集" : "原稿分析 16 积分，含第 1 集"}</strong><span>第 2 集起 16 积分/集 · 每集含 1 次 AI 修改，之后 8 积分/次 · 手动编辑、保存和导出免费</span></div>
-      <p class="adapt-note">${ran ? `最近模型调用 · ${esc(ran.model || ran.calls?.[0]?.model || "模型记录")} · ${ran.apiCostRmb != null && Number.isFinite(Number(ran.apiCostRmb)) ? `成本估算 ¥${Number(ran.apiCostRmb).toFixed(4)}` : "成本待服务商账单确认"}` :
-        availability?.model ? `可用模型 · ${esc(availability.model)}` : "模型暂未配置，请稍后再试。"}</p>
+      ${availability?.ready === false ? '<p class="adapt-note">改编服务暂不可用，原稿仍可保存。</p>' : ""}
       ${p.job ? `<div class="adapt-progress" role="status">${esc(kinds[p.job] || "正在生成")}，离开后可从项目列表继续查看。</div>` : ""}
       <fieldset class="adapt-workbench" ${p.job ? "disabled" : ""}>
         ${renderSource(p)}${renderAnalysis(p)}${renderPreview(p)}${renderPlan(p)}${renderOutputs(p)}

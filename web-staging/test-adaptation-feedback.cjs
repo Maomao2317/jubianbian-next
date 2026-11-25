@@ -34,7 +34,7 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
     directions: [{ id: "D1", title: "悬疑翻案", description: "围绕账册查案。", reason: "原稿出现了账册。", goal: "改成悬疑短剧。" }],
     keep_options: [], questions: [], preview_source_id: "S1"
   };
-  const result = { ...saved, revision: 2, analysis };
+  const result = { ...saved, revision: 2, analysis, usage: { analyze: { model: "private-model", apiCostRmb: 0.0851 } } };
   let progressRequests = 0;
   let focused = false;
   const heading = { focus: () => { focused = true; }, scrollIntoView() {} };
@@ -69,7 +69,9 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
     setTimeout: callback => timers.push(callback),
     clearTimeout() {}
   });
+  window.AdaptationStudio.setAvailability({ enabled: true, ready: true, model: "private-model" });
   await window.AdaptationStudio.open("/p1");
+  assert.doesNotMatch(main.innerHTML, /private-model|可用模型/);
 
   const click = { target: { closest: () => button } };
   listeners.click(click);
@@ -90,6 +92,8 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
 
   assert.equal(requests.filter(request => request.method === "POST").length, 1);
   assert.match(main.innerHTML, /悬疑翻案/);
+  assert.match(main.innerHTML, /没有找到可以直接引用的保留项/);
+  assert.doesNotMatch(main.innerHTML, /private-model|最近模型调用|0\.0851/);
   assert.equal(focused, true);
 });
 

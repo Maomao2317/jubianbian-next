@@ -45,8 +45,6 @@ def main():
             """INSERT INTO users(id,email,password_hash,name,credits,created_at)
                VALUES ('isolated-smoke','adaptation-smoke@example.test','test','改编冒烟测试',9999,'now')"""
         )
-    usage = []
-
     def run(project, kind, **fields):
         background = BackgroundTasks()
         routes.start_job(project["id"], None, routes.JobInput(
@@ -57,7 +55,6 @@ def main():
         project = routes.get_project(project["id"], None)
         if project.get("error"):
             raise SystemExit(f"{kind}: {project['error']}")
-        usage.append(project["usage"][str(fields["episode"]) if kind == "episode" else kind])
         return project
 
     provider, model = ad.model_choice()
@@ -68,6 +65,11 @@ def main():
             episode_count=3, source_text=SOURCE,
         ))
         project = run(project, "analyze")
+        source_texts = {item["id"]: item["text"] for item in project["sources"]}
+        if any(item["quote"] not in source_texts[item["source_id"]] for item in project["analysis"]["keep_options"]):
+            raise SystemExit("preflight: an original quote could not be verified")
+        if "usage" in project or set(routes.availability(None)) != {"enabled", "ready"}:
+            raise SystemExit("preflight: provider or cost details are exposed in the project")
         source = next(item for item in project["sources"] if LINE in item["text"])
         direction = project["analysis"]["directions"][0]
         project = run(project, "preview", source_id=source["id"], direction_id=direction["id"],
@@ -100,14 +102,14 @@ def main():
         if charged != 48 or not any(item["billing_kind"] == "included_revision" and item["status"] == "success"
                                     for item in admin["items"]):
             raise SystemExit("preflight: adaptation charges or the included revision were incorrect")
-    calls = [call for item in usage for call in item["calls"]]
+    calls = [call for item in admin["items"] for call in item["calls"]]
     costs = [call["apiCostRmb"] for call in calls if call["apiCostRmb"] is not None]
     print(json.dumps({"verified": True, "provider": provider, "model": model,
                       "episodes": 3, "promptVersion": ad.PROMPT_VERSION,
-                      "jobs": len(usage), "calls": len(calls), "creditsCharged": charged,
+                      "jobs": admin["total"], "calls": len(calls), "creditsCharged": charged,
                       "pricedCalls": len(costs), "apiCostRmb": round(sum(costs), 6) if costs else None,
-                      "inputTokens": sum(item["inputTokens"] or 0 for item in usage),
-                      "outputTokens": sum(item["outputTokens"] or 0 for item in usage)}))
+                      "inputTokens": sum(item["input_tokens"] or 0 for item in admin["items"]),
+                      "outputTokens": sum(item["output_tokens"] or 0 for item in admin["items"])}))
 
 
 if __name__ == "__main__":

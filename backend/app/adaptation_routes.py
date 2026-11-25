@@ -294,6 +294,10 @@ def _state(row: sqlite3.Row) -> dict:
 
 def _project(row: sqlite3.Row) -> dict:
     state = _state(row)
+    state.pop("usage", None)
+    if (state.get("errorKind") == "analyze"
+            and state.get("error") == "建议中的原文依据未能对齐剧本，请重新分析。"):
+        state["error"] = "上次分析未完成，预扣积分已退回。可以重新分析这份原稿。"
     if row["job_id"] and row["job_started"] < time.time() - LEASE_SECONDS:
         state.update(error="上次生成中断，可重新提交。", errorKind=row["job_kind"])
         job = None
@@ -399,10 +403,10 @@ def _read_document(raw: bytes, filename: str) -> str:
 def availability(request: Request):
     current_user(request)
     try:
-        provider, model = ad.model_choice()
-        return {"enabled": True, "model": model, "provider": provider}
+        ad.model_choice()
     except ad.AdaptationError:
-        return {"enabled": True, "model": None}
+        return {"enabled": True, "ready": False}
+    return {"enabled": True, "ready": True}
 
 
 @router.post("/parse")
@@ -628,7 +632,7 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
             result, usage = ad.generate(job.kind, context, contract, model)
         review = None
         if job.kind == "analyze":
-            ad.validate_analysis(result, sources)
+            result = ad.ground_analysis(result, sources)
         elif job.kind == "episode":
             with closing(db()) as conn:
                 state_for_review = _state(_get(conn, project_id, owner))
