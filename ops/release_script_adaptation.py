@@ -2,6 +2,7 @@
 
 Run on the application host:
     python3 release_script_adaptation.py prepare SHA
+    python3 release_script_adaptation.py smoke SHA
     python3 release_script_adaptation.py deploy SHA
 
 Preparation builds an isolated frontend overlay and runs the backend regression
@@ -21,8 +22,8 @@ import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
 
-BASELINE = "b9146f1215878d42953a848bca776bf3062f0ce2"
-BASE_BUILD = "script-adaptation-20261125-b9146f1"
+BASELINE = "d4b4d1484f06ad1e0da2d123251bd6a8020dedd7"
+BASE_BUILD = "script-adaptation-20261125-d4b4d14"
 REF = "codex/script-adaptation-staging"
 BUILD_PREFIX = "script-adaptation-20261125-"
 PROJECT = "jubianbian-staging"
