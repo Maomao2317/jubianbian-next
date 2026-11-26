@@ -12,6 +12,8 @@
   const keepKinds = { character: "人物", plot: "主线", ending: "结局", line: "台词" };
   let availability, view = 0, timer, project, selected = "", busy = false, planNotes = "";
   let selectedDirection = "", directionNotes = "", keepNotes = "";
+  let refreshBalance = async () => {};
+  const mobileReadOnly = () => window.matchMedia?.("(max-width: 780px)").matches === true;
   const sourceDrafts = new Map();
   const episodeNotes = new Map();
   const sourceText = value => value.replace(/\r\n?/g, "\n").trim();
@@ -38,11 +40,15 @@
     `<option value="${esc(item.id)}" ${item.id === id ? "selected" : ""}>${esc(item.label)}</option>`).join("");
   function renderList(items, formatUpdatedAt) {
     main().innerHTML = layout("剧本改编", "从已有剧本开始，先试改一场，再确认大纲和分集正文。", `
-      <div class="adapt-toolbar"><a class="primary-btn" href="#/adaptation/new">上传剧本</a><a class="secondary-btn" href="#/tasks">从平台任务选择</a></div>
+      ${mobileReadOnly() ? '<p class="adapt-readonly">手机端支持浏览改编项目，编辑和生成请使用电脑。</p>' : '<div class="adapt-toolbar"><a class="primary-btn" href="#/adaptation/new">上传剧本</a><a class="secondary-btn" href="#/tasks">从平台任务选择</a></div>'}
       <div class="adapt-panel"><h2>我的改编项目</h2>${items.length ? `<ul class="adapt-projects">${items.map(item => `
         <li><a href="#/adaptation/${encodeURIComponent(item.id)}">${esc(item.title)}</a><time datetime="${esc(item.updatedAt)}">${esc(formatUpdatedAt(item.updatedAt))}</time></li>`).join("")}</ul>` : "<p>还没有改编项目。</p>"}</div>`, true);
   }
   function renderNew(task) {
+    if (mobileReadOnly()) {
+      main().innerHTML = layout("新建改编", "手机端支持浏览，请在电脑端创建改编项目。", '<a href="#/adaptation">查看已有项目</a>');
+      return;
+    }
     const fromTask = Boolean(task);
     main().innerHTML = layout("新建改编", fromTask ? `使用剧编编出稿《${task.batchTitle || task.title}》。` : "上传自己的剧本，也可以直接粘贴正文。", `
       <form class="adapt-panel adapt-form" data-adapt-form="create" data-task="${esc(task?.id || "")}">
@@ -146,6 +152,15 @@
       ${p.confirmed ? "" : `<label class="adapt-label">补充改编要求（选填）<textarea id="adapt-plan-notes" rows="2" maxlength="1000" placeholder="说明试改里哪些改法要保留或调整">${esc(planNotes)}</textarea></label>
       <button class="primary-btn" data-adapt="plan" type="button">${p.planUsed ? "重新生成大纲" : "按这个方向生成分集大纲"}${extraCost(p)}</button>${feedback(p, "plan")}`}</section>`;
   }
+  function renderCharacters(p) {
+    const cast = p.plan?.cast || p.preview?.cast;
+    if (!cast?.length) return "";
+    return `<section class="adapt-panel adapt-characters"><h2>人物介绍</h2><div class="adapt-character-grid">${cast.map(c => `
+      <article><h3>${esc(c.name)}</h3><small>原人物 ${esc(c.original_name)}</small><p>${esc(c.role)}</p>
+        <p>${esc(c.biography || "完整简介待补充，可沿用已有身份与关系继续改编。")}</p>
+        ${c.relationships ? `<p><strong>人物关系</strong> ${esc(c.relationships)}</p>` : ""}
+        ${c.motivation ? `<p><strong>目标与冲突</strong> ${esc(c.motivation)}</p>` : ""}</article>`).join("")}</div></section>`;
+  }
   function lockRow(p, item = {}) {
     return `<div class="adapt-lock-row">
       <label>落在哪一集 <input name="lock_episode" type="number" min="1" max="${p.episodeCount}" value="${item.episode || 1}" required></label>
@@ -166,7 +181,10 @@
         <details open><summary>跨集共用的人物表</summary><div class="adapt-cast">${plan.cast.map(c => `
           <div class="adapt-cast-item" data-cast-id="${esc(c.id)}"><span>${esc(c.original_name)} · ${esc(c.id)}</span>
             <label>改编名 <input name="character_name" maxlength="40" value="${esc(c.name)}" required></label>
-            <label>身份与关系 <input name="character_role" maxlength="160" value="${esc(c.role)}" required></label></div>`).join("")}</div></details>
+            <label>身份与定位 <input name="character_role" maxlength="160" value="${esc(c.role)}" required></label>
+            <label>人物简介 <textarea name="character_biography" maxlength="500" rows="3">${esc(c.biography)}</textarea></label>
+            <label>人物关系 <textarea name="character_relationships" maxlength="300" rows="2">${esc(c.relationships)}</textarea></label>
+            <label>目标与冲突 <textarea name="character_motivation" maxlength="300" rows="2">${esc(c.motivation)}</textarea></label></div>`).join("")}</div></details>
         <details open><summary>分集大纲 · ${p.episodeCount} 集</summary><div class="adapt-outlines">${plan.episodes.map(e => `
           <div class="adapt-outline" data-episode="${e.number}"><h3>第 ${e.number} 集</h3>
             <label>冲突与转折 <textarea name="beats" rows="3" maxlength="500" required>${esc(e.beats)}</textarea></label>
@@ -263,13 +281,36 @@
       <div class="adapt-flow" aria-label="改编进度">${steps.map((label, index) => `<span class="${index < completedStep ? "is-complete" : ""}"><i>${String(index + 1).padStart(2, "0")}</i>${label}</span>`).join("")}</div>
       <div class="adapt-pricing"><strong>${p.billing?.setupPaid ? "项目分析费已支付，包含第 1 集" : `原稿分析 ${projectPoints(p)} 积分，含第 1 集`}</strong><span>第 2 集起 ${episodePoints(p)} 积分/集 · 单独发起的 AI 操作 ${rewritePoints(p)} 积分/次 · 手动编辑、保存和导出免费</span></div>
       ${availability?.ready === false ? '<p class="adapt-note">改编服务暂不可用，原稿仍可保存。</p>' : ""}
-      ${p.job ? `<div class="adapt-progress" role="status">${esc(kinds[p.job] || "正在生成")}，离开后可从项目列表继续查看。</div>` : ""}
+      <div id="adapt-progress-region">${renderProgress(p)}</div>
+      ${mobileReadOnly() ? '<p class="adapt-readonly">手机端为只读浏览，编辑和生成请使用电脑。</p>' : ""}
       <fieldset class="adapt-workbench" ${p.job ? "disabled" : ""}>
-        ${renderSource(p)}${renderAnalysis(p)}${renderPreview(p)}${renderPlan(p)}${renderOutputs(p)}
+        ${renderSource(p)}${renderAnalysis(p)}${renderPreview(p)}${renderCharacters(p)}${renderPlan(p)}${renderOutputs(p)}
         <button class="secondary-btn adapt-delete" type="button" data-adapt="delete">删除此项目</button>
       </fieldset>`);
     if (p.error && !p.errorKind && p.plan) error(p.error);
+    applyReadOnly();
     if (p.job) poll(p.job);
+  }
+  function renderProgress(p) {
+    const progress = p.progress || { percent: 0, label: kinds[p.job] || "等待开始改编" };
+    const percent = Number(progress.percent) || 0;
+    const updated = progress.updatedAt || p.updatedAt;
+    return `<section class="adapt-progress ${p.job ? "is-running" : ""}" aria-label="当前改编状态">
+      <div class="adapt-progress-heading"><strong role="status">${esc(progress.label)}</strong><span>${percent}%</span></div>
+      <progress max="100" value="${percent}" aria-label="已完成的改编阶段">${percent}%</progress>
+      ${progress.episodeCount ? `<small>正文已完成 ${Number(progress.completedEpisodes) || 0}/${Number(progress.episodeCount)} 集</small>` : ""}
+      <p>${p.job ? "正在处理中，完成后自动显示结果。离开页面后可从项目列表继续查看。" : p.error ? esc(p.error) : "进度随已完成阶段更新。"}</p>
+      ${updated ? `<small>最后更新 ${esc(new Date(updated).toLocaleString("zh-CN", { hour12: false }))}</small>` : ""}</section>`;
+  }
+  function applyReadOnly() {
+    const readonly = mobileReadOnly();
+    for (const node of main().querySelectorAll?.(".adapt-workbench input, .adapt-workbench textarea, .adapt-workbench button, .adapt-workbench select") || []) {
+      const readAction = ["show-preview", "view-version"].includes(node.dataset.adapt)
+        || node.matches("[data-adapt-source], .adapt-history select");
+      if (readAction) continue;
+      if (readonly && !node.disabled) { node.dataset.mobileDisabled = "true"; node.disabled = true; }
+      if (!readonly && node.dataset.mobileDisabled) { node.disabled = false; delete node.dataset.mobileDisabled; }
+    }
   }
   function showPreview() {
     const heading = main().querySelector("#adapt-preview h2");
@@ -286,6 +327,11 @@
         if (active !== view) return;
         const element = main().querySelector(`button[data-adapt="${kind}"]`);
         if (status.job) {
+          if (status.progress) {
+            project.progress = status.progress;
+            const region = document.getElementById("adapt-progress-region");
+            if (region) region.innerHTML = renderProgress(project);
+          }
           if (failures) feedbackText(element, kinds[kind] + "，完成后会自动显示结果。", false, true);
           poll(kind);
           return;
@@ -293,6 +339,7 @@
         const next = await api.adaptation(path);
         if (active !== view) return;
         renderProject(next);
+        await refreshBalance();
         if (kind === "analyze" && next.analysis && !next.error && !next.job) {
           const heading = main().querySelector(".adapt-analysis-panel h2");
           heading?.focus({ preventScroll: true });
@@ -317,6 +364,8 @@
   }
   async function open(path, formatUpdatedAt) {
     const active = view;
+    await refreshBalance();
+    if (active !== view) return;
     project = null;
     selected = "";
     planNotes = "";
@@ -352,6 +401,7 @@
     } catch (err) {
       if (active === view) feedbackText(element, err.message, true, isJob);
     } finally {
+      await refreshBalance();
       if (active === view) { busy = false; if (element?.isConnected) element.disabled = false; }
     }
   }
@@ -363,7 +413,10 @@
         title: form.elements.title.value, premise: form.elements.premise.value,
         cast: [...form.querySelectorAll("[data-cast-id]")].map((row, i) => ({
           ...project.plan.cast[i], name: row.querySelector("[name=character_name]").value,
-          role: row.querySelector("[name=character_role]").value
+          role: row.querySelector("[name=character_role]").value,
+          biography: row.querySelector("[name=character_biography]").value,
+          relationships: row.querySelector("[name=character_relationships]").value,
+          motivation: row.querySelector("[name=character_motivation]").value
         })),
         episodes: [...form.querySelectorAll("[data-episode]")].map((row, i) => ({
           ...project.plan.episodes[i], beats: row.querySelector("[name=beats]").value,
@@ -382,6 +435,7 @@
     const form = event.target.closest("[data-adapt-form]");
     if (!form) return;
     event.preventDefault();
+    if (mobileReadOnly()) return;
     const kind = form.dataset.adaptForm;
     const data = new FormData(form);
     action(async () => {
@@ -427,6 +481,7 @@
     if (node.matches("[data-adapt-source]")) {
       selected = node.value;
       node.closest(".adapt-panel").outerHTML = renderSource(project);
+      applyReadOnly();
       const label = main().querySelector(".adapt-selected-scene");
       if (label) label.textContent = `试改场次 · ${currentSource().label} · 可在原稿场次菜单中更换`;
     }
@@ -437,6 +492,7 @@
       });
     }
     if (!node.matches("[data-adapt-file]") || !node.files[0]) return;
+    if (mobileReadOnly()) return;
     const form = node.closest("form");
     const data = new FormData();
     data.append("file", node.files[0]);
@@ -451,6 +507,7 @@
     if (!button || !project) return;
     const kind = button.dataset.adapt;
     if (kind === "show-preview") { event.preventDefault(); showPreview(); return; }
+    if (mobileReadOnly() && kind !== "view-version") return;
     const episode = Number(button.dataset.number || 1);
     if (kind === "add-line") {
       const list = main().querySelector(".adapt-locks");
@@ -530,5 +587,7 @@
       }
     }, button, isJob ? "正在提交…" : "", isJob);
   });
-  window.AdaptationStudio = { open, leave, setAvailability(value) { availability = value; } };
+  window.matchMedia?.("(max-width: 780px)").addEventListener?.("change", applyReadOnly);
+  window.AdaptationStudio = { open, leave, setAvailability(value) { availability = value; },
+    setBalanceRefresh(callback) { refreshBalance = callback; } };
 })();

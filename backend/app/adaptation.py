@@ -15,7 +15,7 @@ from .errors import ArkError
 from .logging_setup import logger
 from .resource_limits import capacity
 
-PROMPT_VERSION = "adaptation-v7"
+PROMPT_VERSION = "adaptation-v8"
 usage_recorder = ContextVar("adaptation_usage_recorder", default=None)
 MAX_SOURCE_CHARS = 60_000
 MAX_EPISODES = 30
@@ -39,6 +39,9 @@ class CharacterDetails(Contract):
     original_name: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=40)
     role: str = Field(min_length=1, max_length=160)
+    biography: str = Field(default="", max_length=500)
+    relationships: str = Field(default="", max_length=300)
+    motivation: str = Field(default="", max_length=300)
 
 
 class Character(CharacterDetails):
@@ -318,6 +321,8 @@ INSTRUCTIONS = {
                "找不到确切出处的建议不要放进keep_options。原稿事实与改编建议用措辞明确表达。"
                "挑一个有对白和冲突的完整场次作为preview_source_id。身份、因果不明确的地方列入questions。",
     "preview": "用给定的一场戏试改。提供可逐句对照的改稿，用固定角色编号 C1、C2……。"
+               "每个人物提供 biography 人物简介、relationships 与主要人物的关系、motivation 当前目标或冲突。"
+               "简介依据原稿与改编方向，未知信息明确写待确认。"
                "每位说话人都必须出现在 cast 中，包括一次性角色、画外音、旁白。"
                "用户要求保留的姓名在 original_name 和 name 中都必须逐字照录。"
                "speaker_id 只能用 cast 中的 id，动作段才留空。身份不清楚时建立标为待核对的角色并写入 questions。"
@@ -327,7 +332,9 @@ INSTRUCTIONS = {
                       "已有角色能明确对应时复用编号，否则用 cast_additions 新增角色。"
                       "无法确认姓名就用独立的待核对角色并在 questions 标出，不能猜成其他角色。"
                       "只返回人物增补、段落编号和疑点，不生成正文。",
-    "plan": "根据全部参考场次以及已审试改，制定完整改编大纲。按目标集数从 1 连续编号，每集写目标、冲突、"
+    "plan": "根据全部参考场次以及已审试改，制定完整改编大纲。"
+            "新增人物也提供 biography、relationships、motivation，已有的人物介绍完整沿用。"
+            "按目标集数从 1 连续编号，每集写目标、冲突、"
             "转折、集尾和上下集衔接。每集用 source_ids 引用承担相应叙事作用的原稿场次。"
             "试改人物表全部沿用，大纲正文使用表中既有改编名。additional_cast 仅补充后面才首次登场的角色，"
             "其中人物编号由系统分配。原稿没有的角色，original_name 与 name 填同一姓名。"
@@ -372,13 +379,16 @@ def _ark_schema(schema: dict) -> dict:
             return node
         if "$ref" in node:
             return expand(definitions[node["$ref"].split("/")[-1]])
-        ignored = {"$defs", "title", "minLength", "maxLength", "minItems",
+        ignored = {"$defs", "title", "default", "minLength", "maxLength", "minItems",
                    "maxItems", "pattern", "minimum", "maximum"}
-        return {
+        result = {
             key: ({field: expand(shape) for field, shape in value.items()}
                   if key == "properties" else expand(value))
             for key, value in node.items() if key not in ignored
         }
+        if "properties" in result:
+            result["required"] = list(result["properties"])
+        return result
 
     return expand(schema)
 
@@ -468,8 +478,14 @@ def generate(kind: str, data: dict, contract: type[Contract], choice: tuple[str,
                        kind, provider, model,
                        [(item["type"], item["loc"][:2]) for item in exc.errors(
                            include_url=False, include_context=False, include_input=False)][:6])
-        raise AdaptationError("模型没有返回完整、可校验的结果，请重试。") from None
+        raise AdaptationError("本次生成内容不完整，请稍后重新生成。") from None
     except ArkError as exc:
         logger.warning("adaptation_provider_error kind=%s provider=%s model=%s status=%s",
                        kind, provider, model, exc.status_code)
-        raise AdaptationError("模型暂未完成请求，请稍后重试。") from None
+        if exc.status_code == 429:
+            message = "当前改编服务繁忙，请稍后再试。"
+        elif exc.status_code in {408, 504}:
+            message = "本次内容处理超时，请稍后重新生成。"
+        else:
+            message = "当前改编服务暂时无法完成生成，请稍后再试。"
+        raise AdaptationError(message) from None

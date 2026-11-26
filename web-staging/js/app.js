@@ -278,7 +278,37 @@
   }
 
   function adminUserIdentity(user) {
-    return `<strong>${escapeHtml(user.name || "未命名用户")}</strong><small>${escapeHtml(user.email || user.user_id || user.id || "—")}</small>`;
+    const id = user.user_id || user.id;
+    return `<button class="row-link admin-user-link" data-action="admin-user-detail" data-id="${escapeHtml(id)}"><strong>${escapeHtml(user.name || user.user_name || "未命名用户")}</strong><small>${escapeHtml(user.email || user.user_email || id || "—")}</small></button>`;
+  }
+
+  async function openAdminUserDetail(id, section = "", offset = 0) {
+    const root = $("#modalRoot");
+    const previous = root.querySelector?.("[data-user-detail]");
+    const pages = { ledger_offset: 0, recharge_offset: 0, task_offset: 0 };
+    if (previous?.dataset.userDetail === id) Object.assign(pages, JSON.parse(previous.dataset.pages));
+    if (section) pages[section] = offset;
+    const marker = `<div class="modal-mask"><div class="modal admin-user-detail" data-user-detail="${escapeHtml(id)}" data-pages="${escapeHtml(JSON.stringify(pages))}"><p role="status">正在加载用户详情…</p><button class="close-btn" data-action="close-modal" aria-label="关闭">×</button></div></div>`;
+    root.innerHTML = marker;
+    try {
+      const detail = await api.getAdminUserDetail(id, pages);
+      if (root.innerHTML !== marker) return;
+      const user = detail.user;
+      const paginate = (key, total) => `<div class="admin-pagination"><button class="admin-action" data-action="admin-user-detail-page" data-id="${escapeHtml(id)}" data-section="${key}" data-offset="${Math.max(0, pages[key] - 20)}" ${pages[key] ? "" : "disabled"}>上一页</button><span>第 ${Math.floor(pages[key] / 20) + 1} / ${Math.max(1, Math.ceil(total / 20))} 页</span><button class="admin-action" data-action="admin-user-detail-page" data-id="${escapeHtml(id)}" data-section="${key}" data-offset="${pages[key] + 20}" ${pages[key] + 20 >= total ? "disabled" : ""}>下一页</button></div>`;
+      const table = (headers, rows, empty) => `<div class="admin-table-wrap"><table><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}">${empty}</td></tr>`}</tbody></table></div>`;
+      const ledger = detail.ledger.items.map(item => `<tr><td>${formatDate(item.created_at)}</td><td>${ledgerBadge(item.entry_type)}</td><td>${Number(item.amount).toFixed(1)}</td><td>${Number(item.balance_after).toFixed(1)}</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(item.admin_name || "系统")}</td></tr>`).join("");
+      const recharges = detail.recharges.items.map(item => `<tr><td>${formatDate(item.created_at)}</td><td>¥${Number(item.rmb_amount).toFixed(2)}</td><td>${Number(item.points_amount).toFixed(1)}</td><td>${Number(item.balance_after).toFixed(1)}</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(item.admin_name || "—")}</td></tr>`).join("");
+      const tasks = detail.recentTasks.items.map(item => `<tr><td><button class="row-link" data-action="admin-review" data-id="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)}</button></td><td>${adminTaskStatus(item)}</td><td>${Number(item.progress_percent || 0)}%</td><td>${(Number(item.credits_used || 0) * Number(item.points_per_minute || POINTS_PER_MINUTE)).toFixed(1)}</td><td>${formatDate(item.created_at)}</td></tr>`).join("");
+      root.innerHTML = `<div class="modal-mask"><section class="modal admin-user-detail" role="dialog" aria-modal="true" aria-labelledby="admin-user-detail-title" data-user-detail="${escapeHtml(id)}" data-pages="${escapeHtml(JSON.stringify(pages))}">
+        <div class="modal-head"><h2 id="admin-user-detail-title">${escapeHtml(user.name)} · 用户详情</h2><button class="close-btn" data-action="close-modal" aria-label="关闭">×</button></div>
+        <dl class="account-details"><div><dt>账号</dt><dd>${escapeHtml(user.email)}</dd></div><div><dt>用户 ID</dt><dd>${escapeHtml(user.id)}</dd></div><div><dt>注册时间</dt><dd>${formatDate(user.created_at)}</dd></div><div><dt>最近登录</dt><dd>${user.last_login_at ? formatDate(user.last_login_at) : "暂无记录"}</dd></div><div><dt>角色与状态</dt><dd>${user.role === "admin" ? "管理员" : "用户"} · ${user.is_active ? "正常" : "已停用"}</dd></div><div><dt>套餐</dt><dd>${escapeHtml(user.plan)}</dd></div></dl>
+        <div class="admin-stats"><article><span>剩余积分</span><strong>${Number(user.credits).toFixed(1)}</strong></article><article><span>净消耗积分</span><strong>${Number(detail.totals.consumed).toFixed(1)}</strong></article><article><span>累计充值积分</span><strong>${Number(detail.totals.recharged).toFixed(1)}</strong></article><article><span>视频任务 / 改编项目</span><strong>${detail.tasks.total} / ${detail.adaptationCount}</strong><small>视频完成 ${detail.tasks.completed || 0} · 失败 ${detail.tasks.failed || 0}</small></article></div>
+        <h3>积分流水</h3>${table(["时间", "类型", "积分变动", "余额", "原因", "操作人"], ledger, "暂无积分流水")}${paginate("ledger_offset", detail.ledger.total)}
+        <h3>充值流水</h3>${table(["时间", "人民币", "积分", "余额", "原因", "操作人"], recharges, "暂无充值流水")}${paginate("recharge_offset", detail.recharges.total)}
+        <h3>近期视频任务</h3>${table(["任务", "状态", "进度", "积分", "创建时间"], tasks, "暂无视频任务")}${paginate("task_offset", detail.recentTasks.total)}</section></div>`;
+    } catch (error) {
+      if (root.innerHTML === marker) { root.innerHTML = ""; toast(error.message || "用户详情加载失败", "error"); }
+    }
   }
 
   function adminTaskStatus(item) {
@@ -297,12 +327,6 @@
     analyze: "原稿分析与改编建议", preview: "代表场次试改", plan: "分集大纲",
     episode: "分集正文与审稿", impact: "大纲影响分析", review_all: "整剧一致性审稿"
   };
-  const adaptationBillingKinds = {
-    project: "项目费", included: "已包含", included_episode: "已含第 1 集",
-    episode: "分集生成", included_revision: "已含首次修改", rewrite: "分集修改",
-    preview: "场次试改", preview_retry: "试改重做", plan: "分集大纲生成",
-    plan_retry: "大纲重生成", review: "整剧审稿", impact: "大纲影响复核"
-  };
 
   function adminAdaptationStatus(status) {
     const label = { running: "进行中", success: "成功", failed: "失败" }[status] || "未知";
@@ -310,29 +334,15 @@
     return `<span class="admin-status ${tone}">${label}</span>`;
   }
 
-  function adminAdaptationCalls(calls) {
-    if (!Array.isArray(calls) || !calls.length) return "<small>暂无模型调用明细</small>";
-    return `<div class="adapt-admin-calls">${calls.map(call => {
-      const stages = { review: "分集审稿", episode_repair: "正文自动校正", preview_repair: "试改角色校正" };
-      const label = adaptationKinds[call.kind] || stages[call.kind] || call.kind || "模型调用";
-      const tokens = Number(call.inputTokens || 0) + Number(call.outputTokens || 0);
-      const cost = call.apiCostRmb == null ? "成本未计价" : `${String(call.costSource || "").includes("estimate") ? "估算 " : ""}¥${Number(call.apiCostRmb).toFixed(4)}`;
-      return `<span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(call.model || "模型未知")} · ${tokens.toLocaleString()} Tokens · ${cost}</small></span>`;
-    }).join("")}</div>`;
-  }
 
   function adminAdaptationRow(item) {
-    const kind = adaptationKinds[item.kind] || item.kind;
-    const points = Number(item.credits_charged || 0);
-    const refund = Number(item.credits_refunded || 0);
-    const cost = item.api_cost_rmb == null ? "未计价" : `${String(item.cost_source || "").includes("estimate") ? "估算 " : ""}¥${Number(item.api_cost_rmb).toFixed(4)}`;
-    const episode = Number(item.episode) ? `第 ${Number(item.episode)} 集` : "—";
-    return `<tr><td><strong>${escapeHtml(item.project_title || "已删除项目")}</strong><small>${escapeHtml(item.user_name || "未命名用户")} · ${escapeHtml(item.user_email || "")}</small></td>
-      <td><strong>${escapeHtml(kind)}</strong><small>${escapeHtml(episode)} · ${escapeHtml(adaptationBillingKinds[item.billing_kind] || "已包含")}</small></td>
+    const cost = item.api_cost_rmb == null ? "未计价" : `${item.estimated_jobs ? "估算 " : ""}¥${Number(item.api_cost_rmb).toFixed(4)}`;
+    return `<tr><td><strong>${escapeHtml(item.project_title || "已删除项目")}</strong>${adminUserIdentity(item)}</td>
+      <td><strong>第 ${Number(item.episode)} 集</strong></td>
       <td>${adminAdaptationStatus(item.status)}${item.error ? `<small>${escapeHtml(item.error)}</small>` : ""}</td>
-      <td><strong>${Number(item.input_tokens || 0).toLocaleString()} / ${Number(item.output_tokens || 0).toLocaleString()}</strong><small>输入 / 输出 Tokens · ${escapeHtml(item.model || "模型未知")}</small></td>
-      <td><strong>${cost}</strong><small>实扣 ${points} 积分${refund ? ` · 退回 ${refund}` : ""}</small></td>
-      <td>${adminAdaptationCalls(item.calls)}<small>${formatDate(item.started_at)}${item.finished_at ? ` · 完成 ${formatDate(item.finished_at)}` : ""}</small></td></tr>`;
+      <td><strong>${cost}</strong>${item.unpriced_jobs ? "<small>部分成本待计价</small>" : ""}</td>
+      <td>¥${(Number(item.credits_charged || 0) / POINTS_PER_YUAN).toFixed(2)}</td>
+      <td>${formatDate(item.updated_at)}</td></tr>`;
   }
 
   function adminTaskActions(item, reviewId, allowControls) {
@@ -427,6 +437,7 @@
         panelPromises.push(api.getAdminAdaptations({
           limit: 20, offset: state.adminAdaptPage * 20, keyword: state.adminAdaptKeyword,
           kind: state.adminAdaptKind, status: state.adminAdaptStatus,
+          view: "episodes",
           date_from: state.adminAdaptFrom, date_to: state.adminAdaptTo
         }).then(value => { adaptations = value; }));
       }
@@ -454,26 +465,25 @@
       } else if (tab === "adaptations") {
         const categories = adaptations.categories || [];
         const totalCredits = categories.reduce((sum, item) => sum + Number(item.credits_charged || 0), 0);
-        const totalInput = categories.reduce((sum, item) => sum + Number(item.input_tokens || 0), 0);
-        const totalOutput = categories.reduce((sum, item) => sum + Number(item.output_tokens || 0), 0);
         const knownCost = categories.reduce((sum, item) => sum + Number(item.api_cost_rmb || 0), 0);
         const unpriced = categories.reduce((sum, item) => sum + Number(item.unpriced_jobs || 0), 0);
         const grouped = Object.keys(adaptationKinds).map(kind => {
           const rows = categories.filter(item => item.kind === kind);
-          const jobs = rows.reduce((sum, item) => sum + Number(item.jobs || 0), 0);
           const charged = rows.reduce((sum, item) => sum + Number(item.credits_charged || 0), 0);
           const cost = rows.reduce((sum, item) => sum + Number(item.api_cost_rmb || 0), 0);
-          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong>${jobs}</strong><small>${charged} 积分 · ${cost ? `¥${cost.toFixed(4)}` : "暂无计价成本"}</small></article>`;
+          const pending = rows.some(item => item.unpriced_jobs);
+          const estimated = rows.some(item => item.estimated_jobs);
+          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong>${estimated ? "估算" : ""}成本 ¥${cost.toFixed(4)}</strong><small>扣费折合 ¥${(charged / POINTS_PER_YUAN).toFixed(2)}</small>${pending ? "<small>部分成本待计价</small>" : ""}</article>`;
         }).join("");
-        body += `<div class="admin-panel adapt-admin-panel"><div class="admin-panel-head"><div><h2>剧本改编任务</h2><p>按分析、试改、大纲、分集正文和审稿分类，展示积分结算与模型调用成本。</p></div><span>${adaptations.total} 条记录</span></div>
-          <div class="admin-stats adapt-admin-stats"><article><span>已结算积分</span><strong>${totalCredits}</strong><small>不含失败后退回的预扣</small></article><article><span>模型 Tokens</span><strong>${(totalInput + totalOutput).toLocaleString()}</strong><small>输入 ${totalInput.toLocaleString()} · 输出 ${totalOutput.toLocaleString()}</small></article><article><span>模型调用成本</span><strong>¥${knownCost.toFixed(4)}</strong><small>${unpriced ? `${unpriced} 项未计价` : "按可用调用用量汇总"}</small></article></div>
+        body += `<div class="admin-panel adapt-admin-panel"><div class="admin-panel-head"><div><h2>剧本改编任务</h2><p>上方按环节汇总成本与扣费折合金额，下方每集汇总正文、审稿和历史改稿。</p></div><span>${adaptations.total} 集</span></div>
+          <div class="admin-stats adapt-admin-stats"><article><span>用户扣费折合金额</span><strong>¥${(totalCredits / POINTS_PER_YUAN).toFixed(2)}</strong><small>按 12.8 积分折合 1 元，赠送积分也按该比例折算</small></article><article><span>模型调用成本</span><strong>¥${knownCost.toFixed(4)}</strong><small>${unpriced ? "包含待计价项目" : "按已记录用量汇总，含失败调用成本"}</small></article></div>
           <div class="adapt-admin-categories">${grouped}</div>
           <div class="admin-toolbar adapt-admin-toolbar"><input id="adminAdaptKeyword" aria-label="搜索项目或用户" value="${escapeHtml(state.adminAdaptKeyword)}" placeholder="搜索项目名、用户名称或账号" /><select id="adminAdaptKind" aria-label="改编操作分类"><option value="all">全部分类</option>${Object.entries(adaptationKinds).map(([key, value]) => `<option value="${key}" ${state.adminAdaptKind === key ? "selected" : ""}>${value}</option>`).join("")}</select><select id="adminAdaptStatus" aria-label="改编任务状态"><option value="all">全部状态</option><option value="running" ${state.adminAdaptStatus === "running" ? "selected" : ""}>进行中</option><option value="success" ${state.adminAdaptStatus === "success" ? "selected" : ""}>成功</option><option value="failed" ${state.adminAdaptStatus === "failed" ? "selected" : ""}>失败</option></select><label class="admin-date-label">开始日期<input id="adminAdaptFrom" type="date" value="${state.adminAdaptFrom}" /></label><label class="admin-date-label">结束日期<input id="adminAdaptTo" type="date" value="${state.adminAdaptTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-adapt-search">筛选</button><button class="admin-action" data-action="admin-adapt-reset">重置</button></div>
-          <div class="admin-table-wrap"><table class="adapt-admin-table"><thead><tr><th>项目 / 用户</th><th>操作分类</th><th>状态</th><th>模型用量</th><th>API 成本 / 积分</th><th>调用明细 / 时间</th></tr></thead><tbody>${adaptations.items.map(adminAdaptationRow).join("") || `<tr><td colspan="6">暂无改编任务记录</td></tr>`}</tbody></table></div>${adminPagination("admin-adapt-page", state.adminAdaptPage, adaptations.total, 20)}</div>`;
+          <div class="admin-table-wrap"><table class="adapt-admin-table"><thead><tr><th>项目 / 用户</th><th>集数</th><th>当前状态</th><th>模型成本</th><th>扣费折合金额</th><th>最近更新</th></tr></thead><tbody>${adaptations.items.map(adminAdaptationRow).join("") || `<tr><td colspan="6">暂无分集生成记录</td></tr>`}</tbody></table></div>${adminPagination("admin-adapt-page", state.adminAdaptPage, adaptations.total, 20)}</div>`;
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近视频任务</h2><p>最近创建的 10 条视频任务</p></div><span>点击任务查看详情</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户名称 / 账号</th><th>状态</th><th>计费时长</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)}</button></td><td>${adminUserIdentity(item)}</td><td>${adminTaskStatus(item)}</td><td>${Number(item.credits_used || 0).toFixed(1)} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无视频任务</td></tr>`}</tbody></table></div></div>`;
       }
-      $("#main").innerHTML = `<section class="admin-page" aria-busy="false"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户积分和任务处理</p></div><div class="admin-heading-actions"><button class="secondary-btn" type="button" data-action="admin-refresh">刷新数据</button><a class="secondary-btn admin-back-btn" href="#/tasks"><span aria-hidden="true">←</span>返回工作台</a></div></div><div class="admin-nav" aria-label="后台功能">${nav}</div>${body}<p class="admin-note">数据更新于 ${formatDate(overview.timestamp)}；点击“刷新数据”获取最新状态。</p></section>`;
+      $("#main").innerHTML = `<section class="admin-page" aria-busy="false"><div class="admin-heading"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>管理员后台</h1><p>平台运行、用户积分和任务处理</p></div><div class="admin-heading-actions"><button class="secondary-btn" type="button" data-action="admin-refresh">刷新数据</button><a class="secondary-btn admin-back-btn" href="#/tasks"><span aria-hidden="true">←</span>返回工作台</a></div></div><div class="admin-nav" aria-label="后台功能">${nav}</div>${body}<details class="admin-panel admin-metric-help"><summary>指标说明</summary><p>用户总数为累计注册账号，正常账号为允许登录的账号。积分余额合计为所有账号的当前余额。视频任务总数按单个视频累计，任务列表按批次汇总。本月 API 账单以服务商返回为准，存在记账延迟。本地成本按调用用量记录，估算成本以当前计价规则计算。扣费折合金额按 12.8 积分 = 1 元折算，实际到账金额可查看充值流水。</p></details><p class="admin-note">数据更新于 ${formatDate(overview.timestamp)}；点击“刷新数据”获取最新状态。</p></section>`;
       // Keep the same table and actions on every screen; mobile cards use its headers as labels.
       document.querySelectorAll(".admin-table-wrap table").forEach(table => {
         const labels = Array.from(table.querySelectorAll("thead th"), header => header.textContent.trim());
@@ -1417,6 +1427,7 @@
       if (!availability) state.adaptationCheck = null;
       state.adaptationEnabled = availability?.enabled === true;
       window.AdaptationStudio.setAvailability(availability);
+      window.AdaptationStudio.setBalanceRefresh(refreshAccountBalance);
     }
     parseHash();
     window.AdaptationStudio?.leave();
@@ -1676,6 +1687,9 @@
       document.querySelectorAll(".admin-tab").forEach((button) => button.classList.toggle("active", button === actionElement));
       await renderAdmin();
       return;
+    }
+    if (action === "admin-user-detail" || action === "admin-user-detail-page") {
+      await openAdminUserDetail(actionElement.dataset.id, actionElement.dataset.section, Number(actionElement.dataset.offset) || 0); return;
     }
     if (action === "admin-refresh") { state.adminOverviewCache = null; state.adminOverviewCachedAt = 0; state.adminTaskUsersCache = null; await renderAdmin(); return; }
     if (action === "admin-search") {
@@ -2047,6 +2061,12 @@
   });
 
   window.addEventListener("hashchange", render);
+  async function refreshAccountBalance() {
+    if (!state.profile) return;
+    const profile = await api.getProfile().catch(() => null);
+    if (profile && state.profile?.id === profile.id) { state.profile = profile; renderHeader(); }
+  }
+  window.addEventListener("focus", refreshAccountBalance);
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) window.location.reload();
   });
@@ -2058,6 +2078,9 @@
       state.profile = null;
     }
     await render();
+    setInterval(() => {
+      if (state.view === "adaptation" && !document.hidden) refreshAccountBalance();
+    }, 30000);
   }
 
   boot();

@@ -41,7 +41,7 @@ context.window.window = context.window;
 context.window.document = context.document;
 vm.runInContext(fs.readFileSync(path.join(__dirname, "js/config.js"), "utf8"), context);
 const source = fs.readFileSync(path.join(__dirname, "js/app.js"), "utf8");
-vm.runInContext(source.replace("  boot();", "  window.testUI = { state, formatDate, parseHash, renderWorkspaceHome, renderList, renderDetail, createModalMarkup, openCreateModal, openComingSoonModal, filteredUserTasks };"), context);
+vm.runInContext(source.replace("  boot();", "  window.testUI = { state, formatDate, parseHash, renderWorkspaceHome, renderList, renderDetail, createModalMarkup, openCreateModal, openComingSoonModal, filteredUserTasks, renderAdmin };"), context);
 const ui = context.window.testUI;
 
 const click = async dataset => {
@@ -146,5 +146,34 @@ const task = (id, createdAt, status = "done", extra = {}) => ({
   location.hash = "#/workspace";
   ui.parseHash();
   assert.equal(ui.state.view, "workspace");
-  console.log("Creation studio navigation, date filters, language cards, and coming-soon UI checks passed");
+  ui.state.profile = { id: "admin", role: "admin", credits: 100 };
+  ui.state.view = "admin";
+  ui.state.adminTab = "adaptations";
+  ui.state.adminOverviewCache = { users: {}, tasks: {}, timestamp: "2026-11-26T00:00:00Z" };
+  ui.state.adminOverviewCachedAt = Date.now();
+  api.getAdminAdaptations = async query => {
+    assert.equal(query.view, "episodes");
+    return { total: 1, categories: [{ kind: "episode", credits_charged: 8, api_cost_rmb: 0.04, jobs: 22, estimated_jobs: 2 }],
+      items: [{ project_title: "样稿", user_id: "user", user_name: "测试用户", episode: 1,
+        credits_charged: 8, api_cost_rmb: 0.04, estimated_jobs: 2, status: "success" }] };
+  };
+  await ui.renderAdmin();
+  assert.match(node("#main").innerHTML, /扣费折合金额/);
+  assert.match(node("#main").innerHTML, /¥0\.63/);
+  assert.match(node("#main").innerHTML, /第 1 集/);
+  assert.match(node("#main").innerHTML, /估算/);
+  assert.doesNotMatch(node("#main").innerHTML, /调用明细|实扣 8 积分|模型 Tokens/);
+  api.getAdminUserDetail = async id => {
+    assert.equal(id, "user");
+    return { user: { id, name: "测试用户", email: "user@example.test", credits: 92, created_at: "2026-11-26", is_active: true },
+      totals: { consumed: 8, recharged: 100 }, tasks: { total: 0 }, adaptationCount: 1,
+      ledger: { total: 0, items: [] }, recharges: { total: 0, items: [] }, recentTasks: { total: 0, items: [] } };
+  };
+  await click({ action: "admin-user-detail", id: "user" });
+  assert.match(node("#modalRoot").innerHTML, /注册时间/);
+  assert.match(node("#modalRoot").innerHTML, /剩余积分/);
+  assert.match(node("#modalRoot").innerHTML, /积分流水/);
+  assert.match(node("#modalRoot").innerHTML, /充值流水/);
+  assert.match(node("#modalRoot").innerHTML, /92\.0/);
+  console.log("Workspace, adaptation billing and administrator user detail UI checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

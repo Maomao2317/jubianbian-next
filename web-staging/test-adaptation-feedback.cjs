@@ -85,6 +85,8 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
     clearTimeout() {}
   });
   window.AdaptationStudio.setAvailability({ enabled: true, ready: true, model: "private-model" });
+  let balanceRefreshes = 0;
+  window.AdaptationStudio.setBalanceRefresh(async () => { balanceRefreshes += 1; });
   await window.AdaptationStudio.open("/p1");
   assert.doesNotMatch(main.innerHTML, /private-model|可用模型/);
   assert.match(main.innerHTML, /分析原稿 · 20 积分/);
@@ -112,6 +114,46 @@ test("analysis acknowledges clicks, saves edits, and recovers polling without re
   assert.match(main.innerHTML, /没有找到可以直接引用的保留项/);
   assert.doesNotMatch(main.innerHTML, /private-model|最近模型调用|0\.0851/);
   assert.equal(focused, true);
+  assert.ok(balanceRefreshes >= 3, "balance refreshes on opening, submitting and completing the job");
+});
+
+test("mobile adaptation views show introductions and progress while blocking writes", async () => {
+  const listeners = {};
+  const requests = [];
+  const controls = [{ dataset: {}, disabled: false, matches: () => false }];
+  const main = { innerHTML: "", querySelector: () => null, querySelectorAll: () => controls };
+  const project = {
+    id: "p1", title: "样稿", warnings: [], outputs: {}, locks: [], revision: 1,
+    sources: [{ id: "S1", label: "第一场", text: "沈青核对账册。" }],
+    preview: {
+      source_id: "S1", cast: [{ id: "C1", name: "沈青", original_name: "沈青", role: "账房",
+        biography: "追查<假账>", relationships: "与掌柜对立", motivation: "找回真账册" }],
+      scene: { setting: "商号", blocks: [{ speaker_id: "C1", text: "账目有误。" }] }, decisions: [], questions: []
+    },
+    progress: { percent: 30, label: "等待确认人物与生成大纲", episodeCount: 2, completedEpisodes: 0 }
+  };
+  const window = {
+    matchMedia: () => ({ matches: true, addEventListener() {} }),
+    AppAPI: { async adaptation(route, method) { requests.push({ route, method }); return project; } }
+  };
+  vm.runInNewContext(script, { window, document: {
+    getElementById: () => main, addEventListener: (name, handler) => { listeners[name] = handler; }
+  } });
+  await window.AdaptationStudio.open("/p1");
+  assert.match(main.innerHTML, /人物介绍/);
+  assert.match(main.innerHTML, /追查&lt;假账&gt;/);
+  assert.match(main.innerHTML, /与掌柜对立/);
+  assert.match(main.innerHTML, /找回真账册/);
+  assert.match(main.innerHTML, /<progress max="100" value="30"/);
+  assert.match(main.innerHTML, /手机端为只读浏览/);
+  assert.equal(controls[0].disabled, true);
+  listeners.click({ target: { closest: () => ({ dataset: { adapt: "plan" } }) } });
+  listeners.submit({ target: { closest: () => ({ dataset: { adaptForm: "plan" } }) }, preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 1);
+  await window.AdaptationStudio.open("/new");
+  assert.match(main.innerHTML, /请在电脑端创建改编项目/);
+  assert.doesNotMatch(main.innerHTML, /data-adapt-form="create"/);
 });
 
 test("episode revisions send user notes and confirm eight points from the first revision", async () => {

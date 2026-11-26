@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from .adaptation_routes import (
     ENABLED as ADAPTATION_ENABLED,
     admin_adaptations,
+    admin_user_detail,
     init_adaptations,
     router as adaptation_router,
 )
@@ -149,6 +150,7 @@ if ADAPTATION_ENABLED:
     init_adaptations()
     app.include_router(adaptation_router)
     app.add_api_route("/api/admin/adaptations", admin_adaptations, methods=["GET"])
+    app.add_api_route("/api/admin/users/{user_id}", admin_user_detail, methods=["GET"])
 
 @app.on_event("startup")
 async def start_durable_worker() -> None:

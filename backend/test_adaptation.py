@@ -153,9 +153,11 @@ class AdaptationTests(unittest.TestCase):
         self.assertTrue(markdown.headers["content-disposition"].endswith(".md"))
         self.assertTrue(plain.headers["content-type"].startswith("text/plain; charset=utf-8"))
         self.assertTrue(plain.headers["content-disposition"].endswith(".txt"))
-        self.assertTrue(plain.body.decode().startswith(f"{PLAN['title']}\n\n第 1 集\n"))
+        self.assertTrue(plain.body.decode().startswith(f"{PLAN['title']}\n\n人物介绍\n"))
+        self.assertIn("第 1 集\n", plain.body.decode())
         self.assertIn(f"沈青：{LINE}", plain.body.decode())
         self.assertEqual(markdown.body.decode().replace("# " + PLAN["title"], PLAN["title"], 1)
+                         .replace("## 人物介绍", "人物介绍")
                          .replace("## 第 1 集", "第 1 集", 1), plain.body.decode())
         self.assertNotIn("usage", project)
         with patch.object(routes, "current_user", return_value={"id": "owner", "role": "admin"}):
@@ -399,7 +401,10 @@ class AdaptationTests(unittest.TestCase):
         job = routes.JobInput(kind="analyze", revision=project["revision"], expected_points=20)
         with patch.object(ad, "model_choice", return_value=("ark", "test-model")):
             routes.start_job(project["id"], None, job, BackgroundTasks())
-        self.assertEqual(routes.get_progress(project["id"], None), {"job": "analyze"})
+        progress = routes.get_progress(project["id"], None)
+        self.assertEqual(progress["job"], "analyze")
+        self.assertEqual(progress["progress"]["status"], "running")
+        self.assertEqual(progress["progress"]["percent"], 0)
         self.current_user.return_value = {"id": "other", "role": "user"}
         with self.assertRaises(HTTPException) as error:
             routes.get_progress(project["id"], None)
@@ -442,6 +447,68 @@ class AdaptationTests(unittest.TestCase):
         self.assertEqual(routes._read_document(data.getvalue(), "test.docx"), "沈青：照原文。\n△ 收起账册。")
         with self.assertRaises(ad.AdaptationError):
             routes._read_document(b"invalid", "test.docx")
+
+    def test_staging_generation_continues_past_old_daily_limits(self):
+        with closing(auth_store.db()) as conn, conn:
+            conn.executemany("INSERT INTO adaptation_attempts VALUES (?,?)",
+                             [("owner", routes.time.time())] * 151)
+        project = self.generate(self.create(source_text=SOURCE), "analyze", ANALYSIS)
+        self.assertIn("analysis", project)
+
+    def test_episode_admin_view_combines_rewrites_and_keeps_latest_status(self):
+        project = self.confirm_plan(self.ready())
+        project = self.generate(project, "episode", DRAFT)
+        project = self.generate(project, "episode", DRAFT, notes="加强冲突")
+        self.current_user.return_value = {"id": "owner", "role": "admin"}
+        result = routes.admin_adaptations(None, view="episodes", limit=20, offset=0)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["episode"], 1)
+        self.assertEqual(result["items"][0]["credits_charged"], 8)
+        self.assertAlmostEqual(result["items"][0]["api_cost_rmb"], 0.04)
+        self.assertEqual(result["items"][0]["status"], "success")
+        with closing(auth_store.db()) as conn, conn:
+            conn.execute("""INSERT INTO adaptation_jobs
+                (id,project_id,project_title,user_id,kind,billing_kind,episode,status,error,started_at,api_cost_rmb)
+                VALUES ('latest',?,'商号旧案','owner','episode','rewrite',1,'failed','内容不完整','9999',0.03)""",
+                (project["id"],))
+        result = routes.admin_adaptations(None, view="episodes", status="failed", limit=20, offset=0)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["credits_charged"], 8)
+        self.assertAlmostEqual(result["items"][0]["api_cost_rmb"], 0.07)
+        self.assertEqual(result["items"][0]["error"], "内容不完整")
+        self.assertEqual(routes.admin_adaptations(None, view="episodes", status="success", limit=20, offset=0)["total"], 0)
+
+    def test_character_introductions_compatible_with_old_projects_and_exports(self):
+        project = self.confirm_plan(self.ready())
+        self.assertEqual(project["plan"]["cast"][0]["biography"], "")
+        project["plan"]["cast"][0].update(biography="精于查账，追查账册下落。",
+                                          relationships="与掌柜相互试探。", motivation="守住真实账目。")
+        project = routes.save_plan(project["id"], None, routes.PlanInput(
+            revision=project["revision"], plan=project["plan"], locks=project["locks"]))
+        project = self.generate(project, "episode", DRAFT)
+        for fmt in ("md", "txt"):
+            content = routes.download(project["id"], None, fmt).body.decode()
+            self.assertIn("人物介绍", content)
+            self.assertIn("精于查账", content)
+            self.assertIn("守住真实账目", content)
+
+    def test_admin_user_detail_is_authorized_paginated_and_excludes_secrets(self):
+        with self.assertRaises(HTTPException) as error:
+            routes.admin_user_detail(None, "owner", 0, 0, 0)
+        self.assertEqual(error.exception.status_code, 403)
+        self.current_user.return_value = {"id": "owner", "role": "admin"}
+        with closing(auth_store.db()) as conn, conn:
+            conn.executemany("""INSERT INTO credit_ledger
+                (user_id,amount,balance_after,entry_type,reason,created_at)
+                VALUES ('owner',1,100,'recharge','test','now')""", [()] * 25)
+        detail = routes.admin_user_detail(None, "owner", 20, 0, 0)
+        self.assertNotIn("password_hash", detail["user"])
+        self.assertEqual(detail["ledger"]["total"], 25)
+        self.assertEqual(len(detail["ledger"]["items"]), 5)
+        self.assertEqual(detail["totals"]["recharged"], 25)
+        with self.assertRaises(HTTPException) as error:
+            routes.admin_user_detail(None, "unknown", 0, 0, 0)
+        self.assertEqual(error.exception.status_code, 404)
 
 
 if __name__ == "__main__":

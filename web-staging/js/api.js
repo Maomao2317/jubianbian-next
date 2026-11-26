@@ -436,6 +436,7 @@
     getCreditLedger() { return this.request(this.url("/me/ledger")); },
     getAdminOverview() { return this.request(this.url("/admin/overview")); },
     getAdminUsers(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/users") + (search ? "?" + search : "")); },
+    getAdminUserDetail(id, query) { return this.request(this.url("/admin/users/" + encodeURIComponent(id)) + "?" + new URLSearchParams(query || {})); },
     getAdminTasks(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/tasks") + (search ? "?" + search : "")); },
     getAdminAdaptations(query) { const search = new URLSearchParams(query || {}).toString(); return this.request(this.url("/admin/adaptations") + (search ? "?" + search : "")); },
     getAdminTask(id) { return this.request(this.url("/admin/tasks/:id", { id })); },

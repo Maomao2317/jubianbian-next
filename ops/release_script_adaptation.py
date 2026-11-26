@@ -25,8 +25,8 @@ from release_gpu_transport import stop_when_compute_idle
 
 BASELINE = "8661355781fb74d5ab2b8015cda5e8b6fe9ee876"
 BASE_BUILD = "ark-network-recovery-20261126-aa7d073"
-REF = "codex/script-adaptation-staging"
-BUILD_PREFIX = "script-adaptation-20261125-"
+REF = "codex/adaptation-workflow"
+BUILD_PREFIX = "script-adaptation-20261126-"
 PROJECT = "jubianbian-staging"
 PROTECTED_PROJECT = "jubianbian"
 PORT = 18000

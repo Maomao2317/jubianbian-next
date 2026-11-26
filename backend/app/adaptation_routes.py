@@ -114,6 +114,9 @@ def init_adaptations():
                 PRIMARY KEY (project_id, episode, version)
             );
         """)
+        columns = {item[1] for item in conn.execute("PRAGMA table_info(adaptations)")}
+        if "job_phase" not in columns:
+            conn.execute("ALTER TABLE adaptations ADD COLUMN job_phase TEXT NOT NULL DEFAULT ''")
         _recover_expired_jobs(conn, time.time())
 
 
@@ -127,6 +130,7 @@ def admin_adaptations(
     date_to: str = "",
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    view: Literal["jobs", "episodes"] = "jobs",
 ) -> dict:
     user = current_user(request)
     if user["role"] != "admin":
@@ -177,21 +181,85 @@ def admin_adaptations(
                       COALESCE(SUM(j.credits_charged),0) AS credits_charged,
                       COALESCE(SUM(j.credits_refunded),0) AS credits_refunded,
                       SUM(j.api_cost_rmb) AS api_cost_rmb,
+                      SUM(CASE WHEN j.cost_source LIKE '%estimate%' THEN 1 ELSE 0 END) AS estimated_jobs,
                       SUM(CASE WHEN j.api_cost_rmb IS NULL THEN 1 ELSE 0 END) AS unpriced_jobs
                FROM adaptation_jobs j LEFT JOIN users u ON u.id=j.user_id""" + where
             + " GROUP BY j.kind, j.status ORDER BY j.kind, j.status",
             params,
         ).fetchall()
 
+        if view == "episodes":
+            episode_clauses = [clause for clause in clauses if clause != "j.status=?"] + ["j.kind='episode'"]
+            episode_params = params[1:] if status != "all" else params
+            episode_where = " WHERE " + " AND ".join(episode_clauses)
+            cte = """WITH ranked AS (
+                SELECT j.*, u.name AS user_name, u.email AS user_email,
+                    ROW_NUMBER() OVER (PARTITION BY j.project_id,j.episode
+                        ORDER BY j.started_at DESC,j.id DESC) AS position
+                FROM adaptation_jobs j LEFT JOIN users u ON u.id=j.user_id""" + episode_where + ") "
+            cte += """, grouped AS (SELECT project_id,episode,
+                MAX(CASE WHEN position=1 THEN project_title END) AS project_title,
+                MAX(user_id) AS user_id, MAX(user_name) AS user_name, MAX(user_email) AS user_email,
+                MAX(CASE WHEN position=1 THEN status END) AS status,
+                MAX(CASE WHEN position=1 THEN error END) AS error,
+                SUM(credits_charged) AS credits_charged, SUM(api_cost_rmb) AS api_cost_rmb,
+                SUM(CASE WHEN api_cost_rmb IS NULL THEN 1 ELSE 0 END) AS unpriced_jobs,
+                SUM(CASE WHEN cost_source LIKE '%estimate%' THEN 1 ELSE 0 END) AS estimated_jobs,
+                MIN(started_at) AS started_at, MAX(started_at) AS updated_at
+                FROM ranked GROUP BY project_id,episode) """
+            current_status = " WHERE status=?" if status != "all" else ""
+            filtered_params = [*episode_params, status] if status != "all" else episode_params
+            total = conn.execute(cte + "SELECT COUNT(*) FROM grouped" + current_status, filtered_params).fetchone()[0]
+            rows = conn.execute(cte + "SELECT * FROM grouped" + current_status
+                + " ORDER BY updated_at DESC,project_id,episode LIMIT ? OFFSET ?",
+                [*filtered_params, limit, offset]).fetchall()
+
     items = []
     for row in rows:
         item = dict(row)
         try:
-            item["calls"] = json.loads(item.pop("calls_json") or "[]")
+            item["calls"] = json.loads(item.pop("calls_json", "[]") or "[]")
         except (TypeError, ValueError):
             item["calls"] = []
         items.append(item)
     return {"total": total, "items": items, "categories": [dict(row) for row in groups]}
+
+
+def admin_user_detail(request: Request, user_id: str,
+                      ledger_offset: int = Query(0, ge=0),
+                      recharge_offset: int = Query(0, ge=0),
+                      task_offset: int = Query(0, ge=0)) -> dict:
+    if current_user(request)["role"] != "admin":
+        _fail("无管理员权限", 403)
+    with closing(db()) as conn:
+        conn.execute("BEGIN")
+        user = conn.execute("""SELECT id,name,email,role,is_active,plan,credits,created_at,last_login_at
+            FROM users WHERE id=?""", (user_id,)).fetchone()
+        if not user:
+            _fail("找不到这个用户", 404)
+        totals = dict(conn.execute("""SELECT
+            COALESCE(SUM(CASE WHEN entry_type IN ('consume','refund') THEN -amount ELSE 0 END),0) AS consumed,
+            COALESCE(SUM(CASE WHEN entry_type='recharge' THEN amount ELSE 0 END),0) AS recharged
+            FROM credit_ledger WHERE user_id=?""", (user_id,)).fetchone())
+        tasks = dict(conn.execute("""SELECT COUNT(*) AS total,
+            SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS completed,
+            SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
+            FROM tasks WHERE user_id=?""", (user_id,)).fetchone())
+        adaptations = conn.execute("SELECT COUNT(*) FROM adaptations WHERE user_id=?", (user_id,)).fetchone()[0]
+        ledger_total = conn.execute("SELECT COUNT(*) FROM credit_ledger WHERE user_id=?", (user_id,)).fetchone()[0]
+        recharge_total = conn.execute("SELECT COUNT(*) FROM admin_recharge_ledger WHERE user_id=?", (user_id,)).fetchone()[0]
+        ledger = conn.execute("""SELECT c.id,c.amount,c.balance_after,c.entry_type,c.reason,c.created_at,
+            u.name AS admin_name FROM credit_ledger c LEFT JOIN users u ON u.id=c.admin_user_id
+            WHERE c.user_id=? ORDER BY c.id DESC LIMIT 20 OFFSET ?""", (user_id, ledger_offset)).fetchall()
+        recharges = conn.execute("""SELECT c.id,c.rmb_amount,c.points_amount,c.balance_after,c.reason,c.created_at,
+            u.name AS admin_name FROM admin_recharge_ledger c LEFT JOIN users u ON u.id=c.admin_user_id
+            WHERE c.user_id=? ORDER BY c.id DESC LIMIT 20 OFFSET ?""", (user_id, recharge_offset)).fetchall()
+        recent = conn.execute("""SELECT id,title,status,stage,created_at,progress_percent,credits_used,points_per_minute
+            FROM tasks WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 20 OFFSET ?""", (user_id, task_offset)).fetchall()
+    return {"user": dict(user), "totals": totals, "tasks": tasks, "adaptationCount": adaptations,
+            "ledger": {"items": [dict(r) for r in ledger], "total": ledger_total},
+            "recharges": {"items": [dict(r) for r in recharges], "total": recharge_total},
+            "recentTasks": {"items": [dict(r) for r in recent], "total": tasks["total"]}}
 
 
 def _fail(message: str, status: int = 422):
@@ -287,7 +355,13 @@ def _get(conn: sqlite3.Connection, project_id: str, owner: str) -> sqlite3.Row:
 
 
 def _state(row: sqlite3.Row) -> dict:
-    return json.loads(row["state_json"])
+    state = json.loads(row["state_json"])
+    for key in ("plan", "planBeforeEdit"):
+        if state.get(key):
+            state[key] = ad.Plan.model_validate(state[key]).model_dump()
+    if state.get("preview"):
+        state["preview"] = ad.Preview.model_validate(state["preview"]).model_dump()
+    return state
 
 
 def _project(row: sqlite3.Row) -> dict:
@@ -308,7 +382,36 @@ def _project(row: sqlite3.Row) -> dict:
         "setupPaid": bool(state.get("setupPaid")),
     }
     return {**state, "id": row["id"], "title": row["title"], "revision": row["revision"],
-            "updatedAt": row["updated_at"], "job": job, "billing": billing}
+            "updatedAt": row["updated_at"], "job": job, "billing": billing,
+            "progress": _progress(row, state, job)}
+
+
+def _progress(row, state, job):
+    outputs = state.get("outputs", {})
+    ready = sum(not item.get("stale", True) for item in outputs.values())
+    count = state.get("episodeCount", 1)
+    percent = 0
+    label = "等待分析原稿"
+    if state.get("analysis"):
+        percent, label = 15, "等待选择方向并试改"
+    if state.get("preview"):
+        percent, label = 30, "等待确认人物与生成大纲"
+    if state.get("plan"):
+        percent, label = 45, "等待确认分集大纲"
+    if state.get("confirmed"):
+        percent, label = 50 + int(40 * ready / count), f"正文已完成 {ready}/{count} 集"
+    if ready == count:
+        label = "等待检查整剧衔接"
+    if state.get("reviewAll"):
+        percent, label = 100, "改编与整剧检查已完成"
+    phase = row["job_phase"] or job
+    labels = {"analyze": "正在分析原稿", "preview": "正在生成试改稿", "plan": "正在生成分集大纲",
+              "episode": "正在撰写分集正文", "episode_repair": "正在核对正文内容",
+              "review": "正在检查本集衔接", "impact": "正在检查大纲改动影响", "review_all": "正在检查整剧衔接"}
+    return {"percent": percent, "label": labels.get(phase, label) if job else label,
+            "completedEpisodes": ready, "episodeCount": count,
+            "status": "running" if job else "failed" if state.get("error") else "complete" if percent == 100 else "waiting",
+            "updatedAt": row["updated_at"]}
 
 
 def _idle(row: sqlite3.Row, revision: int | None = None):
@@ -470,16 +573,21 @@ def create_project(request: Request, body: ProjectInput):
 def get_project(project_id: str, request: Request):
     owner = current_user(request)["id"]
     with closing(db()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _recover_expired_jobs(conn, time.time())
         return _project(_get(conn, project_id, owner))
 
 
 @router.get("/{project_id}/progress")
 def get_progress(project_id: str, request: Request):
     owner = current_user(request)["id"]
-    with closing(db()) as conn:
+    with closing(db()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _recover_expired_jobs(conn, time.time())
         row = _get(conn, project_id, owner)
         running = row["job_id"] and row["job_started"] >= time.time() - LEASE_SECONDS
-        return {"job": row["job_kind"] if running else None}
+        job = row["job_kind"] if running else None
+        return {"job": job, "progress": _progress(row, _state(row), job)}
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -651,6 +759,9 @@ def _run_job(project_id, owner, job_id, job, context, contract, sources, model):
                 "locked_lines": context["locked_lines"],
                 "keep": context["keep"], "revision_notes": context.get("revision_notes", ""),
             }
+            with closing(db()) as conn, conn:
+                conn.execute("UPDATE adaptations SET job_phase='review',updated_at=? WHERE id=? AND job_id=?",
+                             (now_iso(), project_id, job_id))
             review, _ = ad.generate("review", review_context, ad.ReviewReport, model)
 
         with closing(db()) as conn, conn:
@@ -819,11 +930,6 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
         if conn.execute("SELECT 1 FROM adaptations WHERE user_id=? AND job_started>?",
                         (owner, now - LEASE_SECONDS)).fetchone():
             _fail("你已有一项改编在生成，请稍后提交。", 409)
-        conn.execute("DELETE FROM adaptation_attempts WHERE started<?", (now - 86400,))
-        if conn.execute("SELECT COUNT(*) FROM adaptation_attempts").fetchone()[0] >= 150:
-            _fail("测试环境已达当天的生成上限，请明天再试。", 429)
-        if conn.execute("SELECT COUNT(*) FROM adaptation_attempts WHERE user_id=?", (owner,)).fetchone()[0] >= 40:
-            _fail("已达测试环境每日生成上限，请明天再试。", 429)
         job_id = uuid.uuid4().hex
         points, billing_kind = _reserved_points(state, body)
         if (body.expected_points is not None or points) and body.expected_points != points:
@@ -844,7 +950,6 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
                             f"剧本改编 · {row['title']} · {charge_label}")
         state.pop("error", None)
         state.pop("errorKind", None)
-        conn.execute("INSERT INTO adaptation_attempts VALUES(?,?)", (owner, now))
         conn.execute(
             """INSERT INTO adaptation_jobs
                (id, project_id, project_title, user_id, kind, billing_kind, episode,
@@ -853,8 +958,8 @@ def start_job(project_id: str, request: Request, body: JobInput, background: Bac
             (job_id, project_id, row["title"], owner, body.kind, billing_kind,
              body.episode if body.kind == "episode" else 0, points, now_iso()),
         )
-        conn.execute("UPDATE adaptations SET job_id=?,job_kind=?,job_started=?,state_json=?,updated_at=? WHERE id=?",
-                     (job_id, body.kind, now, _dump(state), now_iso(), project_id))
+        conn.execute("UPDATE adaptations SET job_id=?,job_kind=?,job_phase=?,job_started=?,state_json=?,updated_at=? WHERE id=?",
+                     (job_id, body.kind, body.kind, now, _dump(state), now_iso(), project_id))
         background.add_task(_run_job, project_id, owner, job_id, body, context, contract, sources, model)
         return _project(_get(conn, project_id, owner))
 
@@ -991,6 +1096,11 @@ def download(project_id: str, request: Request, fmt: Literal["md", "txt"] = "md"
     plan = ad.Plan.model_validate(state["plan"])
     markdown = fmt == "md"
     parts = [f"# {plan.title}" if markdown else plan.title]
+    people = ["## 人物介绍" if markdown else "人物介绍"]
+    for character in plan.cast:
+        people.append(f"{character.name}（原人物 {character.original_name}）\n{character.role}")
+        people.extend(value for value in (character.biography, character.relationships, character.motivation) if value)
+    parts.append("\n\n".join(people))
     for key in sorted(state["outputs"], key=int):
         draft = ad.Draft.model_validate(state["outputs"][key]["draft"])
         heading = f"第 {key} 集"

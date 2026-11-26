@@ -101,9 +101,20 @@ def main():
         plain = routes.download(project["id"], None, fmt="txt")
         if (not plain.headers["content-type"].startswith("text/plain")
                 or not plain.headers["content-disposition"].endswith(".txt")
-                or not plain.body.decode().startswith(plan["title"] + "\n\n第 1 集\n")
+                or not plain.body.decode().startswith(plan["title"] + "\n\n人物介绍\n")
                 or "沈青：" + LINE not in plain.body.decode()):
             raise SystemExit("preflight: plain text export did not preserve the title or dialogue")
+        if any(not item.get("biography") or not item.get("relationships") or not item.get("motivation")
+               for item in project["plan"]["cast"]):
+            raise SystemExit("preflight: character introductions are incomplete")
+        if project["progress"]["percent"] != 100:
+            raise SystemExit("preflight: completed progress did not reach 100 percent")
+        episodes = routes.admin_adaptations(None, view="episodes", limit=20, offset=0)
+        if episodes["total"] != 3 or sum(item["credits_charged"] for item in episodes["items"]) != 48:
+            raise SystemExit("preflight: per-episode aggregation is incorrect")
+        detail = routes.admin_user_detail(None, "isolated-smoke", 0, 0, 0)
+        if detail["user"]["credits"] != 9907 or detail["ledger"]["total"] != 7:
+            raise SystemExit("preflight: user detail balance or ledger is incorrect")
         admin = routes.admin_adaptations(None, kind="all", limit=20, offset=0)
         charged = sum(item["credits_charged"] for item in admin["items"])
         if charged != 92 or not any(item["billing_kind"] == "rewrite" and item["credits_charged"] == 8
