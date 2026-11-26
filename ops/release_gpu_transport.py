@@ -30,7 +30,7 @@ ENV = {"JBB_OCR_REMOTE_PAGE_TRANSPORT": "1", "JBB_ASR_REMOTE_TIMEOUT_SECONDS": "
        "JBB_OCR_REMOTE_TIMEOUT_SECONDS": "240", "JBB_MEDIA_DOWNLOAD_IDLE_TIMEOUT_SECONDS": "30"}
 
 
-def stop_when_compute_idle(project):
+def stop_when_compute_idle(project, *, verify_idle=None):
     """Keep direct object uploads intact, but never interrupt a claimed job.
 
     S3 PUTs bypass the application. Their durable reservations survive a restart
@@ -50,6 +50,8 @@ def stop_when_compute_idle(project):
         ).fetchone()[0]
         if active:
             raise RuntimeError("Release deferred: active compute/local uploads " + str(active))
+        if verify_idle is not None:
+            verify_idle(connection)
         common.run(["docker", "stop", "--time", "5", project + "-app-1"], timeout=15)
         return state
     finally:
