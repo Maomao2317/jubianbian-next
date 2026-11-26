@@ -1602,6 +1602,7 @@ dialog.recharge-modal { width: min(440px, calc(100vw - 32px)); max-width: none; 
 .adapt-form { display: grid; gap: .85rem; }
 .adapt-form label, .adapt-label { display: grid; gap: .35rem; font-weight: 600; min-width: 0; }
 .adapt-form small { color: var(--muted, #626974); font-weight: 400; }
+.adapt-upload-notice { margin: 0; padding: .9rem 1rem; border: 1px solid #e8c875; border-radius: 10px; color: #6b4a00; background: #fff7dc; line-height: 1.5; }
 .adapt-page input, .adapt-page select, .adapt-page textarea { width: 100%; min-width: 0; font: inherit; color: inherit; background: var(--card, #fff); border: 1px solid var(--line, #d7dae0); border-radius: 8px; padding: .62rem; }
 .adapt-page textarea { resize: vertical; line-height: 1.6; }
 .adapt-page select { max-width: 100%; }

@@ -46,6 +46,7 @@
     const fromTask = Boolean(task);
     main().innerHTML = layout("新建改编", fromTask ? `使用剧编编出稿《${task.batchTitle || task.title}》。` : "上传自己的剧本，也可以直接粘贴正文。", `
       <form class="adapt-panel adapt-form" data-adapt-form="create" data-task="${esc(task?.id || "")}">
+        ${fromTask ? "" : `<p class="adapt-upload-notice" role="note">正文超过 60,000 字符，请拆成几份再上传</p>`}
         ${fromTask ? "" : `<label>上传剧本 <input type="file" data-adapt-file accept=".docx,.txt,.md"><small>DOCX、TXT 或 Markdown，最大 2 MB。其他格式可复制正文。</small></label>
         <label>原稿正文 <textarea name="source_text" rows="8" minlength="20" maxlength="60000" required placeholder="上传后可在这里检查全文，或直接粘贴剧本"></textarea></label>`}
         <label>项目名（选填）<input name="title" maxlength="100" value="${esc(task?.batchTitle || task?.title || "")}" placeholder="AI 会根据原稿推荐名称"></label>
