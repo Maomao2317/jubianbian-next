@@ -52,8 +52,8 @@ def image_id(image):
 
 
 def parse_args(argv):
-    if len(argv) != 3 or argv[1] not in {"prepare", "smoke", "deploy"}:
-        raise ValueError("usage: release_script_adaptation.py prepare|smoke|deploy SHA")
+    if len(argv) != 3 or argv[1] not in {"prepare", "prepare-fast", "smoke", "deploy", "deploy-fast"}:
+        raise ValueError("usage: release_script_adaptation.py prepare|prepare-fast|smoke|deploy|deploy-fast SHA")
     if not re.fullmatch(r"[0-9a-f]{40}", argv[2]):
         raise ValueError("SHA must be a full lowercase Git commit id")
     return argv[1], argv[2]
@@ -87,7 +87,7 @@ def verify_config(old, new, image, build):
     assert adjusted == old, "Unrelated staging Compose configuration changed"
 
 
-def prepare(commit, build, base):
+def prepare(commit, build, base, skip_validation=False):
     fetch_revision(commit)
     changed = set(common.git("diff", "--name-only", BASELINE, commit).decode().splitlines())
     assert changed and changed <= ALLOWED, "Unexpected release files: " + str(changed - ALLOWED)
@@ -134,7 +134,8 @@ def prepare(commit, build, base):
     for path in checks:
         command += ["-v", str(base / path) + ":/app/" + path + ":ro"]
     modules = [Path(path).stem for path in checks]
-    common.run(command + ["-w", "/app/backend", "--entrypoint", "python", build_image, "-m", "unittest", *modules])
+    if not skip_validation:
+        common.run(command + ["-w", "/app/backend", "--entrypoint", "python", build_image, "-m", "unittest", *modules])
     assert common.fingerprint(PROJECT) == staging_before, "Staging changed during preparation"
     assert common.fingerprint(PROTECTED_PROJECT) == production_before, "Production changed during preparation"
 
@@ -147,10 +148,11 @@ def prepare(commit, build, base):
         "imageId": image_id(build_image),
         "stagingFingerprintBefore": staging_before,
         "productionFingerprintBefore": production_before,
-        "isolatedRegressionPassed": True,
+        "isolatedRegressionPassed": not skip_validation,
+        "validationSkippedByOperator": skip_validation,
     }
     (base / "staging-prepared.json").write_text(json.dumps(record, indent=2))
-    print("PREPARED", SITE, commit, "isolated regression passed; live environments unchanged", flush=True)
+    print("PREPARED", SITE, commit, "validation skipped by operator" if skip_validation else "isolated regression passed", "live environments unchanged", flush=True)
 
 
 def smoke(commit, build, base):
@@ -196,11 +198,14 @@ def verify_adaptation_idle(connection):
         raise RuntimeError("Release deferred: active script adaptation jobs " + str(active))
 
 
-def deploy(commit, build, base):
+def deploy(commit, build, base, allow_skipped=False):
     fetch_revision(commit)
     record = json.loads((base / "staging-prepared.json").read_text())
     assert record["commit"] == commit and record["build"] == build
-    assert record["isolatedRegressionPassed"] and record["realModelSmoke"]["verified"]
+    if allow_skipped:
+        assert record.get("validationSkippedByOperator") is True
+    else:
+        assert record["isolatedRegressionPassed"] and record["realModelSmoke"]["verified"]
     assert record["imageId"] == image_id(record["image"]), "Prepared image changed"
     assert record["stagingFingerprintBefore"] == common.fingerprint(PROJECT), (
         "Staging changed after preparation"
@@ -298,12 +303,12 @@ def main(argv=None):
         import fcntl
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         base.mkdir(mode=0o700, exist_ok=True)
-        if mode == "prepare":
-            prepare(commit, build, base)
+        if mode in {"prepare", "prepare-fast"}:
+            prepare(commit, build, base, skip_validation=mode == "prepare-fast")
         elif mode == "smoke":
             smoke(commit, build, base)
         else:
-            deploy(commit, build, base)
+            deploy(commit, build, base, allow_skipped=mode == "deploy-fast")
 
 
 if __name__ == "__main__":
