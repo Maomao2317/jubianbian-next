@@ -23,8 +23,8 @@ import release_quality_ledger as common
 from release_gpu_transport import stop_when_compute_idle
 
 
-BASELINE = "8661355781fb74d5ab2b8015cda5e8b6fe9ee876"
-BASE_BUILD = "ark-network-recovery-20261126-aa7d073"
+BASELINE = "23a8bf380b8620b3d66fc73efa5ccfe994d68dc0"
+BASE_BUILD = "script-adaptation-20261126-23a8bf3"
 REF = "codex/adaptation-workflow"
 BUILD_PREFIX = "script-adaptation-20261126-"
 PROJECT = "jubianbian-staging"
