@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const script = fs.readFileSync(path.join(__dirname, "js/adaptation.js"), "utf8");
 
 test("the project list returns to the workspace and shows the full update timestamp", async () => {
-  const main = { innerHTML: "" };
+  const main = { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };
   const timestamp = "2026-11-25T08:44:15+00:00";
   const window = { AppAPI: { adaptation: async () => [{ id: "p1", title: "样稿", updatedAt: timestamp }] } };
   vm.runInNewContext(script, {
@@ -19,6 +19,62 @@ test("the project list returns to the workspace and shows the full update timest
   });
   assert.match(main.innerHTML, /href="#\/workspace"[^>]*>.*返回工作台/);
   assert.match(main.innerHTML, /<time datetime="2026-11-25T08:44:15\+00:00">2026-11-25 16:44:15<\/time>/);
+});
+
+test("project titles can be filtered and deletion requires confirmation", async () => {
+  const listeners = {};
+  const requests = [];
+  const rows = [
+    { dataset: { projectTitle: "north star" }, hidden: false },
+    { dataset: { projectTitle: "river road" }, hidden: false },
+  ];
+  const empty = { hidden: true };
+  const main = {
+    innerHTML: "",
+    querySelectorAll: () => rows,
+    querySelector: selector => selector === ".adapt-project-empty" ? empty : null,
+  };
+  let confirmation = false;
+  const button = { dataset: { adapt: "delete-project", projectId: "p1" }, disabled: false };
+  const window = {
+    confirm: () => confirmation,
+    AppAPI: {
+      async adaptation(route, method) {
+        requests.push({ route, method });
+        return method === "DELETE" ? null : [
+          { id: "p1", title: "North Star", updatedAt: "2026-11-25" },
+          { id: "p2", title: "River Road", updatedAt: "2026-11-24" },
+        ];
+      },
+    },
+  };
+  vm.runInNewContext(script, {
+    window,
+    document: { getElementById: () => main, addEventListener: (name, handler) => { listeners[name] = handler; } },
+    clearTimeout() {},
+  });
+  await window.AdaptationStudio.open("");
+  assert.match(main.innerHTML, /id="adapt-project-filter"/);
+  assert.match(main.innerHTML, /data-adapt="delete-project" data-project-id="p1"/);
+  assert.match(main.innerHTML, /data-project-title="north star"/);
+
+  listeners.input({ target: { value: "north", matches: selector => selector === "#adapt-project-filter" } });
+  assert.deepEqual(rows.map(row => row.hidden), [false, true]);
+  listeners.input({ target: { value: "missing", matches: selector => selector === "#adapt-project-filter" } });
+  assert.deepEqual(rows.map(row => row.hidden), [true, true]);
+  assert.equal(empty.hidden, false);
+
+  const click = { target: { closest: () => button } };
+  listeners.click(click);
+  assert.equal(button.disabled, false);
+  assert.equal(requests.filter(request => request.method === "DELETE").length, 0);
+
+  confirmation = true;
+  listeners.click(click);
+  await new Promise(setImmediate);
+  assert.deepEqual(requests.at(-1), { route: "/p1", method: "DELETE" });
+  assert.doesNotMatch(main.innerHTML, /data-project-id="p1"/);
+  assert.match(main.innerHTML, /data-project-id="p2"/);
 });
 
 test("analysis acknowledges clicks, saves edits, and recovers polling without resubmitting", async () => {
@@ -145,6 +201,10 @@ test("mobile adaptation views show introductions and progress while blocking wri
   assert.match(main.innerHTML, /与掌柜对立/);
   assert.match(main.innerHTML, /找回真账册/);
   assert.match(main.innerHTML, /<progress max="100" value="30"/);
+  const previewCast = main.innerHTML.match(/<ul class="adapt-preview-cast"[\s\S]*?<\/ul>/)?.[0] || "";
+  assert.ok(previewCast, "the preview should list its cast before the rewritten scene");
+  assert.match(previewCast, /<strong>[^<]+<\/strong><span>[^<]+<\/span><small>.*?<\/small>/);
+  assert.match(previewCast, /&lt;.*&gt;/, "cast biographies should be HTML-escaped in the preview");
   assert.match(main.innerHTML, /手机端为只读浏览/);
   assert.equal(controls[0].disabled, true);
   listeners.click({ target: { closest: () => ({ dataset: { adapt: "plan" } }) } });

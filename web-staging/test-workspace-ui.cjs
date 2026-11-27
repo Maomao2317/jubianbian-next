@@ -163,6 +163,15 @@ const task = (id, createdAt, status = "done", extra = {}) => ({
   assert.match(node("#main").innerHTML, /第 1 集/);
   assert.match(node("#main").innerHTML, /估算/);
   assert.doesNotMatch(node("#main").innerHTML, /调用明细|实扣 8 积分|模型 Tokens/);
+  const adaptationHtml = node("#main").innerHTML;
+  assert.match(adaptationHtml, /用户使用积分/);
+  assert.match(adaptationHtml, /API 使用成本/);
+  const adaptationHeaders = adaptationHtml.match(/<table class="adapt-admin-table"><thead><tr>(.*?)<\/tr><\/thead>/)?.[1];
+  assert.ok(adaptationHeaders, "adaptation usage table should render its headers");
+  assert.deepEqual([...adaptationHeaders.matchAll(/<th>(.*?)<\/th>/g)].map(match => match[1]), [
+    "项目 / 用户", "集数", "当前状态", "用户使用积分", "扣费折合金额", "API 使用成本", "最近更新",
+  ]);
+  assert.match(adaptationHtml, /用户使用 8\.0 积分/);
   api.getAdminUserDetail = async id => {
     assert.equal(id, "user");
     return { user: { id, name: "测试用户", email: "user@example.test", credits: 92, created_at: "2026-11-26", is_active: true },

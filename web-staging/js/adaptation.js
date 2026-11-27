@@ -13,6 +13,7 @@
   let availability, view = 0, timer, project, selected = "", busy = false, planNotes = "";
   let selectedDirection = "", directionNotes = "", keepNotes = "";
   let refreshBalance = async () => {};
+  let projectItems = [], projectDateFormatter = value => value, projectFilter = "";
   const mobileReadOnly = () => window.matchMedia?.("(max-width: 780px)").matches === true;
   const sourceDrafts = new Map();
   const episodeNotes = new Map();
@@ -39,10 +40,25 @@
   const sourceOptions = (sources, id) => sources.map(item =>
     `<option value="${esc(item.id)}" ${item.id === id ? "selected" : ""}>${esc(item.label)}</option>`).join("");
   function renderList(items, formatUpdatedAt) {
+    projectItems = items;
+    projectDateFormatter = formatUpdatedAt || (value => value);
     main().innerHTML = layout("剧本改编", "从已有剧本开始，先试改一场，再确认大纲和分集正文。", `
       ${mobileReadOnly() ? '<p class="adapt-readonly">手机端支持浏览改编项目，编辑和生成请使用电脑。</p>' : '<div class="adapt-toolbar"><a class="primary-btn" href="#/adaptation/new">上传剧本</a><a class="secondary-btn" href="#/tasks">从平台任务选择</a></div>'}
-      <div class="adapt-panel"><h2>我的改编项目</h2>${items.length ? `<ul class="adapt-projects">${items.map(item => `
-        <li><a href="#/adaptation/${encodeURIComponent(item.id)}">${esc(item.title)}</a><time datetime="${esc(item.updatedAt)}">${esc(formatUpdatedAt(item.updatedAt))}</time></li>`).join("")}</ul>` : "<p>还没有改编项目。</p>"}</div>`, true);
+      <div class="adapt-panel"><h2>我的改编项目</h2>${items.length ? `<label class="adapt-project-filter">按标题筛选<input id="adapt-project-filter" type="search" value="${esc(projectFilter)}" placeholder="搜索项目标题"></label><ul class="adapt-projects">${items.map(item => `
+        <li data-project-title="${esc(String(item.title || "").toLocaleLowerCase())}"><a href="#/adaptation/${encodeURIComponent(item.id)}">${esc(item.title)}</a><time datetime="${esc(item.updatedAt)}">${esc(projectDateFormatter(item.updatedAt))}</time>${mobileReadOnly() ? "" : `<button class="secondary-btn adapt-project-delete" type="button" data-adapt="delete-project" data-project-id="${esc(item.id)}" aria-label="删除项目：${esc(item.title)}">删除</button>`}</li>`).join("")}</ul><p class="adapt-project-empty" role="status" hidden>没有匹配标题的项目。</p>` : "<p>还没有改编项目。</p>"}</div>`, true);
+    applyProjectFilter(projectFilter);
+  }
+  function applyProjectFilter(value) {
+    const query = String(value || "").trim().toLocaleLowerCase();
+    const rows = [...(main().querySelectorAll?.(".adapt-projects li[data-project-title]") || [])];
+    let matches = 0;
+    rows.forEach(row => {
+      const visible = (row.dataset.projectTitle || "").includes(query);
+      row.hidden = !visible;
+      if (visible) matches += 1;
+    });
+    const empty = main().querySelector(".adapt-project-empty");
+    if (empty) empty.hidden = rows.length === 0 || matches > 0;
   }
   function renderNew(task) {
     if (mobileReadOnly()) {
@@ -144,13 +160,18 @@
     const preview = p.preview;
     if (!preview) return "";
     const original = p.sources.find(item => item.id === preview.source_id);
-    return `<section class="adapt-panel" id="adapt-preview"><div class="adapt-section-heading"><span class="adapt-step">03</span><div><h2 tabindex="-1">对照试改</h2><p>检查人物、语气和关键情节是否符合你想要的方向。</p></div></div><div class="adapt-columns">
+    return `<section class="adapt-panel" id="adapt-preview"><div class="adapt-section-heading"><span class="adapt-step">03</span><div><h2 tabindex="-1">对照试改</h2><p>检查人物、语气和关键情节是否符合你想要的方向。</p></div></div>${renderPreviewCast(preview.cast)}<div class="adapt-columns">
       <div><h3>原稿 · ${esc(original.label)}</h3><pre>${esc(original.text)}</pre></div>
       <div><h3>试改稿</h3><pre>${esc(screenplay([preview.scene], preview.cast, 1))}</pre></div>
       </div><ul>${preview.decisions.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
       ${preview.questions.length ? `<div class="adapt-warnings"><strong>建议确认</strong><ul>${preview.questions.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
       ${p.confirmed ? "" : `<label class="adapt-label">补充改编要求（选填）<textarea id="adapt-plan-notes" rows="2" maxlength="1000" placeholder="说明试改里哪些改法要保留或调整">${esc(planNotes)}</textarea></label>
       <button class="primary-btn" data-adapt="plan" type="button">${p.planUsed ? "重新生成大纲" : "按这个方向生成分集大纲"}${extraCost(p)}</button>${feedback(p, "plan")}`}</section>`;
+  }
+  function renderPreviewCast(cast) {
+    if (!cast?.length) return "";
+    return `<ul class="adapt-preview-cast" aria-label="试改稿出场人物">${cast.map(character => `
+      <li><strong>${esc(character.name)}</strong><span>${esc(character.role)}</span><small>${esc(character.biography || "基本介绍待补充")}</small></li>`).join("")}</ul>`;
   }
   function renderCharacters(p) {
     const cast = p.plan?.cast || p.preview?.cast;
@@ -468,6 +489,11 @@
   });
   document.addEventListener("input", event => {
     const node = event.target;
+    if (node.matches("#adapt-project-filter")) {
+      projectFilter = node.value;
+      applyProjectFilter(projectFilter);
+      return;
+    }
     if (project && node.matches('[data-adapt-form="source"] textarea')) {
       sourceDrafts.set(currentSource().id, node.value);
     }
@@ -504,8 +530,20 @@
   });
   document.addEventListener("click", event => {
     const button = event.target.closest("[data-adapt]");
-    if (!button || !project) return;
+    if (!button) return;
     const kind = button.dataset.adapt;
+    if (kind === "delete-project") {
+      if (!window.confirm("删除这个改编项目及其改稿？")) return;
+      button.disabled = true;
+      api.adaptation("/" + encodeURIComponent(button.dataset.projectId), "DELETE").then(() => {
+        renderList(projectItems.filter(item => item.id !== button.dataset.projectId), projectDateFormatter);
+      }).catch(err => {
+        button.disabled = false;
+        error(err.message);
+      });
+      return;
+    }
+    if (!project) return;
     if (kind === "show-preview") { event.preventDefault(); showPreview(); return; }
     if (mobileReadOnly() && kind !== "view-version") return;
     const episode = Number(button.dataset.number || 1);

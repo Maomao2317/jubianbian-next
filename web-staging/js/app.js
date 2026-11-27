@@ -340,8 +340,9 @@
     return `<tr><td><strong>${escapeHtml(item.project_title || "已删除项目")}</strong>${adminUserIdentity(item)}</td>
       <td><strong>第 ${Number(item.episode)} 集</strong></td>
       <td>${adminAdaptationStatus(item.status)}${item.error ? `<small>${escapeHtml(item.error)}</small>` : ""}</td>
-      <td><strong>${cost}</strong>${item.unpriced_jobs ? "<small>部分成本待计价</small>" : ""}</td>
+      <td><strong>${Number(item.credits_charged || 0).toFixed(1)}</strong> 积分</td>
       <td>¥${(Number(item.credits_charged || 0) / POINTS_PER_YUAN).toFixed(2)}</td>
+      <td><strong>${cost}</strong>${item.unpriced_jobs ? "<small>部分成本待计价</small>" : ""}</td>
       <td>${formatDate(item.updated_at)}</td></tr>`;
   }
 
@@ -473,13 +474,13 @@
           const cost = rows.reduce((sum, item) => sum + Number(item.api_cost_rmb || 0), 0);
           const pending = rows.some(item => item.unpriced_jobs);
           const estimated = rows.some(item => item.estimated_jobs);
-          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong>${estimated ? "估算" : ""}成本 ¥${cost.toFixed(4)}</strong><small>扣费折合 ¥${(charged / POINTS_PER_YUAN).toFixed(2)}</small>${pending ? "<small>部分成本待计价</small>" : ""}</article>`;
+          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong>API 使用成本 ${estimated ? "估算 " : ""}¥${cost.toFixed(4)}</strong><small>用户使用 ${charged.toFixed(1)} 积分 · 折合 ¥${(charged / POINTS_PER_YUAN).toFixed(2)}</small>${pending ? "<small>部分成本待计价</small>" : ""}</article>`;
         }).join("");
-        body += `<div class="admin-panel adapt-admin-panel"><div class="admin-panel-head"><div><h2>剧本改编任务</h2><p>上方按环节汇总成本与扣费折合金额，下方每集汇总正文、审稿和历史改稿。</p></div><span>${adaptations.total} 集</span></div>
-          <div class="admin-stats adapt-admin-stats"><article><span>用户扣费折合金额</span><strong>¥${(totalCredits / POINTS_PER_YUAN).toFixed(2)}</strong><small>按 12.8 积分折合 1 元，赠送积分也按该比例折算</small></article><article><span>模型调用成本</span><strong>¥${knownCost.toFixed(4)}</strong><small>${unpriced ? "包含待计价项目" : "按已记录用量汇总，含失败调用成本"}</small></article></div>
+        body += `<div class="admin-panel adapt-admin-panel"><div class="admin-panel-head"><div><h2>剧本改编任务</h2><p>按操作环节汇总用户积分和 API 使用成本；下方每集汇总正文、审稿和历史改稿。</p></div><span>${adaptations.total} 集</span></div>
+          <div class="admin-stats adapt-admin-stats"><article><span>用户使用积分</span><strong>${totalCredits.toFixed(1)} 积分</strong><small>折合 ¥${(totalCredits / POINTS_PER_YUAN).toFixed(2)}（按 12.8 积分折合 1 元）</small></article><article><span>API 使用成本</span><strong>¥${knownCost.toFixed(4)}</strong><small>${unpriced ? "包含待计价项目" : "按已记录用量汇总，含失败调用成本"}</small></article></div>
           <div class="adapt-admin-categories">${grouped}</div>
           <div class="admin-toolbar adapt-admin-toolbar"><input id="adminAdaptKeyword" aria-label="搜索项目或用户" value="${escapeHtml(state.adminAdaptKeyword)}" placeholder="搜索项目名、用户名称或账号" /><select id="adminAdaptKind" aria-label="改编操作分类"><option value="all">全部分类</option>${Object.entries(adaptationKinds).map(([key, value]) => `<option value="${key}" ${state.adminAdaptKind === key ? "selected" : ""}>${value}</option>`).join("")}</select><select id="adminAdaptStatus" aria-label="改编任务状态"><option value="all">全部状态</option><option value="running" ${state.adminAdaptStatus === "running" ? "selected" : ""}>进行中</option><option value="success" ${state.adminAdaptStatus === "success" ? "selected" : ""}>成功</option><option value="failed" ${state.adminAdaptStatus === "failed" ? "selected" : ""}>失败</option></select><label class="admin-date-label">开始日期<input id="adminAdaptFrom" type="date" value="${state.adminAdaptFrom}" /></label><label class="admin-date-label">结束日期<input id="adminAdaptTo" type="date" value="${state.adminAdaptTo}" /></label><button class="admin-action admin-search-btn" data-action="admin-adapt-search">筛选</button><button class="admin-action" data-action="admin-adapt-reset">重置</button></div>
-          <div class="admin-table-wrap"><table class="adapt-admin-table"><thead><tr><th>项目 / 用户</th><th>集数</th><th>当前状态</th><th>模型成本</th><th>扣费折合金额</th><th>最近更新</th></tr></thead><tbody>${adaptations.items.map(adminAdaptationRow).join("") || `<tr><td colspan="6">暂无分集生成记录</td></tr>`}</tbody></table></div>${adminPagination("admin-adapt-page", state.adminAdaptPage, adaptations.total, 20)}</div>`;
+          <div class="admin-table-wrap"><table class="adapt-admin-table"><thead><tr><th>项目 / 用户</th><th>集数</th><th>当前状态</th><th>用户使用积分</th><th>扣费折合金额</th><th>API 使用成本</th><th>最近更新</th></tr></thead><tbody>${adaptations.items.map(adminAdaptationRow).join("") || `<tr><td colspan="7">暂无分集生成记录</td></tr>`}</tbody></table></div>${adminPagination("admin-adapt-page", state.adminAdaptPage, adaptations.total, 20)}</div>`;
       } else {
         body += `<div class="admin-panel"><div class="admin-panel-head"><div><h2>最近视频任务</h2><p>最近创建的 10 条视频任务</p></div><span>点击任务查看详情</span></div><div class="admin-table-wrap"><table><thead><tr><th>任务</th><th>用户名称 / 账号</th><th>状态</th><th>计费时长</th><th>创建时间</th></tr></thead><tbody>${(overview.recentTasks || []).map(item => `<tr><td class="admin-task-title"><button class="row-link" data-action="admin-review" data-id="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)}</button></td><td>${adminUserIdentity(item)}</td><td>${adminTaskStatus(item)}</td><td>${Number(item.credits_used || 0).toFixed(1)} 分钟</td><td>${formatDate(item.created_at)}</td></tr>`).join("") || `<tr><td colspan="5">暂无视频任务</td></tr>`}</tbody></table></div></div>`;
       }
