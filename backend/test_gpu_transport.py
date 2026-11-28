@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from app import gpu_transport as transport
 
 
@@ -28,7 +28,9 @@ class GpuTransportTests(unittest.TestCase):
                         self.send_header("Content-Length", "0")
                         self.end_headers()
                         self.wfile.flush()
-                        time.sleep(.1)  # Allow either OS to observe the early response before FIN/RST.
+                        # Retry tests mock time.sleep globally; keep this real
+                        # grace period so Windows can read headers before RST.
+                        threading.Event().wait(.1)
                         return
                     body = self.rfile.read(int(self.headers["Content-Length"]))
                     if self.path == "/disconnect":
@@ -93,6 +95,23 @@ class GpuTransportTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint), self.assertRaises(Exception):
                 self.send(endpoint)
             self.assertEqual(self.calls, [endpoint])
+
+    def test_closed_connection_preserves_ambiguous_upload_error_without_retry(self):
+        connection = Mock()
+        connection.sock = Mock()
+
+        def failed_response():
+            connection.sock = None
+            raise ConnectionResetError("status line disconnected")
+
+        connection.getresponse.side_effect = failed_response
+        with (patch.object(transport.http.client, "HTTPConnection", return_value=connection) as factory,
+              patch.object(transport.select, "select", return_value=([connection.sock], [], [])),
+              self.assertRaisesRegex(ConnectionResetError, "status line disconnected")):
+            self.send("/early")
+        factory.assert_called_once()
+        connection.getresponse.assert_called_once()
+        connection.send.assert_not_called()
 
     def test_absolute_deadline_bounds_slow_headers_and_dripping_body(self):
         for endpoint in ("/headers", "/drip", "/slow"):

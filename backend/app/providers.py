@@ -21,6 +21,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 
+from .ark_transport import open_response as ark_urlopen
+
 from .config import (
     ARK_API_KEY,
     ARK_API_KEYS,
@@ -323,7 +325,8 @@ def ark_http(
                 # or changing/recompressing any media bytes.
                 request.data = _ark_upload_chunks(data, upload_deadline)
                 request.add_header("Content-Length", str(len(data)))
-            with urlopen(request, timeout=request_timeout) as response:
+            transport = urlopen if upload else ark_urlopen
+            with transport(request, timeout=request_timeout) as response:
                 raw = response.read()
     except HTTPError as exc:
         raise _ark_http_error(exc, api_key) from exc
@@ -506,7 +509,7 @@ def _ark_stream_response(payload: dict[str, Any], api_key: str) -> Any:
     disconnect = "eof"
     try:
         with _ark_request_semaphore:
-            with urlopen(request, timeout=min(ARK_RESPONSE_TIMEOUT_SECONDS, ARK_STREAM_IDLE_TIMEOUT_SECONDS)) as response:
+            with ark_urlopen(request, timeout=min(ARK_RESPONSE_TIMEOUT_SECONDS, ARK_STREAM_IDLE_TIMEOUT_SECONDS)) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):

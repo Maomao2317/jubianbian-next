@@ -282,6 +282,13 @@ class AdaptationTests(unittest.TestCase):
         }, source_id="S2", keep_option_ids=[])
         self.assertIn("preview", project)
 
+    def test_projects_remain_browsable_without_a_generation_provider(self):
+        project = self.create(source_text=SOURCE)
+        with patch.object(ad, "model_choice", side_effect=ad.AdaptationError("No model configured")):
+            self.assertEqual(routes.availability(None), {"enabled": True, "ready": False, "projectPoints": 20})
+            self.assertEqual(routes.get_project(project["id"], None)["id"], project["id"])
+            self.assertIn(project["id"], [item["id"] for item in routes.list_projects(None)])
+
     def test_analysis_does_not_reassign_ambiguous_quotes(self):
         option = {**ANALYSIS["keep_options"][0], "source_id": "other"}
         analysis = ad.Analysis.model_validate({**ANALYSIS, "keep_options": [option]})

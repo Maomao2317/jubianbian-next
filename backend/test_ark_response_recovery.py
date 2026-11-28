@@ -6,7 +6,10 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
+import urllib3
+
 from app import processing, providers
+from app import ark_transport
 from app.errors import ArkAcceptedResponseError
 
 
@@ -27,6 +30,23 @@ def event(kind, response):
 
 
 class ArkResponseRecoveryTests(unittest.TestCase):
+    def test_pooled_stream_disconnect_recovers_known_id(self):
+        response = Mock(status=200)
+        response.read1.side_effect = [
+            event("response.created", CREATED),
+            urllib3.exceptions.ProtocolError("stream disconnected"),
+        ]
+        with (
+            patch.object(ark_transport, "getproxies", return_value={}),
+            patch.object(ark_transport._pool, "urlopen", return_value=response) as create,
+            patch.object(providers, "_ark_poll_response", return_value=COMPLETED) as poll,
+        ):
+            result = providers._ark_stream_response({"model": "test"}, "test-key")
+        self.assertEqual(result, COMPLETED)
+        create.assert_called_once()
+        poll.assert_called_once_with("resp-test", "test-key")
+        response.release_conn.assert_called_once()
+
     def recognize(self):
         return providers.ark_recognize(
             Path("episode.mp4"), "测试", 60, model="lite",
@@ -63,7 +83,7 @@ class ArkResponseRecoveryTests(unittest.TestCase):
             patch.object(providers, "ARK_RESPONSE_POLL_SECONDS", 5),
             patch.object(providers, "ARK_RESPONSE_POLL_TIMEOUT_SECONDS", 900),
             patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 2),
-            patch.object(providers, "urlopen", side_effect=transport),
+            patch.object(providers, "ark_urlopen", side_effect=transport),
             patch.object(providers, "ark_prepare_video") as prepare,
             patch.object(providers, "ark_model_account_key") as account,
             patch.object(providers.provider_budget, "reserve"),
@@ -109,7 +129,7 @@ class ArkResponseRecoveryTests(unittest.TestCase):
                 patch.object(providers.provider_budget, "wait_cooldown",
                              side_effect=TimeoutError if cooldown_blocked else None) as wait,
                 patch.object(providers, "_ark_request_semaphore", capacity),
-                patch.object(providers, "urlopen") as request,
+                patch.object(providers, "ark_urlopen") as request,
                 self.assertRaises(ArkAcceptedResponseError) as caught,
             ):
                 providers.ark_http("GET", "/responses/resp-test", api_key="test-key", recovery_deadline=10)
@@ -167,7 +187,7 @@ class ArkResponseRecoveryTests(unittest.TestCase):
 
             with (
                 self.subTest(terminal=terminal, succeeds=succeeds),
-                patch.object(providers, "urlopen", side_effect=transport),
+                patch.object(providers, "ark_urlopen", side_effect=transport),
                 patch.object(providers, "ARK_RESPONSE_CREATE_ATTEMPTS", 3),
                 patch.object(providers, "ark_prepare_video") as prepare,
                 patch.object(providers.provider_budget, "reserve"),

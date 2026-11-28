@@ -47,6 +47,7 @@ class PricingReleaseTests(unittest.TestCase):
             "ops/test_release_multilingual_pricing.py",
             "web-staging/test-language-pricing.cjs",
             "web-staging/test-user-review.cjs",
+            "web-staging/test-adaptation-project-list.cjs",
         ])
         with patch.object(release, "_changed_files", return_value=changed):
             release.verify_release_scope("a" * 40)

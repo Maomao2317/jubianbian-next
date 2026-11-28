@@ -89,6 +89,11 @@ def post(url, token, endpoint, payload, size, headers, response_timeout):
                     # A worker can reject admission before reading a large body.
                     # Recover only an explicit pre-execution busy response;
                     # never retry an ambiguous disconnect or inference timeout.
+                    if connection.sock is None:
+                        # getresponse() closes the connection when status-line
+                        # parsing fails. Preserve that transport error; there
+                        # is no longer a socket from which to recover a reply.
+                        raise
                     try:
                         connection.sock.settimeout(2)
                         response = connection.getresponse()

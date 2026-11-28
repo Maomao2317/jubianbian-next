@@ -465,7 +465,7 @@ class ModelConcurrencyTests(unittest.TestCase):
         with (patch.object(providers, "_ark_request_semaphore", request_lane),
               patch.object(providers, "_ark_generation_semaphore", generation_lane),
               patch.object(providers, "_ark_key_generation_semaphore", side_effect=account_lanes.get),
-              patch.object(providers, "urlopen", side_effect=response),
+              patch.object(providers, "ark_urlopen", side_effect=response),
               ThreadPoolExecutor(max_workers=25) as callers):
             futures = [callers.submit(request, index) for index in range(25)]
             try:

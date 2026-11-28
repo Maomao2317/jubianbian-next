@@ -140,7 +140,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 ]
                 return iter([f"data: {providers.json.dumps(event)}\n".encode() for event in events])
 
-        with patch.object(providers, "urlopen", return_value=FakeResponse()):
+        with patch.object(providers, "ark_urlopen", return_value=FakeResponse()):
             payload = providers.ark_stream_response({"model": "test", "input": "hello"}, "key")
         self.assertEqual(payload, completed)
 
@@ -173,7 +173,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
                 raise IncompleteRead(b"", 100)
 
         with (
-            patch.object(providers, "urlopen", return_value=DisconnectingResponse()) as create,
+            patch.object(providers, "ark_urlopen", return_value=DisconnectingResponse()) as create,
             patch.object(providers, "ARK_STREAM_IDLE_TIMEOUT_SECONDS", 45),
             patch.object(providers, "ARK_RESPONSE_TIMEOUT_SECONDS", 420),
             patch.object(providers, "_ark_poll_response", return_value=completed) as poll,
@@ -201,11 +201,11 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             def read(self):
                 return json.dumps(completed).encode()
 
-        with (patch.object(providers, "urlopen", return_value=TruncatedResponse()),
+        with (patch.object(providers, "ark_urlopen", return_value=TruncatedResponse()),
               self.assertRaises(ArkError) as caught):
             providers.ark_http("GET", "/responses/resp-test", api_key="key")
         self.assertEqual(caught.exception.provider_code, "transient_network")
-        with (patch.object(providers, "urlopen", side_effect=[TruncatedResponse(), CompletedResponse()]) as http,
+        with (patch.object(providers, "ark_urlopen", side_effect=[TruncatedResponse(), CompletedResponse()]) as http,
               patch.object(providers.time, "sleep")):
             result = providers._ark_poll_response("resp-test", "key")
         self.assertEqual(result, completed)
@@ -215,7 +215,7 @@ class ScriptQualityRegressionTests(unittest.TestCase):
             self.assertTrue(call.args[0].full_url.endswith("/responses/resp-test"))
 
     def test_stream_truncated_before_id_becomes_transient(self):
-        with (patch.object(providers, "urlopen", side_effect=IncompleteRead(b"", 100)),
+        with (patch.object(providers, "ark_urlopen", side_effect=IncompleteRead(b"", 100)),
               patch.object(providers, "_ark_poll_response") as poll,
               self.assertRaises(ArkError) as caught):
             providers._ark_stream_response({"model": "test"}, "key")

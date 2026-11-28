@@ -32,19 +32,24 @@ test("project titles can be filtered and deletion requires confirmation", async 
   const main = {
     innerHTML: "",
     querySelectorAll: () => rows,
-    querySelector: selector => selector === ".adapt-project-empty" ? empty : null,
+    querySelector: selector => selector === "[data-adapt-filter-empty]" ? empty : null,
   };
   let confirmation = false;
-  const button = { dataset: { adapt: "delete-project", projectId: "p1" }, disabled: false };
+  const button = {
+    dataset: { adaptProjectDelete: "p1", projectTitle: "North Star" }, disabled: false,
+    isConnected: true, closest: () => null,
+  };
+  let deleted = false;
   const window = {
     confirm: () => confirmation,
     AppAPI: {
       async adaptation(route, method) {
         requests.push({ route, method });
-        return method === "DELETE" ? null : [
+        if (method === "DELETE") { deleted = true; return null; }
+        return [
           { id: "p1", title: "North Star", updatedAt: "2026-11-25" },
           { id: "p2", title: "River Road", updatedAt: "2026-11-24" },
-        ];
+        ].filter(item => !deleted || item.id !== "p1");
       },
     },
   };
@@ -54,17 +59,17 @@ test("project titles can be filtered and deletion requires confirmation", async 
     clearTimeout() {},
   });
   await window.AdaptationStudio.open("");
-  assert.match(main.innerHTML, /id="adapt-project-filter"/);
-  assert.match(main.innerHTML, /data-adapt="delete-project" data-project-id="p1"/);
-  assert.match(main.innerHTML, /data-project-title="north star"/);
+  assert.match(main.innerHTML, /data-adapt-project-filter/);
+  assert.match(main.innerHTML, /data-adapt-project-delete="p1"/);
+  assert.match(main.innerHTML, /data-project-title="North Star"/);
 
-  listeners.input({ target: { value: "north", matches: selector => selector === "#adapt-project-filter" } });
+  listeners.input({ target: { value: "north", matches: selector => selector === "[data-adapt-project-filter]" } });
   assert.deepEqual(rows.map(row => row.hidden), [false, true]);
-  listeners.input({ target: { value: "missing", matches: selector => selector === "#adapt-project-filter" } });
+  listeners.input({ target: { value: "missing", matches: selector => selector === "[data-adapt-project-filter]" } });
   assert.deepEqual(rows.map(row => row.hidden), [true, true]);
   assert.equal(empty.hidden, false);
 
-  const click = { target: { closest: () => button } };
+  const click = { target: { closest: selector => selector === "[data-adapt-project-delete]" ? button : null }, preventDefault() {} };
   listeners.click(click);
   assert.equal(button.disabled, false);
   assert.equal(requests.filter(request => request.method === "DELETE").length, 0);
@@ -72,9 +77,10 @@ test("project titles can be filtered and deletion requires confirmation", async 
   confirmation = true;
   listeners.click(click);
   await new Promise(setImmediate);
-  assert.deepEqual(requests.at(-1), { route: "/p1", method: "DELETE" });
-  assert.doesNotMatch(main.innerHTML, /data-project-id="p1"/);
-  assert.match(main.innerHTML, /data-project-id="p2"/);
+  assert.equal(requests.filter(request => request.route === "/p1" && request.method === "DELETE").length, 1);
+  assert.deepEqual(requests.at(-1), { route: undefined, method: undefined });
+  assert.doesNotMatch(main.innerHTML, /data-adapt-project-delete="p1"/);
+  assert.match(main.innerHTML, /data-adapt-project-delete="p2"/);
 });
 
 test("analysis acknowledges clicks, saves edits, and recovers polling without resubmitting", async () => {

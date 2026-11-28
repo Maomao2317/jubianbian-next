@@ -12,3 +12,15 @@ __pycache__/
 outputs/
 ops/*.log
 .tmp/
+
+# Local test and validation artifacts
+.codex-*/
+.test-*/
+.tmp-*/
+tmp*/
+_tmp_test_parent/
+backend/.tmp*/
+backend/tmp*/
+web-staging/.tmp*/
+web-staging/tmp*/
+/artifacts/

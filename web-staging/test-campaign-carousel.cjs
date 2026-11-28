@@ -22,7 +22,8 @@ for (const value of [
 
 assert.doesNotMatch(styles, /\.campaign-[a-z-]+/, "app.css still contains campaign styles");
 assert.doesNotMatch(index, /double11-carousel|campaign-carousel/, "index.html still references campaign assets");
-assert.match(index, /creation-studio/, "index.html cache-busting version was not updated");
+assert.match(index, /css\/app\.css\?v=[^"\s]+/, "stylesheet requires a cache-busting version");
+assert.match(index, /js\/app\.js\?v=[^"\s]+/, "application script requires a cache-busting version");
 
 assert.match(source, /class="studio-plan-card"/);
 assert.match(source, /data-action="show-pricing"/);

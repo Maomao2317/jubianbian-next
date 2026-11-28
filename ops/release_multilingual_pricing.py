@@ -32,7 +32,10 @@ SITES = {
     "production": ("jubianbian", 8000),
 }
 APP_FILES = [
+    "backend/app/main.py",
     "backend/app/auth_store.py",
+    "backend/app/adaptation.py",
+    "backend/app/adaptation_routes.py",
     "backend/app/processing.py",
     "backend/app/pricing.py",
     "backend/app/routes.py",
@@ -40,8 +43,12 @@ APP_FILES = [
     "backend/app/user_view.py",
     "web-staging/js/api.js",
     "web-staging/js/app.js",
+    "web-staging/js/adaptation.js",
+    "web-staging/css/app.css",
+    "web-staging/index.html",
 ]
 CHECK_FILES = [
+    "backend/test_adaptation.py",
     "backend/test_admin_console.py",
     "backend/test_large_batch.py",
     "backend/test_upload_flow.py",
@@ -52,6 +59,7 @@ CHECK_FILES = [
     "backend/test_ark_cost_control.py",
     "web-staging/test-user-review.cjs",
     "web-staging/test-language-pricing.cjs",
+    "web-staging/test-adaptation-project-list.cjs",
 ]
 SUPPORT_FILES = ["ops/release_multilingual_pricing.py", "ops/test_release_multilingual_pricing.py"]
 ALLOWED = set(APP_FILES + CHECK_FILES + SUPPORT_FILES)

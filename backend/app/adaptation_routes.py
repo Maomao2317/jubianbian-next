@@ -20,14 +20,17 @@ from pydantic import Field
 
 from . import adaptation as ad
 from .auth_store import current_user, db, now_iso
-from .config import JBB_ENVIRONMENT
 from .logging_setup import logger
 from .script import screenplay_output_scenes, script_to_markdown
 from .task_store import row_to_task
 from .user_view import user_task
 
 router = APIRouter(prefix="/api/adaptations")
-ENABLED = JBB_ENVIRONMENT in {"staging", "development", "dev", "local"}
+# Keep the project and history APIs available in every site. The provider is
+# checked separately by ``/availability`` and by each job submission, so a
+# production site without a configured model remains usable for browsing and
+# editing instead of exposing a broken frontend route.
+ENABLED = True
 LEASE_SECONDS = 45 * 60
 MAX_FILE_BYTES = 2 * 1024 * 1024
 PROJECT_POINTS = 20

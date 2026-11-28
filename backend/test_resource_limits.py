@@ -111,7 +111,7 @@ class SharedCapacityTests(unittest.TestCase):
             patch.object(resource_limits, "RESOURCE_DIR", Path(root)),
             patch.object(providers, "provider_budget", ProviderBudget(Path(root))),
             patch.object(providers, "SHARED_MODEL_CONCURRENCY", 1),
-            patch.object(providers, "urlopen", side_effect=response),
+            patch.object(providers, "ark_urlopen", side_effect=response),
             patch.object(providers, "_ark_poll_response", side_effect=poll),
             ThreadPoolExecutor(max_workers=2) as callers,
         ):

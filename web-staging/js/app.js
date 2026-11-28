@@ -747,7 +747,7 @@
         ${item("home", "#/workspace", "▦", "工作台首页")}
         <button class="studio-nav-item" type="button" data-action="create-standard"><span aria-hidden="true">▣</span>视频转剧本</button>
         <button class="studio-nav-item" type="button" data-action="create-multilingual"><span aria-hidden="true">文</span>多语言剧本</button>
-        <button class="studio-nav-item" type="button" data-action="show-coming-soon"><span aria-hidden="true">✣</span>剧本优化改编</button>
+        <button class="studio-nav-item" type="button" data-action="open-adaptation"><span aria-hidden="true">✣</span>剧本优化改编</button>
         <span class="studio-nav-divider" aria-hidden="true"></span>
         ${item("tasks", "#/tasks", "☷", "全部任务")}
       </nav>
@@ -802,7 +802,7 @@
     <div class="studio-tool-grid" aria-label="创作工具">
       <article class="studio-tool-card standard"><div class="studio-tool-top"><span class="studio-tool-icon">▣</span><b>常用</b></div><h2>视频转剧本</h2><p>上传视频，自动整理台词、人物、场景和动作，生成标准镜头剧本。</p><button type="button" data-action="create-standard">开始转换 <span>→</span></button></article>
       <article class="studio-tool-card multilingual"><div class="studio-tool-top"><span class="studio-tool-icon">文</span><b>NEW</b></div><h2>多语言视频转剧本</h2><p>识别原始语言，输出中文、英文或中英双语剧本，人物与台词保持一致。</p><button type="button" data-action="create-multilingual">创建多语言任务 <span>→</span></button></article>
-      <article class="studio-tool-card adaptation"><div class="studio-tool-top"><span class="studio-tool-icon">✣</span><b>${state.adaptationEnabled ? "测试版" : "创作引擎筹备中"}</b></div><h2>剧本优化改编</h2><p>${state.adaptationEnabled ? "从平台剧本或上传稿开始，试改一场，确认大纲后逐集写。" : "节奏重塑、台词润色与多版本改编能力，正在精心打磨。"}</p><button type="button" data-action="show-coming-soon">${state.adaptationEnabled ? "开始改编" : "了解功能"} <span>→</span></button></article>
+      <article class="studio-tool-card adaptation"><div class="studio-tool-top"><span class="studio-tool-icon">✣</span><b>新创作工具</b></div><h2>剧本优化改编</h2><p>从原稿分析到试改、大纲和分集正文，逐步完成一部可执行的新剧本。</p><button type="button" data-action="open-adaptation">进入改编工作台 <span>→</span></button></article>
     </div>
     <section class="studio-recent-panel ${state.listLoading ? "is-loading" : ""}" aria-busy="${state.listLoading}">
       <div class="studio-recent-head"><div><h2>最近任务</h2><p>不同创作功能的任务统一管理</p></div><div class="studio-recent-filter" role="group" aria-label="最近任务状态"><button class="${state.homeStatus === "all" ? "active" : ""}" data-action="home-filter" data-status="all" aria-pressed="${state.homeStatus === "all"}">全部</button><button class="${state.homeStatus === "running" ? "active" : ""}" data-action="home-filter" data-status="running" aria-pressed="${state.homeStatus === "running"}">进行中</button><button class="${state.homeStatus === "done" ? "active" : ""}" data-action="home-filter" data-status="done" aria-pressed="${state.homeStatus === "done"}">已完成</button><a href="#/tasks" aria-label="查看全部任务">⌕</a></div></div>
@@ -1427,7 +1427,7 @@
       const availability = await state.adaptationCheck;
       if (!availability) state.adaptationCheck = null;
       state.adaptationEnabled = availability?.enabled === true;
-      window.AdaptationStudio.setAvailability(availability);
+      window.AdaptationStudio.setAvailability(availability || { enabled: true, ready: false });
       window.AdaptationStudio.setBalanceRefresh(refreshAccountBalance);
     }
     parseHash();
@@ -1892,6 +1892,7 @@
       openCreateModal(action === "create-multilingual" ? "multilingual" : "standard");
       return;
     }
+    if (action === "open-adaptation") { go("adaptation"); return; }
     if (action === "show-coming-soon") {
       if (state.adaptationEnabled) go("adaptation");
       else openComingSoonModal();
