@@ -25,7 +25,7 @@ const previewProject = {
   title: "账册疑云",
   revision: 1,
   episodeCount: 1,
-  sources: [{ id: "scene-1", label: "第一场", text: "内景：账房\n沈砚查验账册。" }],
+  sources: [{ id: "scene-1", label: "第五集第一场", text: "5-1 日 内 账房\n\n出场人物：沈砚\n\n沈砚查验账册。" }],
   warnings: [],
   billing: { projectPoints: 20, episodePoints: 20, rewritePoints: 8 },
   preview: {
@@ -107,8 +107,19 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "js/adaptation.js"), "utf8"
   await context.window.AdaptationStudio.open("pilot", value => value);
   assert.match(main.innerHTML, /对照试改/);
   assert.match(main.innerHTML, /出场人物：沈砚/);
+  assert.match(main.innerHTML, /5-1 日 内 账房\n\n出场人物：沈砚\n\n沈砚：账目有误。/);
   assert.match(main.innerHTML, /人物介绍/);
   assert.match(main.innerHTML, /户部账房/);
   assert.match(main.innerHTML, /精于查账，追查账册下落。/);
+  previewProject.preview.scene.setting = "夜 外 河边";
+  await context.window.AdaptationStudio.open("pilot");
+  assert.match(main.innerHTML, /5-1 夜 外 河边\n\n出场人物：沈砚/);
+  previewProject.preview.scene.setting = "外景：河边（夜）";
+  await context.window.AdaptationStudio.open("pilot");
+  assert.match(main.innerHTML, /5-1 夜 外 河边\n\n出场人物：沈砚/);
+  previewProject.sources[0].text = "沈砚在河边查验账册。";
+  previewProject.preview.scene.setting = "河边";
+  await context.window.AdaptationStudio.open("pilot");
+  assert.match(main.innerHTML, /1-1 时间待定 内外景待定 河边/);
   console.log("Adaptation project list checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

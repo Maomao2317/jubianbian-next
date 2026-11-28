@@ -472,9 +472,7 @@
           const rows = categories.filter(item => item.kind === kind);
           const charged = rows.reduce((sum, item) => sum + Number(item.credits_charged || 0), 0);
           const cost = rows.reduce((sum, item) => sum + Number(item.api_cost_rmb || 0), 0);
-          const pending = rows.some(item => item.unpriced_jobs);
-          const estimated = rows.some(item => item.estimated_jobs);
-          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong>API 使用成本 ${estimated ? "估算 " : ""}¥${cost.toFixed(4)}</strong><small>用户使用 ${charged.toFixed(1)} 积分 · 折合 ¥${(charged / POINTS_PER_YUAN).toFixed(2)}</small>${pending ? "<small>部分成本待计价</small>" : ""}</article>`;
+          return `<article class="adapt-admin-category"><span>${escapeHtml(adaptationKinds[kind])}</span><strong><span>API成本</span> ¥${cost.toFixed(4)}</strong><small>用户使用 ${charged.toFixed(1)} 积分 · 折合 ¥${(charged / POINTS_PER_YUAN).toFixed(2)}</small></article>`;
         }).join("");
         body += `<div class="admin-panel adapt-admin-panel"><div class="admin-panel-head"><div><h2>剧本改编任务</h2><p>按操作环节汇总用户积分和 API 使用成本；下方每集汇总正文、审稿和历史改稿。</p></div><span>${adaptations.total} 集</span></div>
           <div class="admin-stats adapt-admin-stats"><article><span>用户使用积分</span><strong>${totalCredits.toFixed(1)} 积分</strong><small>折合 ¥${(totalCredits / POINTS_PER_YUAN).toFixed(2)}（按 12.8 积分折合 1 元）</small></article><article><span>API 使用成本</span><strong>¥${knownCost.toFixed(4)}</strong><small>${unpriced ? "包含待计价项目" : "按已记录用量汇总，含失败调用成本"}</small></article></div>

@@ -44,12 +44,15 @@
   function renderList(items, formatUpdatedAt) {
     listDateFormatter = formatUpdatedAt || (value => value);
     main().innerHTML = layout("剧本改编", "从已有剧本开始，先试改一场，再确认大纲和分集正文。", `
-      ${mobileReadOnly() ? '<p class="adapt-readonly">手机端支持浏览改编项目，编辑和生成请使用电脑。</p>' : '<div class="adapt-toolbar"><a class="primary-btn" href="#/adaptation/new">上传剧本</a><a class="secondary-btn" href="#/tasks">从平台任务选择</a></div>'}
-      <div class="adapt-panel"><div class="adapt-project-heading"><h2>我的改编项目</h2><span>${items.length} 个项目</span></div>
-        <label class="adapt-project-filter">筛选项目<input type="search" data-adapt-project-filter value="${esc(projectFilter)}" placeholder="输入项目标题" aria-label="按项目标题筛选" autocomplete="off"></label>
+      <div class="adapt-library-intro"><div><span class="adapt-library-kicker">让故事有新的可能</span><h2>从一份原稿，开始新的创作</h2><p>整理方向、打磨人物，让每一集的故事逐步成形。</p></div>
+        ${mobileReadOnly() ? '<p class="adapt-readonly">手机端支持浏览项目，编辑和生成请使用电脑。</p>' : '<div class="adapt-toolbar"><a class="primary-btn" href="#/adaptation/new"><span aria-hidden="true">＋</span> 新建改编项目</a><a class="secondary-btn" href="#/tasks">从平台剧本开始 <span aria-hidden="true">↗</span></a></div>'}</div>
+      <div class="adapt-panel adapt-library"><div class="adapt-library-tools"><div class="adapt-project-heading"><h2>我的改编项目</h2><span>${items.length} 个项目</span></div>
+        <label class="adapt-project-filter"><span aria-hidden="true">⌕</span><input type="search" data-adapt-project-filter value="${esc(projectFilter)}" placeholder="搜索项目标题" aria-label="按项目标题筛选" autocomplete="off"></label></div>
         ${items.length ? `<ul class="adapt-projects">${items.map(item => `
-        <li data-adapt-project-row data-project-title="${esc(item.title)}"><a href="#/adaptation/${encodeURIComponent(item.id)}">${esc(item.title)}</a><time datetime="${esc(item.updatedAt)}">${esc(listDateFormatter(item.updatedAt))}</time>
-          ${mobileReadOnly() ? "" : `<button type="button" class="adapt-project-delete" data-adapt-project-delete="${esc(item.id)}" data-project-title="${esc(item.title)}" aria-label="删除项目：${esc(item.title)}" title="删除项目">删除</button>`}</li>`).join("")}</ul><p class="adapt-filter-empty" data-adapt-filter-empty role="status" hidden>没有找到匹配的项目。</p>` : "<p>还没有改编项目。</p>"}</div>`, true);
+        <li class="adapt-project-card" data-adapt-project-row data-project-title="${esc(item.title)}"><div class="adapt-project-card-top"><span class="adapt-project-mark" aria-hidden="true">稿</span><span class="adapt-project-kind">剧本改编</span>
+          ${mobileReadOnly() ? "" : `<button type="button" class="adapt-project-delete" data-adapt-project-delete="${esc(item.id)}" data-project-title="${esc(item.title)}" aria-label="删除项目：${esc(item.title)}" title="删除项目">删除</button>`}</div>
+          <a class="adapt-project-link" href="#/adaptation/${encodeURIComponent(item.id)}"><h3>${esc(item.title)}</h3><span>${mobileReadOnly() ? "查看项目" : "继续创作"} <span aria-hidden="true">→</span></span></a>
+          <div class="adapt-project-updated"><span>最近更新</span><time datetime="${esc(item.updatedAt)}">${esc(listDateFormatter(item.updatedAt))}</time></div></li>`).join("")}</ul><p class="adapt-filter-empty" data-adapt-filter-empty role="status" hidden>没有找到匹配的项目。</p>` : '<div class="adapt-library-empty"><span aria-hidden="true">稿</span><h3>你的下一个故事，从这里开始</h3><p>导入一份剧本，或选择平台里已有的出稿，建立第一个改编项目。</p></div>'}</div>`, true);
     filterProjectList(projectFilter);
   }
   function filterProjectList(keyword) {
@@ -81,11 +84,34 @@
         <button class="primary-btn" type="submit">开始改编项目</button>
       </form>`);
   }
-  function screenplay(scenes, cast, episode, includeCast = false) {
+  function screenplaySetting(value, original = "") {
+    const parse = text => {
+      let place = String(text || "").replace(/^\s*(?:#{1,6}\s*)?\d+[-－]\d+\s*/, "").trim();
+      let time = "", space = "";
+      const standard = place.match(/^(日|夜|晨|昏|清晨|黄昏|傍晚|时间待定)\s+(内|外|内外)\s+(.+)$/);
+      if (standard) return { time: standard[1], space: standard[2], place: standard[3] };
+      place = place.replace(/(?:^|[\s（(，,·/])(?:内景|外景|内外景)(?=$|[\s）):：，,·/])/g, match => {
+        space = match.includes("内外") ? "内外" : match.includes("内") ? "内" : "外";
+        return " ";
+      }).replace(/^[：:\s]+/, "");
+      place = place.replace(/(?:^|[\s（(，,·/])(白天|日间|夜晚|夜间|清晨|黄昏|傍晚|日|夜)(?=$|[\s）)，,·/])/g, (_match, found) => {
+        time = /白天|日间/.test(found) ? "日" : /夜晚|夜间/.test(found) ? "夜" : found;
+        return " ";
+      }).replace(/[（）()]/g, " ").replace(/\s+/g, " ").trim();
+      return { time, space, place };
+    };
+    const setting = parse(value), source = parse(original);
+    return [setting.time || source.time || "时间待定", setting.space || source.space || "内外景待定", setting.place || source.place].filter(Boolean).join(" ");
+  }
+  function screenplay(scenes, cast, episode, includeCast = false, source = null) {
     const names = new Map(cast.map(item => [item.id, item.name]));
-    return scenes.map((scene, index) => [`${episode}-${index + 1} ${scene.setting}`,
-      ...(includeCast && cast.length ? [`出场人物：${cast.map(item => item.name).join("、")}`] : []),
-      ...scene.blocks.map(block => block.speaker_id ? `${names.get(block.speaker_id)}：${block.text}` : `△ ${block.text}`)].join("\n")).join("\n\n");
+    const sourceHeading = source?.text.match(/^\s*(?:#{1,6}\s*)?(\d+[-－]\d+)\s+([^\n]+)/m);
+    return scenes.map((scene, index) => {
+      const number = includeCast && sourceHeading ? sourceHeading[1].replace("－", "-") : `${episode}-${index + 1}`;
+      const heading = `${number} ${includeCast ? screenplaySetting(scene.setting, sourceHeading?.[2]) : scene.setting}`;
+      const body = scene.blocks.map(block => block.speaker_id ? `${names.get(block.speaker_id)}：${block.text}` : `△ ${block.text}`).join("\n");
+      return includeCast ? [heading, `出场人物：${cast.map(item => item.name).join("、")}`, body].join("\n\n") : [heading, body].join("\n");
+    }).join("\n\n");
   }
   function currentSource() {
     return project.sources.find(item => item.id === selected)
@@ -166,8 +192,8 @@
     if (!preview) return "";
     const original = p.sources.find(item => item.id === preview.source_id);
     return `<section class="adapt-panel" id="adapt-preview"><div class="adapt-section-heading"><span class="adapt-step">03</span><div><h2 tabindex="-1">对照试改</h2><p>检查人物、语气和关键情节是否符合你想要的方向。</p></div></div>${renderPreviewCast(preview.cast)}<div class="adapt-columns">
-      <div><h3>原稿 · ${esc(original.label)}</h3><pre>${esc(original.text)}</pre></div>
-      <div><h3>试改稿</h3><pre>${esc(screenplay([preview.scene], preview.cast, 1, true))}</pre></div>
+      <div class="adapt-script-column"><h3>原稿 <span>${esc(original.label)}</span></h3><pre>${esc(original.text)}</pre></div>
+      <div class="adapt-script-column is-adapted"><h3>试改稿 <span>改编后</span></h3><pre>${esc(screenplay([preview.scene], preview.cast, 1, true, original))}</pre></div>
       </div><ul>${preview.decisions.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
       ${preview.questions.length ? `<div class="adapt-warnings"><strong>建议确认</strong><ul>${preview.questions.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
       ${p.confirmed ? "" : `<label class="adapt-label">补充改编要求（选填）<textarea id="adapt-plan-notes" rows="2" maxlength="1000" placeholder="说明试改里哪些改法要保留或调整">${esc(planNotes)}</textarea></label>
@@ -200,7 +226,7 @@
   function renderPlan(p) {
     const plan = p.plan;
     if (!plan) return "";
-    return `<section class="adapt-panel"><div class="adapt-section-heading"><span class="adapt-step">04</span><div><h2>确认分集大纲</h2><p>可以调整人物、冲突、集尾悬念和必须保留的台词。</p></div></div>
+    return `<section class="adapt-panel adapt-plan-panel"><div class="adapt-section-heading"><span class="adapt-step">04</span><div><h2>确认分集大纲</h2><p>可以调整人物、冲突、集尾悬念和必须保留的台词。</p></div></div>
       <form class="adapt-form" data-adapt-form="plan">
         <label>新剧名 <input name="title" value="${esc(plan.title)}" maxlength="100" required></label>
         <label>全剧梗概 <textarea name="premise" rows="4" maxlength="1100" required>${esc(plan.premise)}</textarea></label>
@@ -212,9 +238,9 @@
             <label>人物关系 <textarea name="character_relationships" maxlength="300" rows="2">${esc(c.relationships)}</textarea></label>
             <label>目标与冲突 <textarea name="character_motivation" maxlength="300" rows="2">${esc(c.motivation)}</textarea></label></div>`).join("")}</div></details>
         <details open><summary>分集大纲 · ${p.episodeCount} 集</summary><div class="adapt-outlines">${plan.episodes.map(e => `
-          <div class="adapt-outline" data-episode="${e.number}"><h3>第 ${e.number} 集</h3>
-            <label>冲突与转折 <textarea name="beats" rows="3" maxlength="500" required>${esc(e.beats)}</textarea></label>
-            <label>集尾悬念 <input name="hook" maxlength="200" value="${esc(e.hook)}" required></label>
+          <div class="adapt-outline" data-episode="${e.number}"><h3><span>EPISODE ${String(e.number).padStart(2, "0")}</span>第 ${e.number} 集</h3>
+            <label class="adapt-outline-beats">冲突与转折 <textarea name="beats" rows="5" maxlength="500" required>${esc(e.beats)}</textarea></label>
+            <label class="adapt-outline-hook">集尾悬念 <textarea name="hook" rows="2" maxlength="200" required>${esc(e.hook)}</textarea></label>
             <p class="adapt-note">原稿参考 · ${esc(e.source_ids.map(id => p.sources.find(item => item.id === id)?.label).join("、"))}</p>
           </div>`).join("")}</div></details>
         <details ${p.locks.length ? "open" : ""}><summary>必须逐字保留的台词</summary>

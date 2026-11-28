@@ -39,6 +39,9 @@ const api = {
   getAdminRecharges: async query => { calls.push(query); return { total: 25, summary: summary(query.entry_type), items: [
     { entry_type: "consume", points_amount: -10, balance_after: 90, reason: "test", created_at: "2026-10-27" },
   ] }; },
+  getAdminAdaptations: async () => ({ total: 0, items: [], categories: [
+    { kind: "analyze", credits_charged: 20, api_cost_rmb: 0.1234, estimated_jobs: 1, unpriced_jobs: 1 },
+  ] }),
   controlAdminTaskGroup: async (id, action) => {
     controls.push({ id, action });
     pausedCount = action === "pause" ? 1 : 0;
@@ -156,5 +159,14 @@ const click = async (action, extra = {}) => {
   await click("admin-user-reset");
   assert.equal(userCalls.at(-1).keyword, "");
   assert.match(ui.adminUserIdentity({ email: "orphan@example.test" }), /未命名用户.*orphan@example.test/);
+  ui.state.adminTab = "adaptations";
+  await ui.renderAdmin();
+  const steps = [...node("#main").innerHTML.matchAll(/<article class="adapt-admin-category">(.*?)<\/article>/gs)].map(match => match[1]);
+  assert.equal(steps.length, 6);
+  for (const step of steps) {
+    assert.match(step, /API成本/);
+    assert.doesNotMatch(step, /估算|待计价|API 使用成本/);
+  }
+  assert.match(steps.join(""), /¥0\.1234/);
   console.log("Admin ledger and console identity, filtering, pagination and refresh passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });
